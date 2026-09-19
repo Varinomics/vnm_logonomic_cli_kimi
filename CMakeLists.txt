@@ -141,6 +141,13 @@ add_test(NAME kimi_usage_tests COMMAND kimi_usage_tests)
 add_test(NAME kimi_package_validation COMMAND logonomic_cli_addon_validate "${KIMI_PACKAGE_DIRECTORY}" --platform "${KIMI_PLATFORM}")
 add_test(NAME kimi_package_conformance COMMAND logonomic_cli_addon_conformance "${KIMI_PACKAGE_DIRECTORY}")
 set_tests_properties(kimi_contract_tests kimi_usage_tests kimi_package_validation kimi_package_conformance PROPERTIES TIMEOUT 120)
+add_executable(kimi_usage_cache_tests tests/kimi_usage_cache_tests.cpp)
+target_link_libraries(kimi_usage_cache_tests PRIVATE kimi_provider)
+kimi_target(kimi_usage_cache_tests)
+add_dependencies(kimi_usage_cache_tests kimi_package)
+add_test(NAME kimi_usage_cache_tests
+    COMMAND kimi_usage_cache_tests "${KIMI_PACKAGE_DIRECTORY}")
+set_tests_properties(kimi_usage_cache_tests PROPERTIES TIMEOUT 180 LABELS "usage;cache;packaged-adapter")
 logonomic_cli_addon_install_package("${KIMI_PACKAGE_DIRECTORY}" logonomic.cli.kimi)
 
 add_executable(kimi_acp_causal_tests tests/kimi_acp_causal_tests.cpp)
