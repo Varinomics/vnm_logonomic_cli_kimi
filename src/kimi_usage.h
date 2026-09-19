@@ -14,7 +14,8 @@ std::vector<logonomic::cli_addon::Usage_record> scan_usage(
     const std::filesystem::path& storage,
     std::string_view mode,
     const std::optional<logonomic::cli_addon::Usage_native_file_cache>& seed,
-    logonomic::cli_addon::Invocation_context& context);
+    logonomic::cli_addon::Invocation_context& context,
+    const logonomic::cli_addon::Usage_cache_selection* selection = nullptr);
 void handle_usage(logonomic::cli_addon::Invocation_context& context);
 
 } // namespace kimi

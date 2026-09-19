@@ -54,10 +54,25 @@ struct Snapshot
     addon::Observation_scope scope;
     std::vector<addon::Usage_record> records;
     std::uint64_t touched_ms = 0;
+    std::optional<addon::Usage_cache_reference> cache_candidate;
 };
 
 std::mutex s_mutex;
 std::map<std::string, Snapshot> s_snapshots;
+
+fs::path cache_io_path(const fs::path& path)
+{
+#ifdef _WIN32
+    // Cache descendants can exceed MAX_PATH in account-scoped storage.
+    // Keep the extended spelling local to I/O, never account or wire identity.
+    auto native = fs::absolute(path).lexically_normal().make_preferred().native();
+    if (native.starts_with(L"\\\\?\\")) return fs::path(native);
+    if (native.starts_with(L"\\\\")) return fs::path(L"\\\\?\\UNC\\" + native.substr(2));
+    return fs::path(L"\\\\?\\" + native);
+#else
+    return path;
+#endif
+}
 
 void check_cancel(addon::Invocation_context& context)
 {
@@ -466,7 +481,8 @@ void store_cache(const fs::path& destination, const Json& value)
 } // namespace
 
 std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::path& storage,
-    std::string_view mode, const std::optional<addon::Usage_native_file_cache>& seed, addon::Invocation_context& context)
+    std::string_view mode, const std::optional<addon::Usage_native_file_cache>& seed,
+    addon::Invocation_context& context, const addon::Usage_cache_selection* selection)
 {
     if (!fs::is_directory(profile)) throw std::runtime_error("usage_profile_unavailable");
     const auto sessions_directory = profile / "sessions";
@@ -474,14 +490,19 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
     if (sessions_present && !fs::is_directory(sessions_directory)) throw std::runtime_error("usage_sessions_not_directory");
     if (!storage.is_absolute() || !fs::is_directory(storage)) throw std::runtime_error("usage_storage_unavailable");
     const auto owner = account_key(profile);
-    const auto destination = storage / (owner + "-usage-v1.json");
+    const auto destination = cache_io_path(selection
+        ? addon::path_from_utf8(selection->candidate_root) / "files.json"
+        : storage / (owner + "-usage-v1.json"));
+    const auto input_file = selection && selection->accepted
+        ? cache_io_path(addon::path_from_utf8(selection->accepted->root) / "files.json")
+        : destination;
     std::map<std::string, File_record> files;
     std::set<std::string> receipts;
     std::uint64_t budget = 0;
-    if (mode != "reset" && fs::exists(destination)) {
-        addon::Directory_package_source source(storage);
+    if (mode != "reset" && fs::exists(input_file)) {
+        addon::Directory_package_source source(input_file.parent_path());
         addon::Source_error source_error;
-        const auto bytes = source.read(path_string(destination.filename()), k_max_bytes, &source_error);
+        const auto bytes = source.read(path_string(input_file.filename()), k_max_bytes, &source_error);
         addon::Json_parse_limits limits;
         limits.max_bytes = k_max_bytes;
         const auto cache = bytes ? addon::parse_json(*bytes, limits, nullptr) : std::nullopt;
@@ -645,13 +666,46 @@ void handle_usage(addon::Invocation_context& context)
 {
     if (context.request().operation != "scan") { context.reject_unknown_operation(); return; }
     addon::Contract_failure failure;
-    const auto input = addon::decode_usage_scan_request(context.request().payload, &failure, 2);
+    const auto version = context.request().capability.version;
+    const auto input = addon::decode_usage_scan_request(context.request().payload, &failure, version);
     if (!input) { context.fail(addon::Result_status::FAILED, failure.reason_code); return; }
     if (!input->context.profile_storage) throw std::runtime_error("usage_storage_unavailable");
     const auto profile = profile_for_context(input->context);
     const auto storage = addon::path_from_utf8(input->context.profile_storage->root);
-    const auto owner = account_key(profile) + ":" + path_string(storage) + ":" +
+    auto owner = account_key(profile) + ":" + path_string(storage) + ":" +
         (input->native_file_cache ? input->native_file_cache->sha256_hex : std::string{});
+    if (version == 3) {
+        auto identity = *input;
+        identity.snapshot_id.reset();
+        identity.cursor.reset();
+        owner = addon::to_hex(addon::Sha256::digest(
+            addon::serialize_json_canonical(addon::encode_usage_scan_request(identity, 3))));
+        const auto& selection = *input->cache_selection;
+        if (!addon::validate_usage_cache_root(selection.candidate_root, path_string(storage), &failure)) {
+            throw std::runtime_error(failure.reason_code);
+        }
+        const auto outside_mutable = [&](const std::string& selected) {
+            const auto mutable_path = storage / (account_key(profile) + "-usage-v1.json");
+            for (auto path = addon::path_from_utf8(selected); path.has_relative_path(); path = path.parent_path()) {
+                std::error_code error;
+                if (fs::equivalent(path, mutable_path, error)) {
+                    return false;
+                }
+            }
+            const auto relative = addon::path_from_utf8(selected).lexically_relative(storage);
+            auto name = path_string(*relative.begin());
+#ifdef _WIN32
+            name = addon::ascii_lowercase(name);
+#endif
+            return !name.ends_with("-usage-v1.json") &&
+                !(name.starts_with("usage-") && name.ends_with(".tmp"));
+        };
+        if (!outside_mutable(selection.candidate_root) ||
+            (selection.accepted && !outside_mutable(selection.accepted->root)))
+        {
+            throw std::runtime_error("usage_cache_namespace_conflict");
+        }
+    }
     std::lock_guard lock(s_mutex);
     check_cancel(context);
     std::erase_if(s_snapshots, [](const auto& entry) { return now_ms() - entry.second.touched_ms > 600000; });
@@ -661,12 +715,38 @@ void handle_usage(addon::Invocation_context& context)
         if (s_snapshots.size() >= 8) throw std::runtime_error("usage_snapshot_capacity");
         Snapshot snapshot;
         snapshot.owner = owner;
-        snapshot.records = scan_usage(profile, storage, input->mode, input->native_file_cache, context);
+        if (version == 3) {
+            const auto& selection = *input->cache_selection;
+            if (!addon::validate_usage_cache_allocation(selection.candidate_root, path_string(storage), &failure)) {
+                throw std::runtime_error(failure.reason_code);
+            }
+            if (selection.accepted) {
+                const auto manifest = addon::validate_usage_cache_candidate(
+                    *selection.accepted, path_string(storage), input->context.account_context,
+                    [&context] { return context.cancel_requested(); }, &failure);
+                if (!manifest) throw std::runtime_error(failure.reason_code);
+                if (manifest->format != "kimi-wire-cache@1" || manifest->files.size() != 1 ||
+                    manifest->files.front().path != "files.json")
+                {
+                    throw std::runtime_error("usage_cache_format_unsupported");
+                }
+            }
+        }
+        snapshot.records = scan_usage(profile, storage, input->mode, input->native_file_cache, context,
+            input->cache_selection ? &*input->cache_selection : nullptr);
         snapshot.scope.observed_at_ms = now_ms();
         snapshot.scope.fresh_for_ms = 60000;
         if (input->context.account_context) snapshot.scope.source_account_key = input->context.account_context->adapter_account_key;
         snapshot.touched_ms = now_ms();
         snapshot_id = addon::random_nonce_hex();
+        if (version == 3) {
+            // A surviving wire log can be only a subset of a session's events.
+            for (auto& record : snapshot.records) record.aggregate_evidence = "partial";
+            snapshot.cache_candidate = addon::seal_usage_cache_candidate(
+                input->cache_selection->candidate_root, path_string(storage), input->context.account_context,
+                snapshot_id, "kimi-wire-cache@1", [&context] { return context.cancel_requested(); }, &failure);
+            if (!snapshot.cache_candidate) throw std::runtime_error(failure.reason_code);
+        }
         s_snapshots.emplace(snapshot_id, std::move(snapshot));
     }
     else {
@@ -684,12 +764,13 @@ void handle_usage(addon::Invocation_context& context)
     page.incomplete_historical_coverage = true;
     page.scope = snapshot.scope;
     page.snapshot_id = snapshot_id;
+    page.cache_candidate = snapshot.cache_candidate;
     const auto limit = std::min(begin + addon::k_max_usage_page_records, snapshot.records.size());
     auto end = begin;
     while (end < limit) {
         page.records.push_back(snapshot.records[end]);
         page.next_cursor = std::to_string(end + 1);
-        if (addon::serialize_json(addon::encode_usage_scan_result(page, 2)).size() >
+        if (addon::serialize_json(addon::encode_usage_scan_result(page, version)).size() >
             addon::limits::k_max_frame_bytes - 65536)
         {
             page.records.pop_back();
@@ -701,7 +782,7 @@ void handle_usage(addon::Invocation_context& context)
     page.complete = end == snapshot.records.size();
     if (!page.complete) page.next_cursor = std::to_string(end);
     else { page.next_cursor.reset(); s_snapshots.erase(found); }
-    context.succeed(addon::encode_usage_scan_result(page, 2));
+    context.succeed(addon::encode_usage_scan_result(page, version));
 }
 
 } // namespace kimi

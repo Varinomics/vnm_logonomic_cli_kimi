@@ -129,7 +129,7 @@ int main()
         {"launch-preparation", 3}, {"structured-session", 2}, {"delegated-session", 2},
         {"interactive-resume", 2}, {"quota", 2}, {"lifecycle-events", 2},
         {"helper-ingress", 2}, {"coordination-delivery", 1}, {"legacy-state-import", 1},
-        {"accounts", 2}, {"usage-scan", 2}, {"managed-configuration", 1},
+        {"accounts", 2}, {"usage-scan", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
     };
     kimi::Lifecycle_observer observer;
     addon::Adapter_runtime runtime(std::move(options));
