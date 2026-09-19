@@ -1,0 +1,9 @@
+{
+  "capability_id": "managed-configuration",
+  "version": 1,
+  "payload": {
+    "environment_name": "KIMI_CODE_HOME",
+    "relative_path": "config.toml",
+    "default_home_relative_path": ".kimi-code"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "capability_id": "accounts",
+  "version": 2,
+  "payload": {
+    "environment_names": [
+      "KIMI_CODE_HOME",
+      "HOME",
+      "USERPROFILE",
+      "PATH",
+      "SystemRoot",
+      "WINDIR",
+      "TEMP",
+      "TMP"
+    ]
+  }
+}

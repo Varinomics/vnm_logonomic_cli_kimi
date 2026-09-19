@@ -1,0 +1,22 @@
+{
+  "provider": "Kimi Code",
+  "reviewed_on": "2026-09-12",
+  "native_behavior_oracles": [
+    "Logonomic src/logonomic_kimi_cli_provider.cpp",
+    "Logonomic src/logonomic_kimi_quota_probe.cpp",
+    "Logonomic src/logonomic_manager.cpp Kimi wire lifecycle",
+    "Logonomic src/logonomic_launcher_service.cpp Kimi accounts and usage"
+  ],
+  "primary_sources": [
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/overrides",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars",
+    "https://github.com/MoonshotAI/kimi-code/blob/main/apps/kimi-code/src/cli/commands.ts",
+    "https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core-v2/src/app/config/configService.ts"
+  ],
+  "compatibility": "Observe required native behaviors; ACP minimum 0.39.1 has no upper version fence. The separate Python kimi-cli distribution does not establish Kimi Code hook or config semantics.",
+  "icons": {
+    "upstream": "https://github.com/lobehub/lobe-icons",
+    "license": "MIT",
+    "notice": "notices/lobe_icons_mit.txt"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "payload": {
+    "icon": {
+      "dark": "assets/kimi-color.svg",
+      "light": "assets/kimi.svg"
+    },
+    "display_name": "Kimi"
+  },
+  "capability_id": "presentation"
+}

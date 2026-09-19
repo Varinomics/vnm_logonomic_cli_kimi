@@ -1,0 +1,20 @@
+#pragma once
+
+#include <logonomic_cli_addon/adapter_runtime.h>
+#include <logonomic_cli_addon/usage_scan.h>
+
+#include <filesystem>
+#include <string_view>
+#include <vector>
+
+namespace kimi {
+
+std::vector<logonomic::cli_addon::Usage_record> scan_usage(
+    const std::filesystem::path& profile,
+    const std::filesystem::path& storage,
+    std::string_view mode,
+    const std::optional<logonomic::cli_addon::Usage_native_file_cache>& seed,
+    logonomic::cli_addon::Invocation_context& context);
+void handle_usage(logonomic::cli_addon::Invocation_context& context);
+
+} // namespace kimi

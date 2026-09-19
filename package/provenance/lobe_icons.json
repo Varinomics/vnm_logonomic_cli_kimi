@@ -1,0 +1,16 @@
+{
+  "upstream": "https://github.com/lobehub/lobe-icons",
+  "snapshot": "4aaf4ee1fb2678a7f989ea570f0f6ce14a9abf75",
+  "source_path": "packages/static-svg/icons/kimi-color.svg",
+  "source_sha256": "74a7292aeb0220445d14c5d397d75760e2e8c6ed6a9e5fe4f3023471bf62a9ff",
+  "notice": "notices/lobe_icons_mit.txt",
+  "resources": [
+    "assets/kimi-color.svg",
+    "assets/kimi.svg"
+  ],
+  "changes": [
+    "Inherited white and currentColor glyph variants, retaining the blue mark; terminal line ending follows the source repository.",
+    "Removed root browser-layout style flex:none;line-height:1 and replaced root width/height 1em with numeric 24. All viewBox, path and fill data are preserved."
+  ],
+  "provenance_basis": "Logonomic compliance/evidence/LOBE_ICONS_PROVENANCE.md records this snapshot as a reproducible source reference, not the historical import revision."
+}
