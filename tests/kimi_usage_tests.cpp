@@ -6,12 +6,15 @@
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/sha256.h>
 
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
+#include <string>
 
 namespace {
 namespace addon = logonomic::cli_addon;
@@ -31,7 +34,10 @@ public:
     void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
     bool finished() const override { return done; }
     void succeed(addon::Json_value result) override { payload = std::move(result); done = true; }
-    void fail(addon::Result_status, std::string, std::string) override { throw std::runtime_error("unexpected_failure"); }
+    void fail(addon::Result_status, std::string reason, std::string detail) override
+    {
+        throw std::runtime_error(reason + ": " + detail);
+    }
     addon::Invoke_request invocation;
     addon::Json_value payload;
     bool cancelled = false;
@@ -66,6 +72,7 @@ void accounts_contract()
     write(sibling / "credentials" / "kimi-code.json", "{}");
     addon::Accounts_launcher_request request;
     request.launcher.script_body = "kimi";
+    request.launcher.runner_key = addon::k_runner_direct;
 #ifdef _WIN32
     request.launch_environment.platform_id = "windows-x86_64";
 #else
@@ -77,8 +84,10 @@ void accounts_contract()
     Context context;
     context.invocation.operation = "discover";
     context.invocation.payload = addon::encode_accounts_launcher_request(request);
-    kimi::handle_accounts(context);
     addon::Contract_failure failure;
+    require(addon::decode_accounts_launcher_request(context.invocation.payload, &failure).has_value(),
+        "account discovery fixture must satisfy the launcher request contract");
+    kimi::handle_accounts(context);
     const auto accounts = addon::decode_accounts_result(context.payload, &failure);
     require(accounts && accounts->size() == 2 && accounts->front().adapter_account_key == kimi::account_key(selected),
         "frozen selected home and credential-backed siblings retain distinct accounts");
@@ -162,6 +171,71 @@ void scan_contract()
         kimi::canonical_usage_session_id("foreign:Session-A").empty(), "legacy identity converter is provider scoped");
 }
 
+std::int64_t cached_modified_ms(const fs::path& cache)
+{
+    std::ifstream stream(cache, std::ios::binary);
+    require(static_cast<bool>(stream), "usage cache must be readable");
+    const std::string bytes((std::istreambuf_iterator<char>(stream)), {});
+    const auto document = kimi::parse(bytes);
+    require(document.has_value(), "usage cache must remain valid JSON");
+    const auto& files = kimi::member(*document, "files");
+    require(files.is_array() && files.as_array().size() == 1, "fixture must cache exactly one wire file");
+    const auto& modified = kimi::member(files.as_array().front(), "modified_msecs");
+    require(modified.is_integer(), "cached modification time must be integer Unix milliseconds");
+    return modified.as_integer();
+}
+
+void timestamp_cache_identity_contract()
+{
+    Workspace workspace;
+    const auto profile = workspace.path / ".kimi-code";
+    const auto storage = workspace.path / "package-profile";
+    const auto wire    = profile / "sessions" / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
+    const auto cache   = storage / (kimi::account_key(profile) + "-usage-v1.json");
+    fs::create_directories(storage);
+    const std::string original =
+        "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":7}}\n";
+    const std::string replacement =
+        "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":9}}\n";
+    require(original.size() == replacement.size(), "cache identity fixture keeps the file size constant");
+    write(wire, original);
+
+    constexpr std::int64_t k_modified_ms = 1704067200123;
+    const std::chrono::sys_time<std::chrono::milliseconds> modified{std::chrono::milliseconds{k_modified_ms}};
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+    const auto file_modified = std::chrono::clock_cast<fs::file_time_type::clock>(modified);
+#else
+    const auto file_modified = fs::file_time_type::clock::from_sys(modified);
+#endif
+    fs::last_write_time(wire, file_modified);
+    require(fs::last_write_time(wire) == file_modified, "fixture preserves an exact millisecond timestamp");
+    Context context;
+    auto records = kimi::scan_usage(profile, storage, "repair", std::nullopt, context);
+    require(records.size() == 1 && records.front().total_tokens == 7,
+        "initial stable read records the source usage");
+    require(cached_modified_ms(cache) == k_modified_ms,
+        "stable read persists Unix milliseconds without a file-clock epoch shift");
+
+    // Preserving both metadata fields deliberately exercises the cache identity:
+    // a fresh parse would return the replacement's different token total.
+    write(wire, replacement);
+    fs::last_write_time(wire, file_modified);
+    for (int scan = 0; scan < 2; ++scan) {
+        records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+        require(records.size() == 1 && records.front().total_tokens == 7,
+            "equal size and timestamp reuse the retained usage across repeated scans");
+        require(cached_modified_ms(cache) == k_modified_ms,
+            "incremental fingerprint uses the same Unix milliseconds as stable reads");
+    }
+
+    fs::last_write_time(wire, file_modified + std::chrono::seconds{2});
+    records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    require(records.size() == 1 && records.front().total_tokens == 9,
+        "changed timestamp invalidates a same-size file's retained usage");
+    require(cached_modified_ms(cache) == k_modified_ms + 2000,
+        "refreshed fingerprint preserves the exact timestamp change");
+}
+
 void missing_sessions_contract()
 {
     Workspace workspace;
@@ -212,8 +286,15 @@ void missing_sessions_contract()
 
 int main()
 {
-    accounts_contract();
-    scan_contract();
-    missing_sessions_contract();
-    return 0;
+    try {
+        accounts_contract();
+        scan_contract();
+        timestamp_cache_identity_contract();
+        missing_sessions_contract();
+        return 0;
+    }
+    catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
 }

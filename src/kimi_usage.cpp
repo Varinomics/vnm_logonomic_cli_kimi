@@ -70,6 +70,16 @@ std::uint64_t now_ms()
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+std::int64_t file_modified_ms(fs::file_time_type value)
+{
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+    const auto modified = std::chrono::clock_cast<std::chrono::system_clock>(value);
+#else
+    const auto modified = fs::file_time_type::clock::to_sys(value);
+#endif
+    return std::chrono::duration_cast<std::chrono::milliseconds>(modified.time_since_epoch()).count();
+}
+
 void add(std::uint64_t& destination, std::uint64_t value)
 {
     if (value > k_max_exact - destination) throw std::runtime_error("usage_counter_overflow");
@@ -159,8 +169,7 @@ std::optional<std::string> stable_bytes(const fs::path& path, File_record& finge
     const auto after_time = fs::last_write_time(path, error);
     if (error || before_time != after_time) return std::nullopt;
     fingerprint.size = after_size;
-    fingerprint.modified_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        fs::file_time_type::clock::to_sys(after_time).time_since_epoch()).count();
+    fingerprint.modified_ms = file_modified_ms(after_time);
     return bytes;
 }
 
@@ -519,9 +528,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
             const auto size = fs::file_size(path, error);
             if (!error) {
                 const auto modified = fs::last_write_time(path, error);
-                const auto modified_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    fs::file_time_type::clock::to_sys(modified).time_since_epoch()).count();
-                if (!error && found->second.size == size && found->second.modified_ms == modified_ms) {
+                if (!error && found->second.size == size && found->second.modified_ms == file_modified_ms(modified)) {
                     current = found->second;
                     current.cwd = cwd;
                     if (current.usage) attribute(*current.usage, cwd);

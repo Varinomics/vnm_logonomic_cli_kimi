@@ -139,7 +139,9 @@ std::optional<addon::Poll_observations_result> poll(kimi::Lifecycle_observer& ob
     context.m_request.payload = addon::encode_poll_observations_request(request, 2);
     observer.handle(context);
     addon::Contract_failure failure;
-    return context.m_result ? addon::decode_poll_observations_result(*context.m_result, &failure, 2) : std::nullopt;
+    return context.m_result
+        ? addon::decode_poll_observations_result(*context.m_result, request.limit, &failure, 2)
+        : std::nullopt;
 }
 
 void candidates_reclaim_without_tombstones()

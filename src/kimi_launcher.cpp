@@ -780,7 +780,7 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
     const auto output = probe({path_string(*program), resume ? "--help" : "--version"}, environment, working_directory, 10000, context);
     if (!output || before.empty() || before != fingerprint()) return std::nullopt;
     if (resume) {
-        static const std::regex selector(R"((^|\n)[^\n]*--session[ \t]+\[id\]([ \t]|$))");
+        static const std::regex selector(R"((^|\n)[^\n]*--session[ \t]+\[id\]([ \t\r\n]|$))");
         if (!std::regex_search(output->output, selector)) return std::nullopt;
     }
     else {

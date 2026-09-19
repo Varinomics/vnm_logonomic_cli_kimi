@@ -84,6 +84,11 @@ file(GLOB_RECURSE package_files CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/package/notices/*")
+# Directory membership is an input too: removing a resource, or adding one
+# with an older timestamp, must rebuild the indexed package. file(GENERATE)
+# changes this file only when membership changes, preserving no-op builds.
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
+    CONTENT "${package_files}\n")
 add_custom_command(
     OUTPUT "${KIMI_PACKAGE_DIRECTORY}/package.files.json"
     COMMAND "${CMAKE_COMMAND}" -E rm -rf "${KIMI_PACKAGE_DIRECTORY}"
@@ -109,7 +114,7 @@ add_custom_command(
         --third-party "helpers/kimi_helper${CMAKE_EXECUTABLE_SUFFIX}"
             "notices/tomlplusplus-LICENSE.txt" "provenance/tomlplusplus.json"
     DEPENDS kimi_adapter kimi_helper kimi_launch_bridge kimi_quota_probe logonomic_cli_addon_index
-        "${CMAKE_BINARY_DIR}/generated/logonomic-cli-addon.json" ${package_files}
+        "${CMAKE_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
         "${kimi_toml_source}/LICENSE"
     VERBATIM)
 add_custom_target(kimi_package ALL DEPENDS "${KIMI_PACKAGE_DIRECTORY}/package.files.json")
@@ -137,3 +142,36 @@ add_test(NAME kimi_package_validation COMMAND logonomic_cli_addon_validate "${KI
 add_test(NAME kimi_package_conformance COMMAND logonomic_cli_addon_conformance "${KIMI_PACKAGE_DIRECTORY}")
 set_tests_properties(kimi_contract_tests kimi_usage_tests kimi_package_validation kimi_package_conformance PROPERTIES TIMEOUT 120)
 logonomic_cli_addon_install_package("${KIMI_PACKAGE_DIRECTORY}" logonomic.cli.kimi)
+
+add_executable(kimi_acp_causal_tests tests/kimi_acp_causal_tests.cpp)
+target_link_libraries(kimi_acp_causal_tests PRIVATE kimi_provider)
+kimi_target(kimi_acp_causal_tests)
+add_test(NAME kimi_acp_causal_tests COMMAND kimi_acp_causal_tests)
+set_tests_properties(kimi_acp_causal_tests PROPERTIES TIMEOUT 120 LABELS "addon;protocol;causality")
+
+# Exercise this repository's actual producer, never a substitute packaging
+# implementation. The isolated nested configure uses this same SDK source;
+# it does not change the owned master dependency or edit an installed package.
+option(LOGONOMIC_CLI_ADDON_RECIPE_TESTS
+    "Register isolated package rebuild regressions (requires Python 3)" OFF)
+if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    get_target_property(_membership_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
+    get_filename_component(_membership_toml_source "${kimi_toml_source}" ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME kimi_package_membership
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_membership_tests.py"
+            "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--sdk=${_membership_sdk_source}"
+            "--tomlplusplus-source=${_membership_toml_source}"
+            "--cmake=${CMAKE_COMMAND}" "--target=kimi_package" "--package-id=logonomic.cli.kimi"
+            "--generator=${CMAKE_GENERATOR}" "--config=$<CONFIG>" "--build-type=${CMAKE_BUILD_TYPE}"
+            "--generator-platform=${CMAKE_GENERATOR_PLATFORM}" "--toolset=${CMAKE_GENERATOR_TOOLSET}"
+            "--toolchain=${CMAKE_TOOLCHAIN_FILE}" "--compiler=${CMAKE_CXX_COMPILER}"
+            "--make-program=${CMAKE_MAKE_PROGRAM}" "--prefix-path=${CMAKE_PREFIX_PATH}"
+            "--validator=$<TARGET_FILE:logonomic_cli_addon_validate>" "--platform=${KIMI_PLATFORM}")
+    set_tests_properties(kimi_package_membership PROPERTIES
+        TIMEOUT 1800 RESOURCE_LOCK cli_addon_recipe_rebuild LABELS "cli-addon;delivery;recipe;owning-path")
+endif()
+# Contract and recipe tests must not be confused with real native qualification.
+get_directory_property(_provider_tests TESTS)
+set_property(TEST ${_provider_tests} APPEND PROPERTY LABELS "cli-addon;provider-contract")

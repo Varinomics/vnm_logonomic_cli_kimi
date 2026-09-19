@@ -75,3 +75,15 @@ owns atomic installation and updates.
 
 The application chooses activation. Replacing the built-in Kimi provider removes
 that implementation; this package does not retain a native fallback.
+
+## Structured and delegated sessions
+
+The paired structured-session and delegated-session contracts use version 2.
+An authenticated ACP session/close reply completes inspection and returns the
+answer. This is not evidence of clean native process exit.
+
+Delegated preparation refuses nonempty required control-action lists with
+`required_control_admission_unavailable` before native probes or process
+proposals. Because the host requires nonempty actions, this disables all valid
+host delegation. Interactive launch and resume remain independent. ACP mode
+acknowledgment does not establish native action admission.
