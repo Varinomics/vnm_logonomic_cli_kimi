@@ -765,6 +765,10 @@ void handle_usage(addon::Invocation_context& context)
     page.scope = snapshot.scope;
     page.snapshot_id = snapshot_id;
     page.cache_candidate = snapshot.cache_candidate;
+    if (version == 3) {
+        page.account_context = input->context.account_context;
+        page.profile_storage = input->context.profile_storage;
+    }
     const auto limit = std::min(begin + addon::k_max_usage_page_records, snapshot.records.size());
     auto end = begin;
     while (end < limit) {
