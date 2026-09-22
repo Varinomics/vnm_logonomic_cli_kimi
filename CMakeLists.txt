@@ -92,6 +92,11 @@ kimi_target(kimi_quota_probe)
 if(WIN32)
     target_link_libraries(kimi_quota_probe PRIVATE ws2_32)
 endif()
+if(MINGW)
+    # The probe's Windows entry point is wmain, which MinGW links only with
+    # -municode.
+    target_link_options(kimi_quota_probe PRIVATE -municode)
+endif()
 
 logonomic_cli_addon_package_platform(KIMI_PLATFORM)
 logonomic_cli_addon_package_directory(logonomic.cli.kimi KIMI_PACKAGE_DIRECTORY)
