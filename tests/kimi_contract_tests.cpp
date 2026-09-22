@@ -9,11 +9,14 @@
 #include <logonomic_cli_addon/session_contracts.h>
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
 #include <logonomic_cli_addon/ids.h>
+#include <logonomic_cli_addon/probe_contracts.h>
+#include <logonomic_cli_addon/quota.h>
 
 #include <cstdio>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -352,6 +355,19 @@ void quota()
     const auto response = kimi::normalize_quota(json(R"({"code":0,"data":{"kind":"ok","summary":{"used":50,"limit":200,"window":{"duration":1,"unit":"week"}},"limits":[{"used":125,"limit":100,"window":{"duration":5,"unit":"hour"}}]}})"));
     require(kimi::member(kimi::member(response, "primary"), "used_percent").as_number() == 125, "quota must not clamp over-limit usage");
     require(kimi::member(kimi::member(response, "secondary"), "window_minutes").as_integer() == 10080, "weekly quota normalization");
+    // Oracle: Kimi Code 2.0.2's local oauth/usage reply (shape observed on
+    // 2026-09-22) reports each window under data.quota.usages as a used ratio
+    // with a UTC reset time, and no summary or limits.
+    const auto usages = kimi::normalize_quota(json(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+        "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T17:00:00Z"},
+        "limit7d":{"usedRatio":1.5,"resetAt":"2026-09-28T09:00:00Z"}},"extraUsage":null}}})"));
+    const auto& five_hour = kimi::member(usages, "primary");
+    const auto& weekly    = kimi::member(usages, "secondary");
+    require(kimi::member(five_hour, "used_percent").as_number() == 25 &&
+        kimi::member(five_hour, "window_minutes").as_integer() == 300 &&
+        kimi::text(five_hour, "reset_at") == "2026-09-22T17:00:00Z", "five-hour usage ratio is the primary window");
+    require(kimi::member(weekly, "used_percent").as_number() == 150 &&
+        kimi::member(weekly, "window_minutes").as_integer() == 10080, "weekly usage ratio is not clamped");
     const auto missing = kimi::normalize_quota(json(R"({"code":0,"data":{"kind":"error","message":"No token for \"kimi-code\". Run /login to authenticate."}})"));
     require(kimi::text(missing, "status") == "not_logged_in", "missing login remains distinct from service error");
     bool rejected = false;
@@ -360,6 +376,133 @@ void quota()
     }
     catch (const std::exception&) { rejected = true; }
     require(rejected, "duplicate supported rolling windows are ambiguous");
+}
+
+// The quota helper's normalization of a local usage reply; empty when refused.
+std::optional<Json> normalized_reply(const char* reply)
+{
+    try {
+        return kimi::normalize_quota(json(reply));
+    }
+    catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+// The adapter's final inspection of that helper output, decoded as the host
+// decodes a quota@2 result; empty when the adapter refuses the output.
+std::optional<addon::Quota_inspect_result> inspected_quota(const Json& normalized)
+{
+    class Context : public addon::Invocation_context
+    {
+    public:
+        const addon::Invoke_request& request() const override { return invocation; }
+        bool cancel_requested() const override { return false; }
+        bool wait_for_cancel(int) override { return false; }
+        void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
+        void succeed(Json value) override { payload = std::move(value); }
+        void fail(addon::Result_status, std::string, std::string) override { failed = true; }
+        bool finished() const override { return payload || failed; }
+        addon::Invoke_request invocation;
+        std::optional<Json> payload;
+        bool failed = false;
+    } inspection;
+    addon::Probe_inspect_request request;
+    request.inspection.final        = true;
+    request.inspection.exit_code    = 0;
+    request.inspection.stdout_bytes = addon::serialize_json(normalized) + "\n";
+    inspection.invocation.capability = {"quota", 2};
+    inspection.invocation.operation  = "inspect";
+    inspection.invocation.payload    = addon::encode_probe_inspect_request(request, 2);
+    try {
+        kimi::handle_quota(inspection);
+    }
+    catch (const std::exception&) {
+        return std::nullopt;
+    }
+    if (!inspection.payload) return std::nullopt;
+    addon::Contract_failure failure;
+    return addon::decode_quota_inspect_result(*inspection.payload, true, &failure, 2);
+}
+
+void quota_usages()
+{
+    int failures = 0;
+    const auto check = [&failures](bool condition, const char* description) {
+        if (!condition) {
+            std::fprintf(stderr, "FAIL: %s\n", description);
+            ++failures;
+        }
+    };
+
+    // Oracle: a reply carrying data.quota is Kimi Code 2.0.2's shape (observed
+    // 2026-09-22), which names both windows. It is read as that shape alone:
+    // summary and limits never override or complete it.
+    const auto both = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+        "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T17:00:00Z"},
+        "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}},
+        "summary":{"used":90,"limit":100,"window":{"duration":1,"unit":"week"}},
+        "limits":[{"used":80,"limit":100,"window":{"duration":5,"unit":"hour"}}]}})");
+    check(both &&
+        kimi::member(kimi::member(*both, "primary"),   "used_percent").as_number() == 25 &&
+        kimi::member(kimi::member(*both, "secondary"), "used_percent").as_number() == 50,
+        "quota.usages wins over summary and limits in the same reply");
+    const struct
+    {
+        const char* description;
+        const char* reply;
+    }
+    refused[] = {
+        {"quota.usages without its seven-day window is refused",
+            R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+                "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T17:00:00Z"}}}}})"},
+        {"a null five-hour window is refused, not completed from summary and limits",
+            R"({"code":0,"data":{"kind":"ok","quota":{"usages":{"limit5h":null,
+                "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}},
+                "summary":{"used":90,"limit":100,"window":{"duration":1,"unit":"week"}},
+                "limits":[{"used":80,"limit":100,"window":{"duration":5,"unit":"hour"}}]}})"},
+        {"a malformed used ratio is refused",
+            R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+                "limit5h":{"usedRatio":"0.25","resetAt":"2026-09-22T17:00:00Z"},
+                "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}}}})"},
+        {"an empty quota.usages is refused, not filled from summary and limits",
+            R"({"code":0,"data":{"kind":"ok","quota":{"usages":{}},
+                "summary":{"used":90,"limit":100,"window":{"duration":1,"unit":"week"}},
+                "limits":[{"used":80,"limit":100,"window":{"duration":5,"unit":"hour"}}]}})"},
+    };
+    for (const auto& reply : refused) {
+        check(!normalized_reply(reply.reply), reply.description);
+    }
+
+    // Oracle: quota@2 carries reset times as UTC epoch milliseconds, and an
+    // offset timestamp names the same instant as its UTC spelling.
+    const auto utc = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+        "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T17:00:00Z"},
+        "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}}}})");
+    const auto observed = utc ? inspected_quota(*utc) : std::nullopt;
+    check(observed && observed->complete && observed->observation &&
+        observed->observation->state == addon::Quota_status::READY &&
+        observed->observation->primary && observed->observation->secondary &&
+        observed->observation->primary->used_percent     == 25 &&
+        observed->observation->primary->window_minutes   == 300u &&
+        observed->observation->primary->resets_at_ms     == 1790096400000u &&
+        observed->observation->secondary->used_percent   == 50 &&
+        observed->observation->secondary->window_minutes == 10080u &&
+        observed->observation->secondary->resets_at_ms   == 1790586000000u,
+        "the host decodes both windows with their exact UTC reset milliseconds");
+    const auto offset = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+        "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T19:00:00+02:00"},
+        "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}}}})");
+    const auto shifted = offset ? inspected_quota(*offset) : std::nullopt;
+    check(shifted && shifted->observation && shifted->observation->primary &&
+        shifted->observation->primary->resets_at_ms == 1790096400000u,
+        "an offset reset time decodes to the same instant as its UTC spelling");
+    const auto malformed = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+        "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T25:00:00Z"},
+        "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}}}})");
+    check(!malformed || !inspected_quota(*malformed), "a malformed reset time never reaches the host");
+
+    require(failures == 0, "quota.usages is read only as its own complete shape");
 }
 
 } // namespace
@@ -376,6 +519,7 @@ int main()
         acp();
         wire();
         quota();
+        quota_usages();
         require(kimi::recognize_launcher("kimi --yolo"), "Kimi literal launcher recognition");
         require(!kimi::recognize_launcher("echo kimi"), "mention does not establish provider invocation");
         std::puts("Kimi contract checks passed.");

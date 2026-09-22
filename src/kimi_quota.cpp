@@ -26,12 +26,25 @@ std::int64_t integer(const Json& value, std::int64_t minimum = 0)
     return static_cast<std::int64_t>(value.as_number());
 }
 
+Json normalized_window(double used_percent, const char* label, std::int64_t minutes, const Json& reset)
+{
+    if (!std::isfinite(used_percent)) throw std::runtime_error("invalid_quota_usage");
+    auto result = object({{"used_percent", Json(used_percent)},
+        {"window_minutes", Json(minutes)}, {"window_label", Json(label)}});
+    if (!reset.is_null()) {
+        if (!bounded_string(reset, 64)) throw std::runtime_error("invalid_quota_reset");
+        result.set("reset_at", reset);
+    }
+    return result;
+}
+
 Json window(const Json& row, const char* label, std::int64_t expected_minutes)
 {
     const auto& used = member(row, "used");
     const auto& limit = member(row, "limit");
-    if (!used.is_number() || !limit.is_number() || used.as_number() < 0 || limit.as_number() <= 0 ||
-        !std::isfinite(100.0 * used.as_number() / limit.as_number())) throw std::runtime_error("invalid_quota_usage");
+    if (!used.is_number() || !limit.is_number() || used.as_number() < 0 || limit.as_number() <= 0) {
+        throw std::runtime_error("invalid_quota_usage");
+    }
     const auto& period = member(row, "window");
     const auto duration = integer(member(period, "duration"), 1);
     const auto unit = text(period, "unit");
@@ -39,13 +52,16 @@ Json window(const Json& row, const char* label, std::int64_t expected_minutes)
     if (multiplier == 0 || duration > 9007199254740991ll / multiplier || duration * multiplier != expected_minutes) {
         throw std::runtime_error("invalid_quota_window");
     }
-    auto result = object({{"used_percent", Json(100.0 * used.as_number() / limit.as_number())},
-        {"window_minutes", Json(expected_minutes)}, {"window_label", Json(label)}});
-    if (row.find("reset_at") && !member(row, "reset_at").is_null()) {
-        if (!bounded_string(member(row, "reset_at"), 64)) throw std::runtime_error("invalid_quota_reset");
-        result.set("reset_at", member(row, "reset_at"));
-    }
-    return result;
+    return normalized_window(
+        100.0 * used.as_number() / limit.as_number(), label, expected_minutes, member(row, "reset_at"));
+}
+
+// Kimi Code 2.0.2 reports a window as the used fraction of its allowance.
+Json ratio_window(const Json& usage, const char* label, std::int64_t minutes)
+{
+    const auto& ratio = member(usage, "usedRatio");
+    if (!ratio.is_number() || ratio.as_number() < 0) throw std::runtime_error("invalid_quota_usage");
+    return normalized_window(100.0 * ratio.as_number(), label, minutes, member(usage, "resetAt"));
 }
 
 std::optional<std::uint64_t> reset_time(const Json& value)
@@ -123,6 +139,17 @@ Json normalize_quota(const Json& response)
     }
     if (text(data, "kind") != "ok") throw std::runtime_error("invalid_quota_response");
     auto result = object({{"status", Json("ok")}});
+    // Kimi Code 2.0.2 reports quota.usages instead of summary and limits;
+    // earlier releases, which the package still supports, send the latter.
+    // A reply carrying quota is read as that shape alone, and it names both
+    // windows: a missing one is a truncated reply, not an absent window.
+    if (data.find("quota")) {
+        const auto& usages = member(member(data, "quota"), "usages");
+        if (!usages.is_object()) throw std::runtime_error("invalid_quota_usages");
+        result.set("primary",   ratio_window(member(usages, "limit5h"), "5-hour", 300));
+        result.set("secondary", ratio_window(member(usages, "limit7d"), "Weekly", 10080));
+        return result;
+    }
     if (!member(data, "summary").is_null()) result.set("secondary", window(member(data, "summary"), "Weekly", 10080));
     const auto& limits = member(data, "limits");
     if (!limits.is_null()) {
