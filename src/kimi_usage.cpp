@@ -36,6 +36,8 @@ namespace {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 constexpr std::uint64_t k_max_exact = 9007199254740991;
+// Bounds each document read into memory whole: a wire log, the package cache
+// and a native seed. Nothing is charged across the wire logs of a scan.
 constexpr std::uint64_t k_max_bytes = 512 * 1024 * 1024;
 constexpr std::size_t k_max_files = 100000;
 
@@ -158,15 +160,14 @@ void attribute(addon::Usage_record& record, std::string_view cwd)
 }
 
 std::optional<std::string> stable_bytes(const fs::path& path, File_record& fingerprint,
-    addon::Invocation_context& context, std::uint64_t& budget)
+    addon::Invocation_context& context)
 {
     std::error_code error;
     const auto before_size = fs::file_size(path, error);
     if (error) return std::nullopt;
     const auto before_time = fs::last_write_time(path, error);
     if (error) return std::nullopt;
-    if (before_size > k_max_bytes - budget) throw std::runtime_error("usage_history_capacity");
-    budget += before_size;
+    if (before_size > k_max_bytes) throw std::runtime_error("usage_file_capacity");
     std::ifstream stream(path, std::ios::binary);
     if (!stream) return std::nullopt;
     std::string bytes;
@@ -498,7 +499,6 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
         : destination;
     std::map<std::string, File_record> files;
     std::set<std::string> receipts;
-    std::uint64_t budget = 0;
     if (mode != "reset" && fs::exists(input_file)) {
         addon::Directory_package_source source(input_file.parent_path());
         addon::Source_error source_error;
@@ -560,7 +560,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
                 }
             }
         }
-        const auto bytes = stable_bytes(path, current, context, budget);
+        const auto bytes = stable_bytes(path, current, context);
         if (bytes) {
             if (mode == "incremental" && found != files.end() && !found->second.stale_breakdown && found->second.size == current.size &&
                 found->second.modified_ms == current.modified_ms)

@@ -282,6 +282,45 @@ void missing_sessions_contract()
     require(bytes == "corrupt retained cache", "failed cache validation leaves original bytes untouched");
 }
 
+void large_history_contract()
+{
+    // A wire log is read whole, so one file is bounded; the history is not.
+    // Every mode that reads all logs must accept a history past 512 MiB.
+    Workspace workspace;
+    const auto profile = workspace.path / ".kimi-code";
+    const auto storage = workspace.path / "package-profile";
+    fs::create_directories(storage);
+    const auto filler = "{\"type\":\"content.part\",\"text\":\"" + std::string(1000 * 1000, 'x') + "\"}\n";
+    std::uint64_t history_bytes = 0;
+    for (unsigned session = 0; session < 5; ++session) {
+        const auto wire = profile / "sessions" / "Workspace-A" / ("Session-" + std::to_string(session)) /
+            "agents" / "main" / "wire.jsonl";
+        fs::create_directories(wire.parent_path());
+        std::ofstream stream(wire, std::ios::binary);
+        for (unsigned line = 0; line < 110; ++line) {
+            stream << filler;
+        }
+        stream << "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":" << 100 + session << "}}\n";
+        stream.close();
+        require(static_cast<bool>(stream), "large wire fixture written");
+        history_bytes += fs::file_size(wire);
+    }
+    require(history_bytes > 512ull * 1024 * 1024, "fixture exceeds the former whole-scan budget");
+    Context context;
+    for (const auto mode : {"incremental", "repair", "reset"}) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto records = kimi::scan_usage(profile, storage, mode, std::nullopt, context);
+        std::cout << mode << " scan of " << history_bytes << " history bytes: " <<
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() <<
+            " ms\n";
+        std::uint64_t total = 0;
+        for (const auto& record : records) {
+            total += record.total_tokens;
+        }
+        require(records.size() == 5 && total == 510, "a history larger than 512 MiB scans completely in every mode");
+    }
+}
+
 } // namespace
 
 int main()
@@ -291,6 +330,7 @@ int main()
         scan_contract();
         timestamp_cache_identity_contract();
         missing_sessions_contract();
+        large_history_contract();
         return 0;
     }
     catch (const std::exception& error) {
