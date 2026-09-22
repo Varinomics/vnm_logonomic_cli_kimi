@@ -1,8 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
 cmake_policy(SET CMP0141 NEW)
 set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
-set(CMAKE_FASTBUILD_CAPTURE_SYSTEM_ENV OFF CACHE BOOL "Do not capture configure environment" FORCE)
-list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES CMAKE_FASTBUILD_CAPTURE_SYSTEM_ENV)
+# A build that adds this package as a subproject sets the normal variable
+# LOGONOMIC_CLI_ADDON_EMBEDDED. That build owns the cache, try_compile()
+# settings, the SDK and testing (the SDK's docs/package_contract.md,
+# "Embedded build"), so only a standalone build sets them up here.
+if(NOT LOGONOMIC_CLI_ADDON_EMBEDDED)
+    set(CMAKE_FASTBUILD_CAPTURE_SYSTEM_ENV OFF CACHE BOOL "Do not capture configure environment" FORCE)
+    list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES CMAKE_FASTBUILD_CAPTURE_SYSTEM_ENV)
+endif()
 if(POLICY CMP0168)
     cmake_policy(SET CMP0168 NEW)
 elseif(CMAKE_GENERATOR STREQUAL "FASTBuild")
@@ -13,23 +19,30 @@ project(logonomic_cli_kimi VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(LOGONOMIC_CLI_ADDON_SDK_SOURCE "" CACHE PATH "Local Logonomic CLI add-on SDK source override")
-set(LOGONOMIC_CLI_ADDON_SDK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-if(LOGONOMIC_CLI_ADDON_SDK_SOURCE)
-    add_subdirectory("${LOGONOMIC_CLI_ADDON_SDK_SOURCE}" "${CMAKE_BINARY_DIR}/sdk")
+if(LOGONOMIC_CLI_ADDON_EMBEDDED)
+    if(NOT TARGET logonomic_cli_addon_sdk::sdk)
+        message(FATAL_ERROR
+            "The embedding build must add the Logonomic CLI add-on SDK before this package.")
+    endif()
 else()
-    include(FetchContent)
-    FetchContent_Declare(logonomic_sdk_source
-        GIT_REPOSITORY https://github.com/Varinomics/logonomic.git
-        GIT_TAG master
-        GIT_SHALLOW TRUE
-        SOURCE_SUBDIR sdk/logonomic_cli_addon_sdk)
-    FetchContent_MakeAvailable(logonomic_sdk_source)
+    set(LOGONOMIC_CLI_ADDON_SDK_SOURCE "" CACHE PATH "Local Logonomic CLI add-on SDK source override")
+    set(LOGONOMIC_CLI_ADDON_SDK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    if(LOGONOMIC_CLI_ADDON_SDK_SOURCE)
+        add_subdirectory("${LOGONOMIC_CLI_ADDON_SDK_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/sdk")
+    else()
+        include(FetchContent)
+        FetchContent_Declare(logonomic_sdk_source
+            GIT_REPOSITORY https://github.com/Varinomics/logonomic.git
+            GIT_TAG master
+            GIT_SHALLOW TRUE
+            SOURCE_SUBDIR sdk/logonomic_cli_addon_sdk)
+        FetchContent_MakeAvailable(logonomic_sdk_source)
+    endif()
 endif()
 
 set(KIMI_TOMLPLUSPLUS_SOURCE "" CACHE PATH "Local toml++ source override")
 if(KIMI_TOMLPLUSPLUS_SOURCE)
-    add_subdirectory("${KIMI_TOMLPLUSPLUS_SOURCE}" "${CMAKE_BINARY_DIR}/tomlplusplus")
+    add_subdirectory("${KIMI_TOMLPLUSPLUS_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/tomlplusplus")
     set(kimi_toml_source "${KIMI_TOMLPLUSPLUS_SOURCE}")
 else()
     include(FetchContent)
@@ -43,10 +56,14 @@ endif()
 
 function(kimi_target target)
     target_link_libraries(${target} PRIVATE logonomic_cli_addon_sdk::sdk)
-    if(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+    # The Windows API selection belongs to the platform, so a MinGW build gets
+    # the same one as MSVC.
+    if(WIN32)
         target_compile_definitions(${target} PRIVATE
             _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+    endif()
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
     else()
         target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
     endif()
@@ -99,7 +116,7 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/package/notices" "${KIMI_PACKAGE_DIRECTORY}/notices"
     COMMAND "${CMAKE_COMMAND}" -E copy "${kimi_toml_source}/LICENSE" "${KIMI_PACKAGE_DIRECTORY}/notices/tomlplusplus-LICENSE.txt"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_BINARY_DIR}/generated/logonomic-cli-addon.json" "${KIMI_PACKAGE_DIRECTORY}/logonomic-cli-addon.json"
+    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${KIMI_PACKAGE_DIRECTORY}/logonomic-cli-addon.json"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:kimi_adapter>" "${KIMI_PACKAGE_DIRECTORY}/adapter/kimi_adapter${CMAKE_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:kimi_helper>" "${KIMI_PACKAGE_DIRECTORY}/helpers/kimi_helper${CMAKE_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:kimi_launch_bridge>" "${KIMI_PACKAGE_DIRECTORY}/helpers/kimi_launch_bridge${CMAKE_EXECUTABLE_SUFFIX}"
@@ -114,10 +131,17 @@ add_custom_command(
         --third-party "helpers/kimi_helper${CMAKE_EXECUTABLE_SUFFIX}"
             "notices/tomlplusplus-LICENSE.txt" "provenance/tomlplusplus.json"
     DEPENDS kimi_adapter kimi_helper kimi_launch_bridge kimi_quota_probe logonomic_cli_addon_index
-        "${CMAKE_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
         "${kimi_toml_source}/LICENSE"
     VERBATIM)
 add_custom_target(kimi_package ALL DEPENDS "${KIMI_PACKAGE_DIRECTORY}/package.files.json")
+logonomic_cli_addon_install_package("${KIMI_PACKAGE_DIRECTORY}" logonomic.cli.kimi TARGET kimi_package)
+
+# Everything below is the package's own test suite, which only its standalone
+# build configures; an embedding build stages the package and stops here.
+if(LOGONOMIC_CLI_ADDON_EMBEDDED)
+    return()
+endif()
 
 enable_testing()
 add_executable(kimi_observer_tests tests/kimi_observer_tests.cpp)
@@ -148,7 +172,6 @@ add_dependencies(kimi_usage_cache_tests kimi_package)
 add_test(NAME kimi_usage_cache_tests
     COMMAND kimi_usage_cache_tests "${KIMI_PACKAGE_DIRECTORY}")
 set_tests_properties(kimi_usage_cache_tests PROPERTIES TIMEOUT 180 LABELS "usage;cache;packaged-adapter")
-logonomic_cli_addon_install_package("${KIMI_PACKAGE_DIRECTORY}" logonomic.cli.kimi)
 
 add_executable(kimi_acp_causal_tests tests/kimi_acp_causal_tests.cpp)
 target_link_libraries(kimi_acp_causal_tests PRIVATE kimi_provider)
