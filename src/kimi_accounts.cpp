@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -52,7 +53,12 @@ addon::Account_record account(const fs::path& profile)
     result.adapter_account_key = account_key(profile);
     result.display_name = addon::account_display_name(path_string(profile));
     result.profile_path = path_string(profile);
-    result.status = fs::is_directory(profile) ? addon::Account_status::AVAILABLE : addon::Account_status::UNAVAILABLE;
+    // A profile that cannot be checked, such as one on an unreachable share, is
+    // an unavailable account: it must not fail the discovery of every account.
+    std::error_code error;
+    result.status = fs::is_directory(profile, error)
+        ? addon::Account_status::AVAILABLE
+        : addon::Account_status::UNAVAILABLE;
     return result;
 }
 
@@ -113,17 +119,19 @@ void handle_accounts(addon::Invocation_context& context)
     }
     std::vector<addon::Account_record> accounts{account(selected)};
     const auto parent = selected.parent_path();
-    if (fs::is_directory(parent)) {
+    std::error_code error;
+    if (fs::is_directory(parent, error)) {
         std::vector<fs::path> candidates;
-        for (const auto& entry : fs::directory_iterator(parent)) {
+        for (fs::directory_iterator entry(parent, error), end; !error && entry != end; entry.increment(error)) {
             if (context.cancel_requested()) {
                 context.fail(addon::Result_status::CANCELLED, "cancelled");
                 return;
             }
-            if (entry.is_directory() && path_string(entry.path().filename()).starts_with(".kimi-code") &&
-                fs::is_regular_file(entry.path() / "credentials/kimi-code.json"))
+            std::error_code entry_error;
+            if (entry->is_directory(entry_error) && path_string(entry->path().filename()).starts_with(".kimi-code") &&
+                fs::is_regular_file(entry->path() / "credentials/kimi-code.json", entry_error))
             {
-                candidates.push_back(normalize(entry.path()));
+                candidates.push_back(normalize(entry->path()));
             }
         }
         std::sort(candidates.begin(), candidates.end());
