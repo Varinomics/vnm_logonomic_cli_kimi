@@ -321,6 +321,42 @@ void large_history_contract()
     }
 }
 
+void large_log_contract()
+{
+    // A wire log is read one line at a time: one log may grow past 512 MiB,
+    // while each line keeps the parser's document bound.
+    Workspace workspace;
+    const auto profile = workspace.path / ".kimi-code";
+    const auto storage = workspace.path / "package-profile";
+    fs::create_directories(storage);
+    const auto wire = profile / "sessions" / "Workspace-A" / "Session-Large" / "agents" / "main" / "wire.jsonl";
+    fs::create_directories(wire.parent_path());
+    const auto filler = "{\"type\":\"content.part\",\"text\":\"" + std::string(1000 * 1000, 'x') + "\"}\n";
+    {
+        std::ofstream stream(wire, std::ios::binary);
+        stream << "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":11}}\n";
+        for (unsigned line = 0; line < 540; ++line) {
+            stream << filler;
+        }
+        stream << "{\"type\":\"usage.record\",\"time\":1789200001000,\"usage\":{\"output\":13}}\n";
+        stream.close();
+        require(static_cast<bool>(stream), "large wire fixture written");
+    }
+    require(fs::file_size(wire) > 512ull * 1024 * 1024, "one log exceeds the former per-log bound");
+    Context context;
+    for (const auto mode : {"incremental", "repair"}) {
+        const auto records = kimi::scan_usage(profile, storage, mode, std::nullopt, context);
+        require(records.size() == 1 && records.front().total_tokens == 24, "a log larger than 512 MiB scans completely");
+    }
+
+    const auto oversized = profile / "sessions" / "Workspace-A" / "Session-Oversized" / "agents" / "main" / "wire.jsonl";
+    write(oversized, "{\"type\":\"content.part\",\"text\":\"" + std::string(5 * 1000 * 1000, 'x') + "\"}\n");
+    bool rejected = false;
+    try { (void)kimi::scan_usage(profile, storage, "repair", std::nullopt, context); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "a line past the parser's document bound still fails the scan");
+}
+
 } // namespace
 
 int main()
@@ -331,6 +367,7 @@ int main()
         timestamp_cache_identity_contract();
         missing_sessions_contract();
         large_history_contract();
+        large_log_contract();
         return 0;
     }
     catch (const std::exception& error) {

@@ -27,6 +27,12 @@ The Kimi icons derive from Lobe Icons. Their unchanged MIT notice is in
 `package/notices/lobe_icons_mit.txt`; `package/provenance/lobe_icons.json`
 records the upstream source, inherited fill variants and viewport normalization.
 
+Usage scans read each Agent wire log one line at a time, so only a single line
+is bounded, by the SDK parser's document limit. An incremental scan reuses a
+log's cached usage while its size and modification time are unchanged; equal
+values are taken to mean unchanged content, the check the pre-cutover scanner
+used, because wire logs are append-only and repair rereads every log.
+
 Credentials and session history stay in the selected Kimi profile. Hooks invoke
 the package helper through the host-provided helpers directory.
 

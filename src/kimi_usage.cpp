@@ -25,6 +25,7 @@
 #include <set>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -36,9 +37,11 @@ namespace {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 constexpr std::uint64_t k_max_exact = 9007199254740991;
-// Bounds each document read into memory whole: a wire log, the package cache
-// and a native seed. Nothing is charged across the wire logs of a scan.
+// Bounds each document read into memory whole: the package cache and a native
+// seed. Wire logs are read one line at a time, each line within the parser's
+// document bound, so neither one log nor the history is bounded.
 constexpr std::uint64_t k_max_bytes = 512 * 1024 * 1024;
+constexpr std::size_t k_read_bytes = 1024 * 1024;
 constexpr std::size_t k_max_files = 100000;
 
 struct File_record
@@ -159,34 +162,61 @@ void attribute(addon::Usage_record& record, std::string_view cwd)
     record.repository_usage = std::move(allocation);
 }
 
-std::optional<std::string> stable_bytes(const fs::path& path, File_record& fingerprint,
-    addon::Invocation_context& context)
+// Passes each complete line of a wire log to `consume`, buffering at most one
+// line of the parser's document bound; a final unterminated line is still being
+// written and is skipped. False when the log was unreadable or changed while it
+// was read, in which case the caller keeps the log's previous evidence.
+bool read_stable_lines(const fs::path& path, File_record& fingerprint, addon::Invocation_context& context,
+    const std::function<void(std::string_view line)>& consume)
 {
     std::error_code error;
     const auto before_size = fs::file_size(path, error);
-    if (error) return std::nullopt;
+    if (error) return false;
     const auto before_time = fs::last_write_time(path, error);
-    if (error) return std::nullopt;
-    if (before_size > k_max_bytes) throw std::runtime_error("usage_file_capacity");
+    if (error) return false;
+    // A failed line blames the log only if the log was at rest.
+    fingerprint.size = before_size;
+    fingerprint.modified_ms = file_modified_ms(before_time);
+    const auto unchanged = [&] {
+        std::error_code stat_error;
+        const auto size = fs::file_size(path, stat_error);
+        if (stat_error || size != before_size) return false;
+        const auto time = fs::last_write_time(path, stat_error);
+        return !stat_error && time == before_time;
+    };
     std::ifstream stream(path, std::ios::binary);
-    if (!stream) return std::nullopt;
-    std::string bytes;
-    std::array<char, 65536> buffer{};
-    while (stream) {
-        check_cancel(context);
-        stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        const auto received = static_cast<std::size_t>(stream.gcount());
-        if (received > k_max_bytes - bytes.size()) throw std::runtime_error("usage_file_capacity");
-        bytes.append(buffer.data(), received);
+    if (!stream) return false;
+    const auto line_limit = static_cast<std::size_t>(addon::Json_parse_limits{}.max_bytes);
+    std::string buffer;
+    std::size_t begin = 0;
+    std::uint64_t consumed = 0;
+    try {
+        for (;;) {
+            const auto newline = buffer.find('\n', begin);
+            if (newline != std::string::npos) {
+                consume(std::string_view(buffer).substr(begin, newline - begin));
+                consumed += newline + 1 - begin;
+                begin = newline + 1;
+                continue;
+            }
+            if (buffer.size() - begin > line_limit) throw std::runtime_error("usage_record_invalid");
+            buffer.erase(0, begin);
+            begin = 0;
+            check_cancel(context);
+            const auto kept = buffer.size();
+            buffer.resize(kept + k_read_bytes);
+            stream.read(buffer.data() + kept, static_cast<std::streamsize>(k_read_bytes));
+            const auto received = static_cast<std::size_t>(stream.gcount());
+            buffer.resize(kept + received);
+            if (received == 0) break;
+        }
     }
-    if (!stream.eof()) return std::nullopt;
-    const auto after_size = fs::file_size(path, error);
-    if (error || before_size != after_size || bytes.size() != after_size) return std::nullopt;
-    const auto after_time = fs::last_write_time(path, error);
-    if (error || before_time != after_time) return std::nullopt;
-    fingerprint.size = after_size;
-    fingerprint.modified_ms = file_modified_ms(after_time);
-    return bytes;
+    catch (...) {
+        if (!unchanged()) return false;
+        throw;
+    }
+    if (stream.bad() || consumed + buffer.size() != before_size || !unchanged()) return false;
+    return true;
 }
 
 Json optional_document(const fs::path& path)
@@ -213,29 +243,26 @@ std::array<addon::Usage_amount*, 4> amounts(addon::Usage_record& record)
     return {&record.input, &record.output, &record.cache_read, &record.cache_creation};
 }
 
-std::optional<addon::Usage_record> parse_wire(std::string_view bytes, const fs::path& session,
-    std::string_view cwd, addon::Invocation_context& context)
+// Accumulates one session's usage from the lines of a wire log.
+class Wire_usage final
 {
-    addon::Usage_record record;
-    record.record_id = "kimi:" + path_string(session.filename());
-    record.session_key = record.record_id;
-    record.source_path = path_string(fs::absolute(session).lexically_normal());
-    record.counter_field = "usage";
-    record.source_counter_semantics = "per_event_sum";
-    std::array<std::uint64_t, 4> values{};
-    std::array<std::uint64_t, 4> coverage{};
-    std::uint64_t records = 0;
-    std::size_t begin = 0;
-    while (begin < bytes.size()) {
+public:
+    explicit Wire_usage(const fs::path& session)
+    {
+        m_record.record_id = "kimi:" + path_string(session.filename());
+        m_record.session_key = m_record.record_id;
+        m_record.source_path = path_string(fs::absolute(session).lexically_normal());
+        m_record.counter_field = "usage";
+        m_record.source_counter_semantics = "per_event_sum";
+    }
+
+    void consume(std::string_view line, addon::Invocation_context& context)
+    {
         check_cancel(context);
-        const auto end = bytes.find('\n', begin);
-        if (end == std::string_view::npos) break;
-        auto line = bytes.substr(begin, end - begin);
-        begin = end + 1;
         while (!line.empty() && line.front() == '\0') line.remove_prefix(1);
         const auto event = parse(line);
         if (!event || !event->is_object()) throw std::runtime_error("usage_record_invalid");
-        if (text(*event, "type") != "usage.record") continue;
+        if (text(*event, "type") != "usage.record") return;
         const auto date = local_date(count(member(*event, "time")));
         const auto& usage = member(*event, "usage");
         if (!usage.is_object()) throw std::runtime_error("usage_record_invalid");
@@ -244,30 +271,40 @@ std::optional<addon::Usage_record> parse_wire(std::string_view bytes, const fs::
         for (std::size_t index = 0; index < names.size(); ++index) {
             if (const auto* value = usage.find(names[index])) {
                 const auto tokens = count(*value);
-                add(record.total_tokens, tokens);
-                add(values[index], tokens);
-                ++coverage[index];
+                add(m_record.total_tokens, tokens);
+                add(m_values[index], tokens);
+                ++m_coverage[index];
                 recognized = true;
             }
         }
         if (!recognized) throw std::runtime_error("usage_counters_missing");
         const auto model = text(*event, "model");
-        if (!record.model || record.model->empty()) record.model = model;
-        else if (!model.empty() && *record.model != model) record.model = "multiple";
-        record.completed_date = std::max(record.completed_date, date);
-        ++records;
+        if (!m_record.model || m_record.model->empty()) m_record.model = model;
+        else if (!model.empty() && *m_record.model != model) m_record.model = "multiple";
+        m_record.completed_date = std::max(m_record.completed_date, date);
+        ++m_records;
     }
-    if (!records) return std::nullopt;
-    auto fields = amounts(record);
-    for (std::size_t index = 0; index < fields.size(); ++index) {
-        fields[index]->applicable = true;
-        fields[index]->value = values[index];
-        fields[index]->coverage = addon::Usage_field_coverage{coverage[index], records, false,
-            coverage[index] ? addon::Usage_support::SUPPORTED : addon::Usage_support::UNKNOWN};
+
+    std::optional<addon::Usage_record> finish(std::string_view cwd)
+    {
+        if (!m_records) return std::nullopt;
+        auto fields = amounts(m_record);
+        for (std::size_t index = 0; index < fields.size(); ++index) {
+            fields[index]->applicable = true;
+            fields[index]->value = m_values[index];
+            fields[index]->coverage = addon::Usage_field_coverage{m_coverage[index], m_records, false,
+                m_coverage[index] ? addon::Usage_support::SUPPORTED : addon::Usage_support::UNKNOWN};
+        }
+        attribute(m_record, cwd);
+        return std::move(m_record);
     }
-    attribute(record, cwd);
-    return record;
-}
+
+private:
+    addon::Usage_record          m_record;
+    std::array<std::uint64_t, 4> m_values{};
+    std::array<std::uint64_t, 4> m_coverage{};
+    std::uint64_t                m_records = 0;
+};
 
 Json encode_cache(const std::map<std::string, File_record>& files, std::string_view profile, const std::set<std::string>& receipts)
 {
@@ -560,23 +597,28 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
                 }
             }
         }
-        const auto bytes = stable_bytes(path, current, context);
-        if (bytes) {
-            if (mode == "incremental" && found != files.end() && !found->second.stale_breakdown && found->second.size == current.size &&
-                found->second.modified_ms == current.modified_ms)
+        std::optional<addon::Usage_record> parsed;
+        bool stable = false;
+        try {
+            Wire_usage wire(session);
+            stable = read_stable_lines(path, current, context, [&](std::string_view line) { wire.consume(line, context); });
+            if (stable) parsed = wire.finish(cwd);
+        }
+        catch (...) {
+            check_cancel(context);
+            if (found == files.end() || !found->second.stale_breakdown ||
+                found->second.size != current.size || found->second.modified_ms != current.modified_ms) throw;
+            parsed = found->second.usage;
+            current.stale_breakdown = true;
+            stable = true;
+        }
+        if (stable) {
+            if (!current.stale_breakdown && mode == "incremental" && found != files.end() && !found->second.stale_breakdown &&
+                found->second.size == current.size && found->second.modified_ms == current.modified_ms)
             {
-                current.usage = found->second.usage;
+                parsed = found->second.usage;
             }
-            else {
-                try { current.usage = parse_wire(*bytes, session, cwd, context); }
-                catch (...) {
-                    check_cancel(context);
-                    if (found == files.end() || !found->second.stale_breakdown ||
-                        found->second.size != current.size || found->second.modified_ms != current.modified_ms) throw;
-                    current.usage = found->second.usage;
-                    current.stale_breakdown = true;
-                }
-            }
+            current.usage = std::move(parsed);
             if (current.usage) attribute(*current.usage, cwd);
             if (found != files.end()) files.erase(found);
             files[path_text] = std::move(current);
