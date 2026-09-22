@@ -2,9 +2,12 @@
 #include "kimi_json.h"
 #include "kimi_launcher.h"
 
+#include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
+#include <logonomic_cli_addon/lifecycle_events.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/sidecar.h>
 
 #include <atomic>
 #include <chrono>
@@ -18,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -234,6 +238,51 @@ void final_page_requires_exact_acknowledgment()
     require(!poll(observer, nonce, stop->resume_cursor), "terminal retirement removes cursor ownership");
 }
 
+// Oracle: the host's feature gate. It rejects an observation carrying a fact
+// the package's own declaration leaves unsupported. The observer reports no
+// native turn hook, only session boundaries and the children its wire shows.
+void declared_profile_admits_every_shape(const fs::path& package)
+{
+    const addon::Directory_package_source source(package);
+    const auto path = addon::sidecar_relative_path(
+        addon::k_lifecycle_events_capability_id, addon::k_lifecycle_events_correlated_version);
+    const auto bytes = source.read(path, addon::limits::k_max_sidecar_bytes, nullptr);
+    const auto sidecar = bytes ? addon::parse_sidecar(*bytes, nullptr) : std::nullopt;
+    const auto declaration = sidecar ? addon::decode_lifecycle_declaration(sidecar->payload, nullptr) : std::nullopt;
+    require(declaration.has_value(), "package lifecycle declaration is readable");
+    std::size_t observed = 0;
+    const auto admitted = [&declaration, &observed](const std::vector<addon::Lifecycle_observation>& observations) {
+        for (const auto& observation : observations) {
+            require(addon::lifecycle_profile_admits(declaration->features, observation),
+                "the declaration refuses an observation the package emits");
+            ++observed;
+        }
+    };
+    Workspace workspace;
+    native_call(workspace, "session");
+    kimi::Lifecycle_observer observer;
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve the gated owner");
+    auto request = start_request(workspace, nonce);
+    admitted(observer.classify(request).observations);
+    Context window;
+    prepare_observe(window, workspace, nonce);
+    window.m_cancel_on_progress = true;
+    observer.handle(window);
+    request.event.name = "SessionEnd";
+    request.ledger.current_transition = addon::Ledger_transition{addon::Transition_kind::START, "session", nonce};
+    admitted(observer.classify(request).observations);
+    std::string cursor;
+    for (bool more = true; more;) {
+        const auto page = poll(observer, nonce, cursor);
+        require(page.has_value(), "the gated owner's observations are readable");
+        admitted(page->observations);
+        cursor = page->resume_cursor;
+        more = page->more;
+    }
+    require(observed >= 4, "the session start, child start, child stop and session end were all gated");
+}
+
 void in_flight_watch_stops_on_retirement()
 {
     Workspace workspace;
@@ -261,9 +310,14 @@ void in_flight_watch_stops_on_retirement()
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc != 2) {
+        std::cerr << "usage: kimi_observer_tests <package directory>\n";
+        return 2;
+    }
     try {
+        declared_profile_admits_every_shape(addon::path_from_utf8(argv[1]));
         candidates_reclaim_without_tombstones();
         retirement_releases_only_its_owner();
         final_page_requires_exact_acknowledgment();
