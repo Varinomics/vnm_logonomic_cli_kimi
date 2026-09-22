@@ -50,8 +50,7 @@ addon::Account_record account(const fs::path& profile)
 {
     addon::Account_record result;
     result.adapter_account_key = account_key(profile);
-    result.display_name = path_string(profile.filename());
-    if (result.display_name.empty()) result.display_name = "Kimi";
+    result.display_name = addon::account_display_name(path_string(profile));
     result.profile_path = path_string(profile);
     result.status = fs::is_directory(profile) ? addon::Account_status::AVAILABLE : addon::Account_status::UNAVAILABLE;
     return result;

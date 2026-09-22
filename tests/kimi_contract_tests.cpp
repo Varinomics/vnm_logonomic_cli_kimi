@@ -1,3 +1,4 @@
+#include "kimi_accounts.h"
 #include "kimi_acp.h"
 #include "kimi_config.h"
 #include "kimi_json.h"
@@ -8,6 +9,7 @@
 
 #include <logonomic_cli_addon/session_contracts.h>
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
+#include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/probe_contracts.h>
 #include <logonomic_cli_addon/quota.h>
@@ -505,6 +507,58 @@ void quota_usages()
     require(failures == 0, "quota.usages is read only as its own complete shape");
 }
 
+void account_names()
+{
+    // Oracle: accounts@1 names an account with a filesystem profile after the
+    // profile's folder through the SDK's account_display_name.
+    class Context : public addon::Invocation_context
+    {
+    public:
+        const addon::Invoke_request& request() const override { return invocation; }
+        bool cancel_requested() const override { return false; }
+        bool wait_for_cancel(int) override { return false; }
+        void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
+        void succeed(Json value) override { payload = std::move(value); }
+        void fail(addon::Result_status, std::string, std::string) override { failed = true; }
+        bool finished() const override { return payload || failed; }
+        addon::Invoke_request invocation;
+        std::optional<Json> payload;
+        bool failed = false;
+    };
+#ifdef _WIN32
+    const std::string platform = "windows-x86_64";
+    const std::string home     = "C:/Users/Jane Doe";
+    const std::string home_env = "USERPROFILE";
+#else
+    const std::string platform = "linux-x86_64";
+    const std::string home     = "/home/jane";
+    const std::string home_env = "HOME";
+#endif
+    const auto discovered_name = [&](const std::string& kimi_home) {
+        addon::Accounts_launcher_request request;
+        request.launcher.script_body = "kimi";
+        request.launcher.runner_key  = addon::k_runner_direct;
+        request.launch_environment.platform_id = platform;
+        request.launch_environment.effective_environment = Json::object();
+        request.launch_environment.effective_environment.set(home_env, Json(home));
+        request.launch_environment.effective_environment.set("KIMI_CODE_HOME", Json(kimi_home));
+        request.default_home_fallback   = home;
+        request.normalization_directory = home;
+        Context discovery;
+        discovery.invocation.operation = addon::k_accounts_discover_operation;
+        discovery.invocation.payload   = addon::encode_accounts_launcher_request(request);
+        kimi::handle_accounts(discovery);
+        addon::Contract_failure failure;
+        const auto accounts = discovery.payload ? addon::decode_accounts_result(*discovery.payload, &failure) : std::nullopt;
+        return accounts && accounts->size() == 1 ? accounts->front().display_name : std::string{};
+    };
+    require(discovered_name(home + "/.kimi-code-work/") == ".kimi-code-work",
+        "a trailing separator does not hide the profile folder's name");
+    const std::string long_home = home + "/.kimi-code-account-for-the-varinomics-nightly-release-builds";
+    require(discovered_name(long_home) == addon::account_display_name(long_home),
+        "an over-long folder name is fitted by the SDK's account display-name rule");
+}
+
 } // namespace
 
 int main()
@@ -520,6 +574,7 @@ int main()
         wire();
         quota();
         quota_usages();
+        account_names();
         require(kimi::recognize_launcher("kimi --yolo"), "Kimi literal launcher recognition");
         require(!kimi::recognize_launcher("echo kimi"), "mention does not establish provider invocation");
         std::puts("Kimi contract checks passed.");
