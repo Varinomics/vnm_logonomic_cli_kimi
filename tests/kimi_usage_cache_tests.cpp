@@ -362,6 +362,53 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(stopped->status == addon::Host_status::CANCELLED,
         std::string("a scan cancelled while it reads reports cancelled, not ") +
             addon::host_status_name(stopped->status) + " (" + stopped->reason_code + ")");
+
+    select("concurrent-first", std::nullopt);
+    request.mode = "repair";
+    const auto first_scan = host.invoke({"usage-scan", 3}, "scan",
+        addon::encode_usage_scan_request(request, 3), 120000);
+    const auto generation = host.generation_nonce();
+    while (host.progress(first_scan).empty() && !host.outcome(first_scan)) {
+        host.pump(10);
+    }
+    check(!host.progress(first_scan).empty() && !host.outcome(first_scan),
+        "first account is scanning while a second account arrives");
+
+    auto waiter = request;
+    waiter.context.account_context = addon::Account_context{
+        2, kimi::account_key(other_profile), addon::path_to_utf8(other_profile)};
+    waiter.context.launch_environment->bootstrap =
+        addon::Environment_bootstrap_evidence{addon::path_to_utf8(other_profile)};
+    const auto waiter_root = storage / "concurrent-waiter";
+    check(fs::create_directory(waiter_root), "host allocates second account candidate");
+    waiter.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(waiter_root)};
+    const auto waiting_scan = host.invoke({"usage-scan", 3}, "scan",
+        addon::encode_usage_scan_request(waiter, 3), 120000);
+    host.pump(100);
+    check(!host.outcome(waiting_scan) && !host.outcome(first_scan),
+        "second account waits while the first account scans");
+    host.cancel(waiting_scan);
+    const auto waiting_outcome = host.wait_outcome(waiting_scan, 1500);
+    check(waiting_outcome && waiting_outcome->status == addon::Host_status::CANCELLED,
+        "cancelled second account must settle before the generation's cancellation grace");
+    check(!host.outcome(first_scan) && host.generation_nonce() == generation,
+        "first account and its adapter generation remain live after waiter cancellation");
+    check(!fs::exists(waiter_root / "cache-manifest.json"),
+        "cancelled waiter cannot seal a cache candidate");
+
+    const auto first_outcome = host.wait_outcome(first_scan, 120000);
+    check(first_outcome && first_outcome->status == addon::Host_status::SUCCESS,
+        "first account finishes after the second account cancels");
+    const auto first_page = addon::decode_usage_scan_result(first_outcome->payload, &failure, 3);
+    check(first_page && first_page->cache_candidate, "first account seals its candidate");
+    validate(*first_page->cache_candidate);
+
+    const auto next_root = storage / "concurrent-next";
+    check(fs::create_directory(next_root), "host allocates later second-account candidate");
+    waiter.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(next_root)};
+    const auto next_outcome = outcome_for(waiter, 3);
+    check(next_outcome.status == addon::Host_status::SUCCESS && host.generation_nonce() == generation,
+        "second account can scan on the surviving generation");
     check(host.shutdown(1000, nullptr), "packaged adapter exits without contacting a model");
 }
 

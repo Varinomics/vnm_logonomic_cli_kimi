@@ -1117,7 +1117,11 @@ void handle_usage(addon::Invocation_context& context)
             throw std::runtime_error("usage_cache_namespace_conflict");
         }
     }
-    std::lock_guard lock(s_mutex);
+    std::unique_lock lock(s_mutex, std::defer_lock);
+    while (!lock.try_lock()) {
+        // The SDK wakes this request on cancellation; mutex acquisition alone cannot.
+        if (context.wait_for_cancel(50)) throw std::runtime_error("cancelled");
+    }
     check_cancel(context);
     std::erase_if(s_snapshots, [](const auto& entry) { return now_ms() - entry.second.touched_ms > 600000; });
     std::size_t begin = 0;
