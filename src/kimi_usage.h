@@ -9,6 +9,8 @@
 
 namespace kimi {
 
+// In-process collector used by package tests. The adapter streams disk-backed
+// snapshots instead of retaining this vector across the history.
 std::vector<logonomic::cli_addon::Usage_record> scan_usage(
     const std::filesystem::path& profile,
     const std::filesystem::path& storage,

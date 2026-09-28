@@ -15,6 +15,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 namespace addon = logonomic::cli_addon;
@@ -31,7 +32,11 @@ public:
     const addon::Invoke_request& request() const override { return invocation; }
     bool cancel_requested() const override { return cancelled; }
     bool wait_for_cancel(int) override { return cancelled; }
-    void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
+    void report_progress(std::uint64_t current, std::optional<std::uint64_t> total, std::string) override
+    {
+        progress_current = current;
+        progress_total = total;
+    }
     bool finished() const override { return done; }
     void succeed(addon::Json_value result) override { payload = std::move(result); done = true; }
     void fail(addon::Result_status, std::string reason, std::string detail) override
@@ -40,6 +45,8 @@ public:
     }
     addon::Invoke_request invocation;
     addon::Json_value payload;
+    std::uint64_t progress_current = 0;
+    std::optional<std::uint64_t> progress_total;
     bool cancelled = false;
     bool done = false;
 };
@@ -175,11 +182,21 @@ std::int64_t cached_modified_ms(const fs::path& cache)
 {
     std::ifstream stream(cache, std::ios::binary);
     require(static_cast<bool>(stream), "usage cache must be readable");
-    const std::string bytes((std::istreambuf_iterator<char>(stream)), {});
-    const auto document = kimi::parse(bytes);
-    require(document.has_value(), "usage cache must remain valid JSON");
-    const auto& files = kimi::member(*document, "files");
-    require(files.is_array() && files.as_array().size() == 1, "fixture must cache exactly one wire file");
+    auto files = addon::Json_value::array();
+    std::string line;
+    while (std::getline(stream, line)) {
+        const auto document = kimi::parse(line);
+        require(document.has_value(), "usage cache records must remain valid JSON");
+        if (const auto* rows = document->find("files")) {
+            require(rows->is_array(), "single-document cache must contain a file array");
+            for (const auto& row : rows->as_array()) files.push_back(row);
+        }
+        else
+        if (document->find("path")) {
+            files.push_back(*document);
+        }
+    }
+    require(stream.eof() && files.as_array().size() == 1, "fixture must cache exactly one wire file");
     const auto& modified = kimi::member(files.as_array().front(), "modified_msecs");
     require(modified.is_integer(), "cached modification time must be integer Unix milliseconds");
     return modified.as_integer();
@@ -357,17 +374,222 @@ void large_log_contract()
     require(rejected, "a line past the parser's document bound still fails the scan");
 }
 
+std::vector<std::string> lines_of(const fs::path& path)
+{
+    std::ifstream stream(path, std::ios::binary);
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(stream, line)) lines.push_back(std::move(line));
+    return lines;
+}
+
+void line_cache_contract()
+{
+    // The cache holds one line per wire log and per seed receipt, so neither
+    // the number of logs nor the number of imported seeds is bounded. A cache
+    // written as one document is still read and rewritten line by line.
+    Workspace workspace;
+    const auto profile = workspace.path / ".kimi-code";
+    const auto storage = workspace.path / "package-profile";
+    fs::create_directories(storage);
+    for (unsigned session = 0; session < 3; ++session) {
+        write(profile / "sessions" / "Workspace-A" / ("Session-" + std::to_string(session)) / "agents" / "main" / "wire.jsonl",
+            "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":" + std::to_string(20 + session) + "}}\n");
+    }
+    const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
+    Context context;
+    const auto total = [&](const char* mode, const std::optional<addon::Usage_native_file_cache>& seed) {
+        std::uint64_t sum = 0;
+        for (const auto& record : kimi::scan_usage(profile, storage, mode, seed, context)) sum += record.total_tokens;
+        return sum;
+    };
+    require(total("incremental", std::nullopt) == 63, "first scan counts every log");
+    require(lines_of(cache).size() == 4, "the cache holds a header and one line per wire log");
+
+    // Rewrite the cache as the single document earlier versions wrote, with
+    // 1024 seed receipts, the most that format admitted.
+    auto rows = addon::Json_value::array();
+    for (const auto& line : lines_of(cache)) {
+        const auto value = kimi::parse(line);
+        require(value && value->is_object(), "cache line parses");
+        if (value->find("path")) rows.push_back(*value);
+    }
+    auto receipts = addon::Json_value::array();
+    for (unsigned index = 0; index < 1024; ++index) {
+        receipts.push_back(addon::Json_value(addon::to_hex(addon::Sha256::digest("receipt-" + std::to_string(index)))));
+    }
+    write(cache, addon::serialize_json(kimi::object({{"version", addon::Json_value(1)},
+        {"profile", addon::Json_value(kimi::account_key(profile))}, {"files", rows}, {"receipts", receipts}})));
+    require(total("incremental", std::nullopt) == 63, "a single-document cache upgrades with exact totals");
+    require(lines_of(cache).size() == 1 + 1024 + 3, "the upgraded cache keeps every receipt and log on its own line");
+
+    const auto seed_path = storage / "native-file-cache.jsonl";
+    write(seed_path, "");
+    const addon::Usage_native_file_cache seed{kimi::path_string(seed_path), addon::to_hex(addon::Sha256::digest("")),
+        kimi::account_key(profile), false};
+    require(total("incremental", seed) == 63, "a seed beyond 1024 earlier imports is still accepted");
+    require(lines_of(cache).size() == 1 + 1025 + 3, "the new receipt is retained");
+}
+
+void file_count_contract()
+{
+    Workspace workspace;
+    const auto profile = workspace.path / ".kimi-code";
+    const auto storage = workspace.path / "package-profile";
+    const auto cache   = storage / (kimi::account_key(profile) + "-usage-v1.json");
+    fs::create_directories(profile);
+    fs::create_directories(storage);
+    constexpr unsigned k_file_count = 100001;
+    {
+        std::ofstream stream(cache, std::ios::binary);
+        stream << "{\"version\":1,\"profile\":" << addon::serialize_json(addon::Json_value(kimi::account_key(profile))) <<
+            ",\"receipts\":[],\"files\":[";
+        for (unsigned index = 0; index < k_file_count; ++index) {
+            const auto path = profile / "sessions" / "workspace" / "session" / "agents" /
+                ("agent-" + std::to_string(index)) / "wire.jsonl";
+            if (index != 0) stream << ',';
+            stream << addon::serialize_json(kimi::object({
+                {"path", addon::Json_value(kimi::path_string(path))}, {"size", addon::Json_value(0)},
+                {"modified_msecs", addon::Json_value(0)}, {"recorded_cwd", addon::Json_value("")},
+                {"stale_breakdown", addon::Json_value(false)}, {"usage", addon::Json_value{}}}));
+        }
+        stream << "]}";
+        stream.close();
+        require(static_cast<bool>(stream), "large retained-file fixture written");
+    }
+    Context context;
+    require(kimi::scan_usage(profile, storage, "incremental", std::nullopt, context).empty(),
+        "more than 100000 retained wire files are accepted without inventing usage");
+    std::ifstream stream(cache, std::ios::binary);
+    std::size_t rows = 0;
+    std::string line;
+    while (std::getline(stream, line)) ++rows;
+    require(stream.eof() && rows == 1 + k_file_count,
+        "migration retains every file past the former history count limit");
+}
+
+void live_file_count_contract()
+{
+    Workspace workspace;
+    const auto profile = workspace.path / ".kimi-code";
+    const auto storage = workspace.path / "package-profile";
+    const auto agents  = profile / "sessions" / "workspace" / "session" / "agents";
+    fs::create_directories(storage);
+    constexpr unsigned k_file_count = 100001;
+    const auto started = std::chrono::steady_clock::now();
+    for (unsigned index = 0; index < k_file_count; ++index) {
+        const auto wire = agents / ("agent-" + std::to_string(index)) / "wire.jsonl";
+        write(wire, index == k_file_count - 1
+            ? "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":7}}\n"
+            : "");
+    }
+    std::cout << "Created " << k_file_count << " live wire files in " <<
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() <<
+        " ms" << std::endl;
+    Context context;
+    const auto records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    require(records.size() == 1 && records.front().total_tokens == 7,
+        "a live history beyond 100000 files includes every agent's usage");
+    require(context.progress_current == k_file_count && context.progress_total == k_file_count,
+        "large live histories report progress through the complete file inventory");
+}
+
+void native_aliases_contract()
+{
+    Workspace workspace;
+    const auto profile   = workspace.path / ".kimi-code";
+    const auto storage   = workspace.path / "package-profile";
+    const auto cache     = storage / (kimi::account_key(profile) + "-usage-v1.json");
+    const auto seed_path = storage / "native-aliases.jsonl";
+    fs::create_directories(profile);
+    fs::create_directories(storage);
+    const auto canonical = profile / "sessions" / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
+    const auto alias     = profile / "sessions" / "." / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
+    const auto seed_row = [](const fs::path& path) {
+        return addon::serialize_json(kimi::object({
+            {"path", addon::Json_value(kimi::path_string(path))}, {"size", addon::Json_value(0)},
+            {"modified_msecs", addon::Json_value(0)}, {"records", addon::Json_value::array()}})) + "\n";
+    };
+    const auto canonical_row = seed_row(canonical);
+    const auto alias_row     = seed_row(alias);
+    require(canonical_row != alias_row && canonical.lexically_normal() == alias.lexically_normal(),
+        "native alias fixture uses distinct raw paths naming the same wire log");
+    const auto bytes = canonical_row + alias_row;
+    write(seed_path, bytes);
+    addon::Usage_native_file_cache seed{kimi::path_string(seed_path),
+        addon::to_hex(addon::Sha256::digest(bytes)), kimi::account_key(profile), false};
+    const auto verify_cache = [&] {
+        std::size_t files = 0, receipts = 0;
+        for (const auto& line : lines_of(cache)) {
+            const auto value = kimi::parse(line);
+            require(value && value->is_object(), "native alias cache records remain valid JSON");
+            if (const auto* rows = value->find("files")) {
+                require(rows->is_array() && rows->as_array().size() == 1,
+                    "native aliases retain exactly one file in a document cache");
+                files += rows->as_array().size();
+                require(kimi::text(rows->as_array().front(), "path") == kimi::path_string(alias),
+                    "native aliases retain the first lexical raw path");
+                const auto& imported = kimi::member(*value, "receipts");
+                require(imported.is_array(), "document cache retains import receipts");
+                receipts += imported.as_array().size();
+            }
+            else
+            if (value->find("path")) {
+                ++files;
+                require(kimi::text(*value, "path") == kimi::path_string(alias),
+                    "native aliases retain the first lexical raw path");
+            }
+            else
+            if (value->find("receipt")) {
+                ++receipts;
+            }
+        }
+        require(files == 1 && receipts == 1, "native aliases retain one file and one import receipt");
+    };
+    Context context;
+    require(kimi::scan_usage(profile, storage, "incremental", seed, context).empty(),
+        "distinct native paths naming the same wire log are accepted");
+    verify_cache();
+    require(kimi::scan_usage(profile, storage, "incremental", seed, context).empty(),
+        "reoffering native aliases remains idempotent");
+    verify_cache();
+    const auto accepted = lines_of(cache);
+    const auto duplicate_bytes = canonical_row + canonical_row;
+    write(seed_path, duplicate_bytes);
+    seed.sha256_hex = addon::to_hex(addon::Sha256::digest(duplicate_bytes));
+    bool rejected = false;
+    try { (void)kimi::scan_usage(profile, storage, "incremental", seed, context); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "exact duplicate raw native paths remain invalid");
+    require(lines_of(cache) == accepted, "rejected duplicate import preserves the accepted cache");
+}
+
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        if (argc == 2) {
+            const std::string_view selected = argv[1];
+            if (selected == "--native-aliases") { native_aliases_contract(); return 0; }
+            if (selected == "--line-cache" || selected == "--history-limits") line_cache_contract();
+            if (selected == "--file-count" || selected == "--history-limits") file_count_contract();
+            if (selected == "--live-file-count" || selected == "--history-limits") live_file_count_contract();
+            require(selected == "--line-cache" || selected == "--file-count" ||
+                selected == "--live-file-count" || selected == "--history-limits",
+                "unknown usage test selection");
+            return 0;
+        }
+        native_aliases_contract();
         accounts_contract();
         scan_contract();
         timestamp_cache_identity_contract();
         missing_sessions_contract();
         large_history_contract();
         large_log_contract();
+        line_cache_contract();
+        file_count_contract();
+        live_file_count_contract();
         return 0;
     }
     catch (const std::exception& error) {
