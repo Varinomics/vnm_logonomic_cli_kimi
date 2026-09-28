@@ -306,21 +306,27 @@ private:
     std::uint64_t                m_records = 0;
 };
 
-Json encode_cache(const std::map<std::string, File_record>& files, std::string_view profile, const std::set<std::string>& receipts)
+Json encode_cache(const std::map<std::string, File_record>& files, std::string_view profile,
+    const std::set<std::string>& receipts, addon::Invocation_context& context)
 {
     auto rows = Json::array();
     for (const auto& [path, file] : files) {
+        check_cancel(context);
         rows.push_back(object({{"path", Json(path)}, {"size", Json(file.size)},
             {"modified_msecs", Json(file.modified_ms)}, {"recorded_cwd", Json(file.cwd)},
             {"stale_breakdown", Json(file.stale_breakdown)},
             {"usage", file.usage ? addon::encode_usage_record(*file.usage, 2) : Json{}}}));
     }
     auto imported = Json::array();
-    for (const auto& receipt : receipts) imported.push_back(Json(receipt));
+    for (const auto& receipt : receipts) {
+        check_cancel(context);
+        imported.push_back(Json(receipt));
+    }
     return object({{"version", Json(1)}, {"profile", Json(profile)}, {"files", std::move(rows)}, {"receipts", std::move(imported)}});
 }
 
-std::map<std::string, File_record> decode_cache(const Json& value, std::string_view profile)
+std::map<std::string, File_record> decode_cache(const Json& value, std::string_view profile,
+    addon::Invocation_context& context)
 {
     if (!exact_keys(value, {"version", "profile", "files", "receipts"}) || count(member(value, "version")) != 1 ||
         text(value, "profile") != profile || !member(value, "files").is_array() ||
@@ -330,6 +336,7 @@ std::map<std::string, File_record> decode_cache(const Json& value, std::string_v
     }
     std::map<std::string, File_record> files;
     for (const auto& row : member(value, "files").as_array()) {
+        check_cancel(context);
         File_record file;
         const auto path = text(row, "path");
         if (!exact_keys(row, {"path", "size", "modified_msecs", "recorded_cwd", "usage", "stale_breakdown"}) ||
@@ -539,21 +546,29 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
     if (mode != "reset" && fs::exists(input_file)) {
         addon::Directory_package_source source(input_file.parent_path());
         addon::Source_error source_error;
+        check_cancel(context);
         const auto bytes = source.read(path_string(input_file.filename()), k_max_bytes, &source_error);
+        check_cancel(context);
         addon::Json_parse_limits limits;
         limits.max_bytes = k_max_bytes;
         const auto cache = bytes ? addon::parse_json(*bytes, limits, nullptr) : std::nullopt;
+        check_cancel(context);
         if (!cache) throw std::runtime_error("usage_cache_unreadable");
-        files = decode_cache(*cache, owner);
+        files = decode_cache(*cache, owner, context);
         const auto& previous = member(*cache, "receipts");
         if (!previous.is_array() || previous.as_array().size() > 1024) throw std::runtime_error("usage_cache_invalid");
         for (const auto& receipt : previous.as_array()) {
+            check_cancel(context);
             if (!receipt.is_string() || receipt.as_string().size() != 64 || !receipts.insert(receipt.as_string()).second) throw std::runtime_error("usage_cache_invalid");
         }
     }
     if (mode != "reset" && seed) import_native_cache(files, receipts, *seed, storage, owner, context);
     std::map<std::string, std::string> cached_paths;
-    for (const auto& [path, file] : files) { (void)file; cached_paths[path_key(addon::path_from_utf8(path))] = path; }
+    for (const auto& [path, file] : files) {
+        (void)file;
+        check_cancel(context);
+        cached_paths[path_key(addon::path_from_utf8(path))] = path;
+    }
     auto workspaces = optional_document(profile / "workspaces.json");
     if (!member(workspaces, "version").is_integer() || member(workspaces, "version").as_integer() != 1) workspaces = Json::object();
     std::map<std::string, fs::path> live;
@@ -634,6 +649,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
     std::set<std::string> mixed_coverage;
     for (auto& [path, file] : files) {
         (void)path;
+        check_cancel(context);
         if (!file.usage) continue;
         attribute(*file.usage, file.cwd);
         const auto& record = *file.usage;
@@ -678,6 +694,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
         auto& allocation = *accumulated.repository_usage;
         add(allocation.unattributed_tokens, record.repository_usage->unattributed_tokens);
         for (const auto& item : record.repository_usage->allocations) {
+            check_cancel(context);
             const auto same = std::find_if(allocation.allocations.begin(), allocation.allocations.end(), [&](const auto& previous) {
                 return path_key(addon::path_from_utf8(previous.repository_path)) == path_key(addon::path_from_utf8(item.repository_path));
             });
@@ -687,6 +704,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
     }
     std::vector<addon::Usage_record> result;
     for (auto& [id, record] : sessions) {
+        check_cancel(context);
         if (mixed_coverage.contains(id)) {
             record.coverage_unit = addon::Usage_coverage_unit::SESSIONS;
             for (auto* field : amounts(record)) {
@@ -700,7 +718,9 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
         result.push_back(std::move(record));
     }
     check_cancel(context);
-    store_cache(destination, encode_cache(files, owner, receipts));
+    const auto cache = encode_cache(files, owner, receipts, context);
+    check_cancel(context);
+    store_cache(destination, cache);
     return result;
 }
 
@@ -783,7 +803,10 @@ void handle_usage(addon::Invocation_context& context)
         snapshot_id = addon::random_nonce_hex();
         if (version == 3) {
             // A surviving wire log can be only a subset of a session's events.
-            for (auto& record : snapshot.records) record.aggregate_evidence = "partial";
+            for (auto& record : snapshot.records) {
+                check_cancel(context);
+                record.aggregate_evidence = "partial";
+            }
             snapshot.cache_candidate = addon::seal_usage_cache_candidate(
                 input->cache_selection->candidate_root, path_string(storage), input->context.account_context,
                 snapshot_id, "kimi-wire-cache@1", [&context] { return context.cancel_requested(); }, &failure);
@@ -814,6 +837,7 @@ void handle_usage(addon::Invocation_context& context)
     const auto limit = std::min(begin + addon::k_max_usage_page_records, snapshot.records.size());
     auto end = begin;
     while (end < limit) {
+        check_cancel(context);
         page.records.push_back(snapshot.records[end]);
         page.next_cursor = std::to_string(end + 1);
         if (addon::serialize_json(addon::encode_usage_scan_result(page, version)).size() >
@@ -828,6 +852,7 @@ void handle_usage(addon::Invocation_context& context)
     page.complete = end == snapshot.records.size();
     if (!page.complete) page.next_cursor = std::to_string(end);
     else { page.next_cursor.reset(); s_snapshots.erase(found); }
+    check_cancel(context);
     context.succeed(addon::encode_usage_scan_result(page, version));
 }
 

@@ -110,6 +110,10 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         else kimi::handle_preparation(context);
     }
     catch (const std::exception&) {
+        if (context.cancel_requested()) {
+            context.fail(addon::Result_status::CANCELLED, "cancelled");
+            return;
+        }
         // Configuration, prompt, tokens and private filesystem bytes never
         // enter host diagnostics.
         context.fail(addon::Result_status::FAILED, "kimi_operation_failed", "Kimi could not complete the requested operation.");

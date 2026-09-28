@@ -334,6 +334,34 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     write(addon::path_from_utf8(first.cache_candidate->root) / "unlisted", "unexpected");
     check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
         "corrupt selected inventory fails without fallback");
+
+    // The Stop button cancels a scan that is reading history; the host must
+    // see that as cancelled, not as a failed scan. The small log's progress
+    // shows the scan under way, and the large log keeps it reading far longer
+    // than the cancel takes to arrive.
+    const std::string usage_line =
+        "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"inputOther\":1,"
+        "\"output\":0,\"inputCacheRead\":0,\"inputCacheCreation\":0}}\n";
+    std::string large_log;
+    while (large_log.size() < 64 * 1024 * 1024) {
+        large_log += usage_line;
+    }
+    write(profile / "sessions/workspace/before-cancel/agents/agent/wire.jsonl", usage_line);
+    write(profile / "sessions/workspace/during-cancel/agents/agent/wire.jsonl", large_log);
+    select("cancelled-while-reading", std::nullopt);
+    const auto reading = host.invoke({"usage-scan", 3}, "scan", addon::encode_usage_scan_request(request, 3), 30000);
+    std::optional<addon::Host_outcome> stopped;
+    while (!stopped && host.progress(reading).empty()) {
+        stopped = host.wait_outcome(reading, 10);
+    }
+    if (!stopped) {
+        host.cancel(reading);
+        stopped = host.wait_outcome(reading, 31000);
+    }
+    check(stopped.has_value(), "cancelled packaged scan must finish");
+    check(stopped->status == addon::Host_status::CANCELLED,
+        std::string("a scan cancelled while it reads reports cancelled, not ") +
+            addon::host_status_name(stopped->status) + " (" + stopped->reason_code + ")");
     check(host.shutdown(1000, nullptr), "packaged adapter exits without contacting a model");
 }
 
