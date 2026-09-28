@@ -152,12 +152,15 @@ std::string initial_acp_input(const addon::Delegated_prepare_request& request)
 {
     auto servers = Json::array();
     for (const auto& server : request.control.servers) {
-        auto environment = Json::array();
-        for (const auto& [name, value] : server.environment) {
-            environment.push_back(object({{"name", Json(name)}, {"value", Json(value)}}));
+        const auto& connection = request.control.connection.value();
+        auto arguments = Json::array();
+        for (const auto& argument : {std::string("--descriptor"), connection.descriptor_path,
+                 std::string("--server"), server.server_id})
+        {
+            arguments.push_back(Json(argument));
         }
         servers.push_back(object({{"name", Json("logonomic-task-" + request.control.task_id + "-" + server.server_id)},
-            {"command", Json(server.program)}, {"args", Json::array()}, {"env", std::move(environment)}}));
+            {"command", Json(connection.relay_program)}, {"args", std::move(arguments)}, {"env", Json::array()}}));
     }
     return rpc(1, "initialize", object({{"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()}})) +
         rpc(2, "session/new", object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}}));

@@ -1,4 +1,5 @@
 #include "kimi_preparation.h"
+#include "kimi_acp.h"
 #include "kimi_accounts.h"
 #include "kimi_config.h"
 
@@ -71,8 +72,24 @@ void required_control_is_explicitly_unavailable()
     request.prompt = "A task that must not be released without its required control action.";
     request.control.task_id = "required-control-regression";
     request.control.private_artifact_root = workspace;
+    request.control.connection = addon::Delegated_connection{
+        addon::path_to_utf8(std::filesystem::current_path() / "host relay"),
+        addon::path_to_utf8(std::filesystem::current_path() / ".logonomic/task-servers.json")};
     request.control.servers.push_back({"control", program, {"task_status"},
         {{"LOGONOMIC_TASK_ID", request.control.task_id}}});
+    request.control.servers.front().environment.emplace_back("VNM_CONTROL_TOKEN", "kimi-host-authority-canary");
+    const auto input = kimi::initial_acp_input(request);
+    const auto session = addon::parse_json(input.substr(input.find('\n') + 1), {}, nullptr);
+    require(session.has_value(), "native session request remains JSON");
+    const auto& server = session->find("params")->find("mcpServers")->as_array().front();
+    const auto& args = server.find("args")->as_array();
+    require(server.find("command")->as_string() == request.control.connection->relay_program &&
+        server.find("env")->as_array().empty() && args.size() == 4 &&
+        args[0].as_string() == "--descriptor" && args[1].as_string() == request.control.connection->descriptor_path &&
+        args[2].as_string() == "--server" && args[3].as_string() == "control",
+        "ACP uses exact nonsecret relay arguments");
+    require(input.find("kimi-host-authority-canary") == std::string::npos,
+        "host credentials cannot enter ACP stdin");
     addon::Contract_failure failure;
     const auto payload = addon::encode_delegated_prepare_request(request, 2);
     require(addon::decode_delegated_prepare_request(payload, &failure, 2).has_value(),

@@ -99,6 +99,10 @@ void prepare_delegated(addon::Invocation_context& context)
             return;
         }
     }
+    if (!request->control.connection) {
+        context.fail(addon::Result_status::UNAVAILABLE, "task_server_connection_unavailable");
+        return;
+    }
     auto environment = environment_pairs(request->context.launch_environment->effective_environment);
     (void)bound_home(environment, request->context.working_directory, request->context.account_context);
     const auto program = verified_program(request->context.launcher, request->context.launcher_argv,
@@ -112,6 +116,7 @@ void prepare_delegated(addon::Invocation_context& context)
     result.process.environment = std::move(environment);
     result.process.stdin_behavior = addon::Stdin_behavior::PAYLOAD;
     result.process.stdin_payload = initial_acp_input(*request);
+    result.acknowledgment.connection_version = addon::k_delegated_connection_version;
     result.inspection.incremental = true;
     result.inspection.keep_stdin_open = true;
     result.inspection.protocol_state = initial_acp_state(request->prompt);
