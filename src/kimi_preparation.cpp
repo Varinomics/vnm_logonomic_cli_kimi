@@ -103,7 +103,9 @@ void prepare_delegated(addon::Invocation_context& context)
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
     result.process.executable = k_bridge;
-    result.process.argv = {*program, "acp"};
+    result.process.argv = literal_argv(request->context.launcher.script_body);
+    result.process.argv.front() = *program;
+    result.process.argv.push_back("acp");
     result.process.environment = std::move(environment);
     result.process.stdin_behavior = addon::Stdin_behavior::PAYLOAD;
     result.process.stdin_payload = initial_acp_input(*request);

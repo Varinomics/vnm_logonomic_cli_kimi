@@ -282,14 +282,14 @@ void acp()
     request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1}}\n"
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"session-alpha\"}}\n";
     auto response = kimi::inspect_acp(request);
-    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/set_config_option") != std::string::npos,
-        "new ACP session must request auto mode before prompt");
+    require(!response.complete && !response.stdin_bytes,
+        "new ACP session keeps launcher permissions and waits for the command catalog");
     request.protocol_state = response.protocol_state;
     request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"session-alpha\",\"update\":{\"sessionUpdate\":\"available_commands_update\",\"availableCommands\":[{\"name\":\"mcp\",\"description\":\"Show MCP server status\"}]}}}\n"
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"configOptions\":[{\"id\":\"mode\",\"currentValue\":\"auto\"}]}}\n";
+        ;
     response = kimi::inspect_acp(request);
     require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("\"text\":\"/mcp\"") != std::string::npos &&
-        response.stdin_bytes->find(task.prompt) == std::string::npos, "authenticated auto mode queries task-server status");
+        response.stdin_bytes->find(task.prompt) == std::string::npos, "authenticated command catalog enables task-server status");
     request.protocol_state = response.protocol_state;
     request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"session-alpha\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"MCP servers (1):\\n- logonomic-task-task-alpha-coordination (stdio): connected, 2 tools\"}}}}\n"
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"stopReason\":\"end_turn\"}}\n";
@@ -314,7 +314,7 @@ void acp()
     require(response.complete && response.failure_reason.has_value() && !response.result_bytes, "foreign session output must fail authentication");
     request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"session/request_permission\",\"params\":{}}\n";
     response = kimi::inspect_acp(request);
-    require(response.complete && response.failure_reason.has_value(), "native auto execution must refuse unexpected reverse authority requests");
+    require(response.complete && response.failure_reason.has_value(), "malformed permission requests fail without approval");
     request.stdout_bytes = std::string(256 * 1024 + 1, 'x');
     response = kimi::inspect_acp(request);
     require(response.complete && response.failure_reason.has_value(), "unterminated ACP record remains bounded");

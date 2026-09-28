@@ -326,7 +326,9 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t-_. /\\:=") != std::string::npos) return std::nullopt;
         if (supplied != std::vector<std::string>{"powershell.exe", "-NoLogo", "-Command", launcher.script_body}) return std::nullopt;
     }
-    if (!resume && !(args.size() == 1 || (args.size() == 2 && args[1] == "--yolo"))) return std::nullopt;
+    if (!resume && !std::all_of(args.begin() + 1, args.end(), [](const std::string& option) {
+            return option == "--yolo" || option == "-y" || option == "--auto" || option == "--plan";
+        })) return std::nullopt;
     if (resume) {
         for (std::size_t index = 1; index < args.size(); ++index) {
             const auto& option = args[index];

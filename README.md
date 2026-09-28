@@ -91,8 +91,7 @@ answer. This is not evidence of clean native process exit.
 Delegated preparation configures each Task server in ACP `session/new` as the
 host relay with `--descriptor <path> --server <id>` and no environment, and
 acknowledges connection version 1; a request without a connection is refused as
-`task_server_connection_unavailable`. Mode acknowledgment does not admit the
-required actions. After `auto` mode is set, the adapter sends Kimi's ACP builtin
+`task_server_connection_unavailable`. The adapter sends Kimi's ACP builtin
 `/mcp`, which reports each MCP server's status and enabled tool count without a
 model turn. It is sent only after Kimi's advertised command list names it;
 otherwise the text would reach the model, and the task fails as
@@ -104,6 +103,13 @@ over stdio with as many tools as it has required actions. The host relay limits
 the catalog to those actions, and preparation refuses actions that Kimi would
 register under one tool name (`required_control_name_collision`), so equal
 counts mean every one was registered. Any other report fails the task as
-`required_control_unavailable`. `auto` mode
-approves the Task tools without permission requests; a permission request fails
-the task.
+`required_control_unavailable`.
+
+Delegated runs retain the launcher's permission posture and user configuration.
+The package approves a permission request once only when Kimi names one of this
+Task's own tools; every other request receives its reject-once option. It never
+selects a persistent approval. Kimi ACP ignores top-level permission flags, so
+an explicit launcher `--yolo`/`-y` selects ACP `auto` (Ask When Needed), `--auto`
+selects ACP `yolo` (Never Ask), and `--plan` selects ACP `plan`. Without those
+flags, the adapter leaves the session's mode alone. File edits and commands
+need permission from the launcher or the user's own Kimi configuration.

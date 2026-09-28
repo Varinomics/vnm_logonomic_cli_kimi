@@ -112,6 +112,20 @@ void required_control_reaches_native_admission(const char* executable)
     require(result->process.argv == std::vector<std::string>{addon::path_to_utf8(fake), "acp"} &&
         result->inspection.incremental && result->inspection.keep_stdin_open,
         "the proposal runs the verified launcher's native ACP server");
+    for (const auto& options : std::vector<std::vector<std::string>>{{"--yolo"}, {"-y"}, {"--auto"}, {"--plan"}}) {
+        auto selected = request;
+        for (const auto& option : options) selected.context.launcher.script_body += " " + option;
+        selected.context.launcher_argv.insert(selected.context.launcher_argv.end(), options.begin(), options.end());
+        Context configured;
+        configured.m_request = {"delegated", {"delegated-session", 2}, "prepare",
+            addon::encode_delegated_prepare_request(selected, 2)};
+        kimi::handle_preparation(configured);
+        const auto proposal = configured.m_result
+            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure, 2) : std::nullopt;
+        auto expected = selected.context.launcher_argv;
+        expected.push_back("acp");
+        require(proposal && proposal->process.argv == expected, "launcher permission options are preserved in delegated ACP");
+    }
     const auto& input = result->process.stdin_payload;
     const auto session = addon::parse_json(input.substr(input.find('\n') + 1), {}, nullptr);
     require(session.has_value(), "native session request remains JSON");
@@ -130,9 +144,9 @@ void required_control_reaches_native_admission(const char* executable)
     const std::string session_setup =
         R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}})" "\n"
         R"({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s"}})" "\n";
-    const std::string mode_setup =
+    const std::string command_catalog =
         R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"mcp","description":"Show MCP server status"}]}}})" "\n"
-        R"({"jsonrpc":"2.0","id":3,"result":{"configOptions":[{"id":"mode","currentValue":"auto"}]}})" "\n";
+        ;
     const auto status = [](std::string report) {
         auto chunk = addon::Json_value::object();
         chunk.set("type", addon::Json_value("text"));
@@ -146,7 +160,7 @@ void required_control_reaches_native_admission(const char* executable)
         inspection.stdout_bytes   = std::move(bytes);
         return kimi::inspect_acp(inspection);
     };
-    const auto querying = inspect(inspect(result->inspection.protocol_state, session_setup).protocol_state, mode_setup);
+    const auto querying = inspect(inspect(result->inspection.protocol_state, session_setup).protocol_state, command_catalog);
     require(!querying.failure_reason && querying.stdin_bytes && querying.stdin_bytes->find(request.prompt) == std::string::npos,
         "the prepared session queries its task servers before the task");
     const auto one_missing = inspect(querying.protocol_state, status("MCP servers (2):\n"
