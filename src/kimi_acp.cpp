@@ -1,10 +1,16 @@
 #include "kimi_acp.h"
 #include "kimi_json.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <map>
 #include <optional>
 #include <string_view>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace kimi {
 namespace {
@@ -12,11 +18,70 @@ namespace {
 namespace addon = logonomic::cli_addon;
 constexpr std::size_t k_record_limit = 256 * 1024;
 constexpr std::size_t k_result_limit = 1024 * 1024;
+constexpr std::size_t k_status_limit = 64 * 1024;
+// Kimi's ACP builtin `/mcp` renders the session's MCP connection state
+// without starting a model turn. It reports a snapshot, and Kimi signals no
+// connection change over ACP, so a pending server is queried again.
+constexpr std::string_view k_status_command = "mcp";
+constexpr auto k_status_interval = std::chrono::milliseconds(100);
+// Requests 1-3 initialize the session; status queries, the task and close follow.
+constexpr int k_first_status_request_id = 4;
+constexpr double k_max_request_id = 2147483647.0;
+
+enum class Task_server_status { ADMITTED, PENDING, UNAVAILABLE };
 
 std::string rpc(int id, const char* method, Json params)
 {
     return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", Json(id)},
         {"method", Json(method)}, {"params", std::move(params)}})) + '\n';
+}
+
+std::string prompt_request(int id, const Json& session, std::string prompt)
+{
+    auto content = Json::array();
+    content.push_back(object({{"type", Json("text")}, {"text", Json(std::move(prompt))}}));
+    return rpc(id, "session/prompt", object({{"sessionId", session}, {"prompt", std::move(content)}}));
+}
+
+std::string task_server_name(const addon::Delegated_prepare_request& request, const addon::Delegated_task_server& server)
+{
+    return "logonomic-task-" + request.control.task_id + "-" + server.server_id;
+}
+
+// `/mcp` prints "- <name> (<transport>): <status>, <count> tools" for every
+// configured server. Kimi counts the tools it enabled from the catalog, and
+// the host relay limits that catalog to the required actions. Preparation
+// refuses actions that Kimi would register under one name, so the count
+// equals the action count only when every required action was registered.
+// Names and error text are printed unescaped: a second line for a name is
+// refused rather than trusted.
+Task_server_status task_server_status(std::string_view report, const Json& servers)
+{
+    std::vector<std::string_view> lines;
+    for (std::size_t start = 0; start <= report.size();) {
+        const auto end = std::min(report.find('\n', start), report.size());
+        lines.push_back(report.substr(start, end - start));
+        start = end + 1;
+    }
+    bool pending = false;
+    for (const auto& server : servers.as_array()) {
+        const auto prefix = "- " + text(server, "name") + " (";
+        const std::string_view* line = nullptr;
+        for (const auto& candidate : lines) {
+            if (!candidate.starts_with(prefix)) continue;
+            if (line) return Task_server_status::UNAVAILABLE;
+            line = &candidate;
+        }
+        const auto head = prefix + "stdio): ";
+        const auto actions = static_cast<std::uint64_t>(member(server, "actions").as_number());
+        if (line && *line == head + "connected, " + std::to_string(actions) + " tools") continue;
+        if (line && *line == head + "pending, 0 tools") {
+            pending = true;
+            continue;
+        }
+        return Task_server_status::UNAVAILABLE;
+    }
+    return pending ? Task_server_status::PENDING : Task_server_status::ADMITTED;
 }
 
 addon::Structured_inspect_result failure(const char* reason)
@@ -100,7 +165,8 @@ bool valid_plan(const Json& value)
     return true;
 }
 
-bool notification(const Json& value, std::string_view stage, std::string_view session, std::string& output)
+bool notification(const Json& value, std::string_view stage, std::string_view session, bool status_outstanding,
+    std::string& output, std::string& status, bool& status_command)
 {
     const auto& params = member(value, "params");
     if (!exact_keys(value, {"jsonrpc", "method", "params"}) || text(value, "jsonrpc") != "2.0" ||
@@ -109,7 +175,16 @@ bool notification(const Json& value, std::string_view stage, std::string_view se
     const auto& update = member(params, "update");
     const auto type = text(update, "sessionUpdate");
     if (type == "available_commands_update") {
-        return stage != "await_initialize" && stage != "await_new" && valid_commands(update);
+        if (stage == "await_initialize" || stage == "await_new" || !valid_commands(update)) return false;
+        const auto& commands = member(update, "availableCommands").as_array();
+        status_command = std::any_of(commands.begin(), commands.end(),
+            [](const Json& command) { return text(command, "name") == k_status_command; });
+        return true;
+    }
+    if (type == "agent_message_chunk" && stage == "await_admission") {
+        if (!status_outstanding || !valid_text(update)) return false;
+        status += text(member(update, "content"), "text");
+        return status.size() <= k_status_limit;
     }
     if (type == "current_mode_update") {
         return stage == "await_mode" && exact_keys(update, {"sessionUpdate", "currentModeId"}) &&
@@ -146,7 +221,60 @@ bool response(const Json& value, int expected)
         member(value, "result").is_object();
 }
 
+std::string sanitized_name_part(std::string_view part)
+{
+    std::string result;
+    for (const char c : part) {
+        const bool kept = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '-';
+        const char mapped = kept ? c : '_';
+        if (mapped == '_' && !result.empty() && result.back() == '_') continue;
+        result.push_back(mapped);
+    }
+    return result;
+}
+
 } // namespace
+
+// Mirrors qualifyMcpToolName in Kimi Code's mcpCore/tool-naming.ts: every
+// character outside [A-Za-z0-9_-] becomes '_', runs of '_' collapse, and a
+// name over 64 characters keeps its start plus '_' and a 32-bit FNV-1a hash of
+// the whole name, printed as JavaScript prints a signed integer in base 16.
+std::string mcp_tool_name(std::string_view server, std::string_view tool)
+{
+    constexpr std::size_t k_max_length = 64;
+    auto full = "mcp__" + sanitized_name_part(server) + "__" + sanitized_name_part(tool);
+    if (full.size() <= k_max_length) return full;
+    std::uint32_t hash = 2166136261u;
+    for (const char c : full) {
+        hash ^= static_cast<unsigned char>(c);
+        hash *= 16777619u;
+    }
+    const auto value = static_cast<std::int32_t>(hash);
+    auto magnitude = static_cast<std::uint64_t>(value < 0 ? -static_cast<std::int64_t>(value) : value);
+    std::string digits;
+    do {
+        digits.insert(digits.begin(), "0123456789abcdef"[magnitude % 16]);
+        magnitude /= 16;
+    } while (magnitude != 0);
+    if (value < 0) digits.insert(digits.begin(), '-');
+    if (digits.size() < 8) digits.insert(0, 8 - digits.size(), '0');
+    return full.substr(0, k_max_length - digits.size() - 1) + "_" + digits;
+}
+
+std::optional<std::string> required_action_collision(const addon::Delegated_prepare_request& request)
+{
+    std::map<std::string, std::string> registered;
+    for (const auto& server : request.control.servers) {
+        for (const auto& action : server.actions) {
+            const auto name = mcp_tool_name(task_server_name(request, server), action);
+            const auto action_label = server.server_id + "/" + action;
+            const auto [existing, inserted] = registered.emplace(name, action_label);
+            if (!inserted) return existing->second + " and " + action_label;
+        }
+    }
+    return std::nullopt;
+}
 
 std::string initial_acp_input(const addon::Delegated_prepare_request& request)
 {
@@ -159,36 +287,58 @@ std::string initial_acp_input(const addon::Delegated_prepare_request& request)
         {
             arguments.push_back(Json(argument));
         }
-        servers.push_back(object({{"name", Json("logonomic-task-" + request.control.task_id + "-" + server.server_id)},
+        servers.push_back(object({{"name", Json(task_server_name(request, server))},
             {"command", Json(connection.relay_program)}, {"args", std::move(arguments)}, {"env", Json::array()}}));
     }
     return rpc(1, "initialize", object({{"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()}})) +
         rpc(2, "session/new", object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}}));
 }
 
-std::string initial_acp_state(std::string_view prompt)
+std::string initial_acp_state(const addon::Delegated_prepare_request& request)
 {
+    auto servers = Json::array();
+    for (const auto& server : request.control.servers) {
+        servers.push_back(object({{"name", Json(task_server_name(request, server))},
+            {"actions", Json(static_cast<double>(server.actions.size()))}}));
+    }
     return addon::serialize_json(object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
         {"deferred_input_base64", Json("")},
-        {"prompt_base64", Json(addon::encode_base64(prompt))}, {"session_id", Json("")}, {"result_base64", Json("")}}));
+        {"prompt_base64", Json(addon::encode_base64(request.prompt))}, {"session_id", Json("")}, {"result_base64", Json("")},
+        {"servers", std::move(servers)}, {"status_command", Json(false)}, {"request_id", Json(0)},
+        {"status_base64", Json("")}}));
 }
 
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     const auto parsed = parse(inspection.protocol_state);
-    if (!parsed || !exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id", "result_base64"}) ||
-        !member(*parsed, "stage").is_string() || !bounded_string(member(*parsed, "session_id"), 512, true)) {
+    if (!parsed || !exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
+            "result_base64", "servers", "status_command", "request_id", "status_base64"}) ||
+        !member(*parsed, "stage").is_string() || !bounded_string(member(*parsed, "session_id"), 512, true) ||
+        !member(*parsed, "servers").is_array() || !member(*parsed, "status_command").is_boolean() ||
+        !nonnegative_integer(member(*parsed, "request_id")) || member(*parsed, "request_id").as_number() > k_max_request_id)
+    {
         return failure("malformed_acp_state");
     }
     auto state = *parsed;
-    for (const auto key : {"pending_base64", "deferred_input_base64", "prompt_base64", "result_base64"}) {
+    for (const auto key : {"pending_base64", "deferred_input_base64", "prompt_base64", "result_base64", "status_base64"}) {
         if (!member(state, key).is_string()) return failure("malformed_acp_state");
+    }
+    for (const auto& server : member(state, "servers").as_array()) {
+        if (!exact_keys(server, {"name", "actions"}) || !bounded_string(member(server, "name"), 512) ||
+            !nonnegative_integer(member(server, "actions"))) return failure("malformed_acp_state");
     }
     auto pending = addon::decode_base64(text(state, "pending_base64"));
     auto deferred_input = addon::decode_base64(text(state, "deferred_input_base64"));
     auto prompt  = addon::decode_base64(text(state, "prompt_base64"));
     auto output  = addon::decode_base64(text(state, "result_base64"));
-    if (!pending || !deferred_input || !prompt || !output || output->size() > k_result_limit) return failure("malformed_acp_state");
+    auto status  = addon::decode_base64(text(state, "status_base64"));
+    if (!pending || !deferred_input || !prompt || !output || !status || output->size() > k_result_limit ||
+        status->size() > k_status_limit) return failure("malformed_acp_state");
+    bool status_command = member(state, "status_command").as_boolean();
+    auto request_id = static_cast<int>(member(state, "request_id").as_number());
+    const auto status_request = [&state, &request_id]() {
+        return prompt_request(request_id, member(state, "session_id"), "/" + std::string(k_status_command));
+    };
     *pending += inspection.stdout_bytes;
     // A reply proposed while a native record is incomplete has not been
     // written yet. Retain that causal boundary across inspection calls.
@@ -202,8 +352,8 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (!value || !value->is_object()) return failure("invalid_acp_record");
         const auto stage = text(state, "stage");
         if (value->find("method")) {
+            const auto type = text(member(member(*value, "params"), "update"), "sessionUpdate");
             if (!input.empty()) {
-                const auto type = text(member(member(*value, "params"), "update"), "sessionUpdate");
                 const bool housekeeping = type == "available_commands_update" ||
                     type == "current_mode_update" || type == "config_option_update";
                 const bool closing_advisory = stage == "await_close" &&
@@ -212,7 +362,19 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                     return failure("out_of_order_acp_notification");
                 }
             }
-            if (!notification(*value, stage, text(state, "session_id"), *output)) return failure("unauthenticated_acp_notification");
+            if (!notification(*value, stage, text(state, "session_id"), stage == "await_admission" && request_id != 0,
+                    *output, *status, status_command))
+            {
+                return failure("unauthenticated_acp_notification");
+            }
+            if (type == "available_commands_update" && (stage == "await_mode" || stage == "await_admission")) {
+                // Without the builtin, "/mcp" would reach the model as a prompt.
+                if (!status_command) return failure("task_server_status_unavailable");
+                if (stage == "await_admission" && request_id == 0) {
+                    request_id = k_first_status_request_id;
+                    input = status_request();
+                }
+            }
             continue;
         }
         if (!input.empty()) return failure("out_of_order_acp_response");
@@ -235,23 +397,46 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             if (!response(*value, 3) || !mode_is_auto(result) || prompt->empty() || !addon::is_valid_utf8(*prompt)) {
                 return failure("invalid_acp_mode");
             }
-            state.set("stage", Json("await_prompt"));
-            state.set("prompt_base64", Json(""));
-            auto content = Json::array();
-            content.push_back(object({{"type", Json("text")}, {"text", Json(*prompt)}}));
-            input = rpc(4, "session/prompt", object({{"sessionId", member(state, "session_id")}, {"prompt", std::move(content)}}));
+            state.set("stage", Json("await_admission"));
+            // The command list follows the session reply and may still be in flight.
+            if (status_command) {
+                request_id = k_first_status_request_id;
+                input = status_request();
+            }
+        }
+        else
+        if (stage == "await_admission") {
+            if (request_id == 0 || !response(*value, request_id) || text(result, "stopReason") != "end_turn") {
+                return failure("invalid_acp_task_server_status");
+            }
+            const auto admission = task_server_status(*status, member(state, "servers"));
+            status->clear();
+            if (admission == Task_server_status::UNAVAILABLE) return failure("required_control_unavailable");
+            ++request_id;
+            if (admission == Task_server_status::PENDING) {
+                // Inspection runs in the add-on process. Pace the native status
+                // queries; Kimi's own startup timeout bounds a pending server.
+                std::this_thread::sleep_for(k_status_interval);
+                input = status_request();
+            }
+            else {
+                state.set("stage", Json("await_prompt"));
+                state.set("prompt_base64", Json(""));
+                input = prompt_request(request_id, member(state, "session_id"), std::move(*prompt));
+            }
         }
         else
         if (stage == "await_prompt") {
-            if (!response(*value, 4) || text(result, "stopReason") != "end_turn" || output->empty()) {
+            if (!response(*value, request_id) || text(result, "stopReason") != "end_turn" || output->empty()) {
                 return failure("invalid_acp_completion");
             }
             state.set("stage", Json("await_close"));
-            input = rpc(5, "session/close", object({{"sessionId", member(state, "session_id")}}));
+            ++request_id;
+            input = rpc(request_id, "session/close", object({{"sessionId", member(state, "session_id")}}));
         }
         else
         if (stage == "await_close") {
-            if (!response(*value, 5) || !result.as_object().empty() || !pending->empty() ||
+            if (!response(*value, request_id) || !result.as_object().empty() || !pending->empty() ||
                 (inspection.final && (inspection.timed_out || inspection.exit_code != 0))) return failure("invalid_acp_close");
             addon::Structured_inspect_result completed;
             completed.complete     = true;
@@ -269,6 +454,9 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     state.set("deferred_input_base64", Json(defer_input ? addon::encode_base64(input) : ""));
     state.set("pending_base64", Json(addon::encode_base64(*pending)));
     state.set("result_base64", Json(addon::encode_base64(*output)));
+    state.set("status_base64", Json(addon::encode_base64(*status)));
+    state.set("status_command", Json(status_command));
+    state.set("request_id", Json(request_id));
     addon::Structured_inspect_result result;
     result.protocol_state = addon::serialize_json(state);
     if (!addon::exchange_protocol_state_valid(result.protocol_state)) return failure("acp_state_limit");

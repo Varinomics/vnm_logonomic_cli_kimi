@@ -31,42 +31,108 @@ addon::Structured_inspect_result inspect(std::string state, std::string bytes,
     }
     return result;
 }
+addon::Delegated_prepare_request task_request() {
+    addon::Delegated_prepare_request request;
+    request.prompt="TASK PAYLOAD";
+    request.control.task_id="t";
+    request.control.servers.push_back({"control","/opt/logonomic/logonomic_coordination_mcp",{"task_status"},{}});
+    return request;
+}
+std::string reply(int id, std::string_view result) {
+    return R"({"jsonrpc":"2.0","id":)" + std::to_string(id) + R"(,"result":)" + std::string(result) + "}\n";
+}
+std::string chunk(std::string_view text) {
+    return R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":")" +
+        std::string(text) + "\"}}}}\n";
+}
+std::string status(std::string_view report, int id) { return chunk(report) + reply(id, R"({"stopReason":"end_turn"})"); }
+bool carries(const addon::Structured_inspect_result& result, std::string_view text) {
+    return result.stdin_bytes && result.stdin_bytes->find(text) != std::string::npos;
+}
 const std::string initialize=R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}})" "\n";
 const std::string new_session=R"({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s"}})" "\n";
 const std::string mode=R"({"jsonrpc":"2.0","id":3,"result":{"configOptions":[{"id":"mode","currentValue":"auto"}]}})" "\n";
-const std::string completion=R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}})" "\n";
-const std::string close_reply = R"({"jsonrpc":"2.0","id":5,"result":{}})" "\n";
-const std::string model_text=R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ANSWER"}}}})" "\n";
-const std::string commands=R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}})" "\n";
+const std::string commands=R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"status","description":"Show current session status"},{"name":"mcp","description":"Show MCP server status"}]}}})" "\n";
+const std::string commands_without_status=R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"status","description":"Show current session status"}]}}})" "\n";
+const std::string connected=R"(MCP servers (2):\n- user-notes (stdio): connected, 4 tools\n- logonomic-task-t-control (stdio): connected, 1 tools)";
+const std::string pending=R"(MCP servers (1):\n- logonomic-task-t-control (stdio): pending, 0 tools)";
+const std::string completion=reply(5, R"({"stopReason":"end_turn"})");
+const std::string close_reply=reply(6, "{}");
+const std::string model_text=chunk("ANSWER");
 }
 int main() {
-    const auto setup=inspect(provider::initial_acp_state("TASK PAYLOAD"),initialize+new_session);
+    const auto setup=inspect(provider::initial_acp_state(task_request()),initialize+new_session);
     require(setup.stdin_bytes.has_value() && !setup.failure_reason, "mode setup succeeds");
     // A whole frame and every strict prefix have the same causal meaning.
     for (const auto& forbidden : {model_text, completion}) {
-        const auto whole=inspect(setup.protocol_state,mode+forbidden);
-        require(whole.failure_reason.has_value() && !whole.stdin_bytes,"whole pre-request frame is rejected before task release");
+        const auto whole=inspect(setup.protocol_state,commands+mode+forbidden);
+        require(whole.failure_reason.has_value() && !whole.stdin_bytes,"whole pre-request frame is rejected before release");
         for (std::size_t split=1;split<forbidden.size();++split) {
-            const auto first=inspect(setup.protocol_state,mode+forbidden.substr(0,split));
-            require(!first.complete&&!first.failure_reason&&!first.stdin_bytes,"unclassified pre-request prefix holds task");
+            const auto first=inspect(setup.protocol_state,commands+mode+forbidden.substr(0,split));
+            require(!first.complete&&!first.failure_reason&&!first.stdin_bytes,"unclassified pre-request prefix holds the status query");
             const auto empty=inspect(first.protocol_state,"");
-            require(!empty.complete&&!empty.failure_reason&&!empty.stdin_bytes,"empty inspection cannot release deferred task");
+            require(!empty.complete&&!empty.failure_reason&&!empty.stdin_bytes,"empty inspection cannot release a deferred query");
             const auto second=inspect(empty.protocol_state,forbidden.substr(split));
             require(second.failure_reason.has_value()&&!second.stdin_bytes,"forbidden tail retains pre-request provenance");
         }
     }
-    const auto full_housekeeping=inspect(setup.protocol_state,mode+commands);
-    require(!full_housekeeping.failure_reason&&full_housekeeping.stdin_bytes.has_value(),"complete housekeeping permits prompt");
+    // Kimi advertises its commands after the session reply; either order holds.
+    const auto late_commands=inspect(setup.protocol_state,mode+commands);
+    require(!late_commands.failure_reason&&carries(late_commands,R"("text":"/mcp")")&&!carries(late_commands,"TASK PAYLOAD"),
+        "commands after the mode reply release the status query, not the task");
+    const auto waiting=inspect(setup.protocol_state,mode);
+    require(!waiting.complete&&!waiting.failure_reason&&!waiting.stdin_bytes,"no query is sent before /mcp is advertised");
     for (std::size_t split=1;split<commands.size();++split) {
-        const auto first=inspect(setup.protocol_state,mode+commands.substr(0,split));
-        require(!first.complete&&!first.failure_reason&&!first.stdin_bytes,"partial housekeeping holds task");
+        const auto first=inspect(waiting.protocol_state,commands.substr(0,split));
+        require(!first.complete&&!first.failure_reason&&!first.stdin_bytes,"partial housekeeping holds the query");
         const auto second=inspect(first.protocol_state,commands.substr(split));
-        require(!second.failure_reason&&second.stdin_bytes.has_value(),"classified housekeeping releases task exactly once");
+        require(!second.failure_reason&&carries(second,"/mcp"),"classified housekeeping releases the query exactly once");
         const auto third=inspect(second.protocol_state,"");
-        require(!third.complete&&!third.failure_reason&&!third.stdin_bytes,"deferred task is not replayed");
+        require(!third.complete&&!third.failure_reason&&!third.stdin_bytes,"the query is not replayed");
     }
-    const auto prompt=inspect(setup.protocol_state,mode);
-    require(!prompt.failure_reason&&prompt.stdin_bytes.has_value(),"normal prompt is released");
+    for (const auto& bytes : {commands_without_status+mode, mode+commands_without_status}) {
+        const auto refused=inspect(setup.protocol_state,bytes);
+        require(refused.failure_reason=="task_server_status_unavailable"&&!refused.stdin_bytes,
+            "without the builtin status command nothing reaches the model");
+    }
+    const auto early_report=inspect(setup.protocol_state,mode+chunk(connected));
+    require(early_report.failure_reason.has_value()&&!early_report.stdin_bytes,"a report before its query is not evidence");
+
+    const auto querying=inspect(setup.protocol_state,commands+mode);
+    require(!querying.failure_reason&&carries(querying,R"("id":4)")&&carries(querying,"/mcp")&&!carries(querying,"TASK PAYLOAD"),
+        "the task waits for the status query");
+    const auto still_pending=inspect(querying.protocol_state,status(pending,4));
+    require(!still_pending.failure_reason&&carries(still_pending,R"("id":5)")&&carries(still_pending,"/mcp")&&
+        !carries(still_pending,"TASK PAYLOAD"),"a pending task server is queried again");
+    const auto after_pending=inspect(still_pending.protocol_state,status(connected,5));
+    require(!after_pending.failure_reason&&carries(after_pending,R"("id":6)")&&carries(after_pending,"TASK PAYLOAD"),
+        "the task follows the report that admits every server");
+    for (const auto* report : {
+            R"(MCP servers (1):\n- logonomic-task-t-control (stdio): failed, 0 tools)",
+            R"(MCP servers (1):\n- logonomic-task-t-control (stdio): connected, 0 tools)",
+            R"(MCP servers (1):\n- logonomic-task-t-control (stdio): connected, 2 tools)",
+            R"(MCP servers (1):\n- logonomic-task-t-control (http): connected, 1 tools)",
+            R"(MCP servers (1):\n- logonomic-task-t-control (stdio): connected, 1 tools and more)",
+            R"(MCP servers (1):\n- user-notes (stdio): connected, 1 tools)",
+            R"(No MCP servers configured for this session.)",
+            R"(MCP servers (2):\n- x (stdio): failed, 0 tools\n- logonomic-task-t-control (stdio): connected, 1 tools\n- logonomic-task-t-control (stdio): pending, 0 tools)"})
+    {
+        const auto refused=inspect(querying.protocol_state,status(report,4));
+        require(refused.failure_reason=="required_control_unavailable"&&!refused.stdin_bytes,
+            "only one exact connected line with every required action admits a server");
+    }
+    const auto cancelled=inspect(querying.protocol_state,chunk(connected)+reply(4,R"({"stopReason":"cancelled"})"));
+    require(cancelled.failure_reason=="invalid_acp_task_server_status","an unfinished status query admits nothing");
+    const auto report=status(connected,4);
+    for (std::size_t split=1;split<report.size();++split) {
+        const auto first=inspect(querying.protocol_state,report.substr(0,split));
+        require(!first.complete&&!first.failure_reason&&!carries(first,"TASK PAYLOAD"),"a partial report holds the task");
+        const auto second=inspect(first.protocol_state,report.substr(split));
+        require(!second.failure_reason&&carries(second,"TASK PAYLOAD"),"a fragmented report admits the task once");
+    }
+
+    const auto prompt=inspect(querying.protocol_state,report);
+    require(!prompt.failure_reason&&carries(prompt,R"("id":5)")&&carries(prompt,"TASK PAYLOAD"),"normal prompt is released");
     auto wrong_session=model_text; wrong_session.replace(wrong_session.find("\"s\""),3,"\"other\"");
     require(inspect(prompt.protocol_state,wrong_session).failure_reason.has_value(),"foreign session cannot supply result");
     const std::string reverse=R"({"jsonrpc":"2.0","id":20,"method":"session/request_permission","params":{"sessionId":"s"}})" "\n";

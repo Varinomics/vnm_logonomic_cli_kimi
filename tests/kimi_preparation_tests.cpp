@@ -14,7 +14,9 @@
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -47,20 +49,8 @@ void require(bool condition, const char* description)
     if (!condition) throw std::runtime_error(description);
 }
 
-void required_control_is_explicitly_unavailable()
+addon::Launch_environment native_environment(const std::string& home)
 {
-    // Regression: invoke the real preparation owner with a decoder-valid envelope.
-    // A missing native executable is deliberate: the action-admission boundary
-    // must answer first, without running a native probe or creating a proposal.
-    const auto workspace = addon::path_to_utf8(std::filesystem::current_path());
-    const auto home = addon::path_to_utf8(std::filesystem::current_path() / ".kimi-profile");
-    const auto program = addon::path_to_utf8(std::filesystem::current_path() / "absent-required-control-native");
-    addon::Delegated_prepare_request request;
-    request.context.launcher = {"kimi", addon::k_runner_direct, program};
-    request.context.launcher_argv = {program};
-    request.context.working_directory = workspace;
-    request.context.account_context = addon::Account_context{2,
-        kimi::account_key(addon::path_from_utf8(home)), home};
     addon::Launch_environment environment;
 #ifdef _WIN32
     environment.platform_id = "windows-x86_64";
@@ -68,41 +58,109 @@ void required_control_is_explicitly_unavailable()
     environment.platform_id = "linux-x86_64";
 #endif
     environment.effective_environment.set("KIMI_CODE_HOME", addon::Json_value(home));
-    request.context.launch_environment = environment;
-    request.prompt = "A task that must not be released without its required control action.";
-    request.control.task_id = "required-control-regression";
-    request.control.private_artifact_root = workspace;
+    for (const auto* name : {"SystemRoot", "PATH"}) {
+        if (const auto* value = std::getenv(name)) {
+            environment.effective_environment.set(name, addon::Json_value(value));
+        }
+    }
+    return environment;
+}
+
+void required_control_reaches_native_admission(const char* executable)
+{
+    // Regression: preparation refused every request that named required
+    // actions, and the host always names them. The real preparation owner now
+    // proposes the native ACP process; its inspection admits the actions.
+    namespace fs = std::filesystem;
+    const auto scratch = fs::temp_directory_path() / ("kimi-delegated-" + addon::random_nonce_hex());
+    fs::create_directories(scratch / "selected");
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{scratch};
+    const auto root = fs::canonical(scratch);
+    const auto home = addon::path_to_utf8(root / "selected");
+#ifdef _WIN32
+    const auto fake = root / "kimi.exe";
+#else
+    const auto fake = root / "kimi";
+#endif
+    fs::copy_file(fs::absolute(executable), fake);
+    addon::Delegated_prepare_request request;
+    request.context.launcher.runner_key  = addon::k_runner_direct;
+    request.context.launcher.script_body = '"' + addon::path_to_utf8(fake) + '"';
+    request.context.launcher_argv        = {addon::path_to_utf8(fake)};
+    request.context.working_directory    = addon::path_to_utf8(root);
+    request.context.account_context = addon::Account_context{2, kimi::account_key(root / "selected"), home};
+    request.context.launch_environment = native_environment(home);
+    request.context.launch_environment->effective_environment.set("KIMI_TEST_VERSION", addon::Json_value("2.0.2"));
+    request.prompt = "Submit the review task to the delegation target.";
+    request.control.task_id = "task-7f3a";
+    request.control.private_artifact_root = addon::path_to_utf8(root);
     request.control.connection = addon::Delegated_connection{
-        addon::path_to_utf8(std::filesystem::current_path() / "host relay"),
-        addon::path_to_utf8(std::filesystem::current_path() / ".logonomic/task-servers.json")};
-    request.control.servers.push_back({"control", program, {"task_status"},
-        {{"LOGONOMIC_TASK_ID", request.control.task_id}}});
-    request.control.servers.front().environment.emplace_back("VNM_CONTROL_TOKEN", "kimi-host-authority-canary");
-    const auto input = kimi::initial_acp_input(request);
+        addon::path_to_utf8(root / "host relay"),
+        addon::path_to_utf8(root / ".logonomic/task-servers.json")};
+    const auto server_program = addon::path_to_utf8(root / "logonomic_coordination_mcp");
+    request.control.servers.push_back({"coordination", server_program, {"status", "notice"},
+        {{"VNM_CONTROL_TOKEN", "kimi-host-authority-canary"}}});
+    request.control.servers.push_back({"delegation", server_program, {"targets", "submit"}, {}});
+    Context context;
+    context.m_request = {"delegated", {"delegated-session", 2}, "prepare", addon::encode_delegated_prepare_request(request, 2)};
+    kimi::handle_preparation(context);
+    addon::Contract_failure failure;
+    const auto result = context.m_result ? addon::decode_delegated_prepare_result(*context.m_result, &failure, 2) : std::nullopt;
+    require(result && result->acknowledgment.connection_version == addon::k_delegated_connection_version &&
+        result->acknowledgment.server_ids == std::vector<std::string>{"coordination", "delegation"},
+        "required actions reach a relay-acknowledged native proposal");
+    require(result->process.argv == std::vector<std::string>{addon::path_to_utf8(fake), "acp"} &&
+        result->inspection.incremental && result->inspection.keep_stdin_open,
+        "the proposal runs the verified launcher's native ACP server");
+    const auto& input = result->process.stdin_payload;
     const auto session = addon::parse_json(input.substr(input.find('\n') + 1), {}, nullptr);
     require(session.has_value(), "native session request remains JSON");
     const auto& server = session->find("params")->find("mcpServers")->as_array().front();
     const auto& args = server.find("args")->as_array();
-    require(server.find("command")->as_string() == request.control.connection->relay_program &&
+    require(server.find("name")->as_string() == "logonomic-task-task-7f3a-coordination" &&
+        server.find("command")->as_string() == request.control.connection->relay_program &&
         server.find("env")->as_array().empty() && args.size() == 4 &&
         args[0].as_string() == "--descriptor" && args[1].as_string() == request.control.connection->descriptor_path &&
-        args[2].as_string() == "--server" && args[3].as_string() == "control",
+        args[2].as_string() == "--server" && args[3].as_string() == "coordination",
         "ACP uses exact nonsecret relay arguments");
-    require(input.find("kimi-host-authority-canary") == std::string::npos,
-        "host credentials cannot enter ACP stdin");
-    addon::Contract_failure failure;
-    const auto payload = addon::encode_delegated_prepare_request(request, 2);
-    require(addon::decode_delegated_prepare_request(payload, &failure, 2).has_value(),
-        "containment fixture must satisfy the actual public decoder");
-    Context context;
-    context.m_request = {"required-control", {"delegated-session", 2}, "prepare", payload};
-    bool refused = false;
-    try { kimi::handle_preparation(context); }
-    catch (const std::runtime_error& error) {
-        refused = std::string(error.what()) == "required_control_admission_unavailable";
-    }
-    require(refused && context.m_failure_status == addon::Result_status::UNAVAILABLE && !context.m_result,
-        "unsupported required actions must produce no process proposal or task bytes");
+    require(input.find("kimi-host-authority-canary") == std::string::npos && input.find(request.prompt) == std::string::npos,
+        "neither host credentials nor the task enter ACP stdin before admission");
+
+    // The prepared state requires both task servers with all of their actions.
+    const std::string session_setup =
+        R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}})" "\n"
+        R"({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s"}})" "\n";
+    const std::string mode_setup =
+        R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"mcp","description":"Show MCP server status"}]}}})" "\n"
+        R"({"jsonrpc":"2.0","id":3,"result":{"configOptions":[{"id":"mode","currentValue":"auto"}]}})" "\n";
+    const auto status = [](std::string report) {
+        auto chunk = addon::Json_value::object();
+        chunk.set("type", addon::Json_value("text"));
+        chunk.set("text", addon::Json_value(std::move(report)));
+        return R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":)" +
+            addon::serialize_json(chunk) + "}}}\n" + R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}})" "\n";
+    };
+    const auto inspect = [](std::string state, std::string bytes) {
+        addon::Structured_inspection inspection;
+        inspection.protocol_state = std::move(state);
+        inspection.stdout_bytes   = std::move(bytes);
+        return kimi::inspect_acp(inspection);
+    };
+    const auto querying = inspect(inspect(result->inspection.protocol_state, session_setup).protocol_state, mode_setup);
+    require(!querying.failure_reason && querying.stdin_bytes && querying.stdin_bytes->find(request.prompt) == std::string::npos,
+        "the prepared session queries its task servers before the task");
+    const auto one_missing = inspect(querying.protocol_state, status("MCP servers (2):\n"
+        "- logonomic-task-task-7f3a-coordination (stdio): connected, 2 tools\n"
+        "- logonomic-task-task-7f3a-delegation (stdio): connected, 1 tools"));
+    require(one_missing.failure_reason == "required_control_unavailable",
+        "a task server without every required action is not admitted");
+    const auto admitted = inspect(querying.protocol_state, status("MCP servers (2):\n"
+        "- logonomic-task-task-7f3a-coordination (stdio): connected, 2 tools\n"
+        "- logonomic-task-task-7f3a-delegation (stdio): connected, 2 tools"));
+    require(!admitted.failure_reason && admitted.stdin_bytes &&
+        admitted.stdin_bytes->find(request.prompt) != std::string::npos,
+        "the task is released once every task server holds its required actions");
+
     Context cancelled;
     cancelled.m_request = context.m_request;
     cancelled.m_cancelled = true;
@@ -112,13 +170,35 @@ void required_control_is_explicitly_unavailable()
         cancellation_preserved = std::string(error.what()) == "cancelled";
     }
     require(cancellation_preserved && cancelled.m_failure_status == addon::Result_status::CANCELLED && !cancelled.m_result,
-        "the fail-closed boundary must not relabel an already cancelled request");
-    // The SDK accepts empty action lists, but the host requires nonempty ones.
-    // Decoder acceptance here cannot establish a working host delegation path.
-    request.control.servers.front().actions.clear();
-    require(addon::decode_delegated_prepare_request(
-        addon::encode_delegated_prepare_request(request, 2), &failure, 2).has_value(),
-        "empty-action control servers remain decoder-valid, not host-valid");
+        "a cancelled preparation reports cancellation and proposes no process");
+
+    // Kimi registers only the first of two tools with one dispatcher name, so
+    // its tool count would still match; such actions are refused up front.
+    request.control.servers.back().actions = {"status.a", "status_a"};
+    Context colliding;
+    colliding.m_request = {"delegated", {"delegated-session", 2}, "prepare", addon::encode_delegated_prepare_request(request, 2)};
+    bool collision_refused = false;
+    try { kimi::handle_preparation(colliding); }
+    catch (const std::runtime_error& error) {
+        collision_refused = std::string(error.what()) == "required_control_name_collision";
+    }
+    require(collision_refused && colliding.m_failure_status == addon::Result_status::UNAVAILABLE && !colliding.m_result,
+        "required actions that share a Kimi tool name are refused before a process is proposed");
+}
+
+void kimi_tool_names()
+{
+    // Oracle: values computed with Kimi Code 2.0.2's qualifyMcpToolName
+    // (mcpCore/tool-naming.ts), including negative hashes printed with '-'.
+    const std::string task = "logonomic-task-0123456789abcdef0123456789abcdef-coordination";
+    require(kimi::mcp_tool_name("logonomic-task-t-control", "task_status") == "mcp__logonomic-task-t-control__task_status" &&
+        kimi::mcp_tool_name(task, "status") == "mcp__logonomic-task-0123456789abcdef0123456789abcdef-co_-ff22951" &&
+        kimi::mcp_tool_name(task, "notice") == "mcp__logonomic-task-0123456789abcdef0123456789abcdef-c_-2f62928f" &&
+        kimi::mcp_tool_name("logonomic-task-9f8e7d6c5b4a39281706f5e4d3c2b1a0-delegation", "submit") ==
+            "mcp__logonomic-task-9f8e7d6c5b4a39281706f5e4d3c2b1a0-de_495ef1f0",
+        "Kimi tool names are mirrored exactly, including shortened names");
+    require(kimi::mcp_tool_name("task server", "a.b") == kimi::mcp_tool_name("task.server", "a__b"),
+        "sanitized parts collapse separator runs as Kimi does");
 }
 
 void launch_disposition()
@@ -268,17 +348,18 @@ void resume_policy(const char* executable, const char* help, bool admitted = tru
 
 int main(int argc, char** argv)
 {
-    if (argc == 2 && std::string(argv[1]) == "--help") {
+    if (argc == 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "--version")) {
 #ifdef _WIN32
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
-        const auto* help = std::getenv("KIMI_TEST_HELP");
-        if (!help) return 1;
-        std::cout << help;
+        const auto* text = std::getenv(std::string(argv[1]) == "--help" ? "KIMI_TEST_HELP" : "KIMI_TEST_VERSION");
+        if (!text) return 1;
+        std::cout << text;
         return 0;
     }
     try {
-        required_control_is_explicitly_unavailable();
+        required_control_reaches_native_admission(argv[0]);
+        kimi_tool_names();
         launch_disposition();
         for (const auto* help : {"  --session [id]\n", "  --session [id]\r\n",
                 "  --session [id]", "  --session [id]  Resume a session\n"})

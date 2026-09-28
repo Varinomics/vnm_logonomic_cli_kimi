@@ -88,8 +88,22 @@ The paired structured-session and delegated-session contracts use version 2.
 An authenticated ACP session/close reply completes inspection and returns the
 answer. This is not evidence of clean native process exit.
 
-Delegated preparation refuses nonempty required control-action lists with
-`required_control_admission_unavailable` before native probes or process
-proposals. Because the host requires nonempty actions, this disables all valid
-host delegation. Interactive launch and resume remain independent. ACP mode
-acknowledgment does not establish native action admission.
+Delegated preparation configures each Task server in ACP `session/new` as the
+host relay with `--descriptor <path> --server <id>` and no environment, and
+acknowledges connection version 1; a request without a connection is refused as
+`task_server_connection_unavailable`. Mode acknowledgment does not admit the
+required actions. After `auto` mode is set, the adapter sends Kimi's ACP builtin
+`/mcp`, which reports each MCP server's status and enabled tool count without a
+model turn. It is sent only after Kimi's advertised command list names it;
+otherwise the text would reach the model, and the task fails as
+`task_server_status_unavailable`. Kimi connects session MCP servers in the
+background and announces no change over ACP, so a pending server is queried
+again every 100 ms until Kimi's own startup timeout settles it. The task prompt
+is released only when every Task server is reported exactly once as connected
+over stdio with as many tools as it has required actions. The host relay limits
+the catalog to those actions, and preparation refuses actions that Kimi would
+register under one tool name (`required_control_name_collision`), so equal
+counts mean every one was registered. Any other report fails the task as
+`required_control_unavailable`. `auto` mode
+approves the Task tools without permission requests; a permission request fails
+the task.

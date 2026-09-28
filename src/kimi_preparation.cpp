@@ -85,22 +85,13 @@ void prepare_delegated(addon::Invocation_context& context)
         context.fail(addon::Result_status::FAILED, "invalid_implementation_request");
         return;
     }
-    // Containment, not native qualification: configuration or mode
-    // acknowledgment does not prove required actions entered the dispatcher.
-    // The host requires nonempty actions, so this refuses all host delegation
-    // before native probes, process proposals or task bytes can be produced.
-    // Remove this boundary only with an integrated native admission contract.
-    for (const auto& server : request->control.servers) {
-        if (!server.actions.empty()) {
-            const bool cancelled = context.cancel_requested();
-            context.fail(cancelled ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
-                cancelled ? "cancelled" : "required_control_admission_unavailable",
-                "Required native control-action admission is not implemented by this adapter.");
-            return;
-        }
-    }
     if (!request->control.connection) {
         context.fail(addon::Result_status::UNAVAILABLE, "task_server_connection_unavailable");
+        return;
+    }
+    if (const auto collision = required_action_collision(*request)) {
+        context.fail(addon::Result_status::UNAVAILABLE, "required_control_name_collision",
+            "Kimi registers the required actions " + *collision + " under one tool name.");
         return;
     }
     auto environment = environment_pairs(request->context.launch_environment->effective_environment);
@@ -119,7 +110,7 @@ void prepare_delegated(addon::Invocation_context& context)
     result.acknowledgment.connection_version = addon::k_delegated_connection_version;
     result.inspection.incremental = true;
     result.inspection.keep_stdin_open = true;
-    result.inspection.protocol_state = initial_acp_state(request->prompt);
+    result.inspection.protocol_state = initial_acp_state(*request);
     for (const auto& server : request->control.servers) result.acknowledgment.server_ids.push_back(server.server_id);
     auto payload = addon::encode_delegated_prepare_result(result, 2);
     if (!addon::validate_session_exchange_payload(payload, &error)) {

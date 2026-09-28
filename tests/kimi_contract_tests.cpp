@@ -271,28 +271,40 @@ void probe_reaps_owned_leader()
 void acp()
 {
     // Oracle: adopted native Kimi ACP transcript authenticates each response ID,
-    // session identity and mode before the implementation prompt or result.
+    // session identity, mode and task-server admission before the
+    // implementation prompt or result.
+    addon::Delegated_prepare_request task;
+    task.prompt = "Implement the requested rename.";
+    task.control.task_id = "task-alpha";
+    task.control.servers.push_back({"coordination", "/opt/logonomic/logonomic_coordination_mcp", {"status", "notice"}, {}});
     addon::Structured_inspection request;
-    request.protocol_state = kimi::initial_acp_state("Implement the requested rename.");
+    request.protocol_state = kimi::initial_acp_state(task);
     request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1}}\n"
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"session-alpha\"}}\n";
     auto response = kimi::inspect_acp(request);
     require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/set_config_option") != std::string::npos,
         "new ACP session must request auto mode before prompt");
     request.protocol_state = response.protocol_state;
-    request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"configOptions\":[{\"id\":\"mode\",\"currentValue\":\"auto\"}]}}\n";
+    request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"session-alpha\",\"update\":{\"sessionUpdate\":\"available_commands_update\",\"availableCommands\":[{\"name\":\"mcp\",\"description\":\"Show MCP server status\"}]}}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"configOptions\":[{\"id\":\"mode\",\"currentValue\":\"auto\"}]}}\n";
     response = kimi::inspect_acp(request);
-    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/prompt") != std::string::npos,
-        "authenticated auto mode permits prompt");
+    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("\"text\":\"/mcp\"") != std::string::npos &&
+        response.stdin_bytes->find(task.prompt) == std::string::npos, "authenticated auto mode queries task-server status");
+    request.protocol_state = response.protocol_state;
+    request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"session-alpha\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"MCP servers (1):\\n- logonomic-task-task-alpha-coordination (stdio): connected, 2 tools\"}}}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"stopReason\":\"end_turn\"}}\n";
+    response = kimi::inspect_acp(request);
+    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find(task.prompt) != std::string::npos,
+        "admitted task servers permit prompt");
     request.protocol_state = response.protocol_state;
     const auto prompt_state = request.protocol_state;
     request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"session-alpha\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Renamed successfully.\"}}}}\n"
-        "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"stopReason\":\"end_turn\"}}\n";
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"stopReason\":\"end_turn\"}}\n";
     response = kimi::inspect_acp(request);
     require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/close") != std::string::npos,
         "prompt result must wait for authenticated close");
     request.protocol_state = response.protocol_state;
-    request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}\n";
+    request.stdout_bytes = "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{}}\n";
     response = kimi::inspect_acp(request);
     require(response.complete && response.result_bytes == "Renamed successfully." && response.protocol_state.empty(),
         "authenticated close returns exact text and releases continuation");
