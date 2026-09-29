@@ -32,6 +32,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t k_record_bound = 4 * 1024 * 1024;
 constexpr std::size_t k_queue_bound = 4096;
+constexpr std::size_t k_interest_bound = 4096;
+constexpr std::size_t k_interest_characters = 1024 * 1024;
 
 struct Cursor
 {
@@ -65,18 +67,26 @@ std::optional<fs::path> find_session_wire(const std::string& home, const std::st
     const auto root = addon::path_from_utf8(home) / "sessions";
     std::optional<fs::path> result;
     std::error_code error;
+    std::size_t workspaces = 0;
     for (fs::directory_iterator item(root, error), end; !error && item != end; item.increment(error)) {
         if (item->is_symlink(error) || !item->is_directory(error)) continue;
-        for (fs::directory_iterator candidate(item->path(), error); !error && candidate != end; candidate.increment(error)) {
-            if (path_string(candidate->path().filename()) != session || candidate->is_symlink(error) ||
-                !candidate->is_directory(error)) continue;
-            const auto path = candidate->path() / "agents" / "main" / "wire.jsonl";
-            if (!fs::is_regular_file(path, error)) { error.clear(); continue; }
-            const auto canonical = fs::canonical(path, error);
-            if (error) throw std::runtime_error("wire_path_unavailable");
-            if (result) throw std::runtime_error("ambiguous_wire_session");
-            result = canonical;
+        if (++workspaces > k_interest_bound) throw std::runtime_error("wire_interest_capacity_exhausted");
+        const auto candidate = item->path() / session;
+        if (fs::is_symlink(candidate, error)) continue;
+        if (error == std::errc::no_such_file_or_directory) error.clear();
+        if (error) break;
+        const auto path = candidate / "agents" / "main" / "wire.jsonl";
+        if (!fs::is_regular_file(path, error)) {
+            if (error == std::errc::no_such_file_or_directory || error == std::errc::not_a_directory) error.clear();
+            continue;
         }
+        const auto canonical = fs::canonical(path, error);
+        if (error) throw std::runtime_error("wire_path_unavailable");
+        if (result) throw std::runtime_error("ambiguous_wire_session");
+        result = canonical;
+    }
+    if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
+        throw std::runtime_error("wire_path_unavailable");
     }
     return result;
 }
@@ -101,6 +111,8 @@ struct Binding
     QStringList watched_files;
 #ifdef KIMI_OBSERVER_TEST_HOOKS
     std::function<void()> scan_gate;
+    std::function<void()> discovery_gate;
+    std::function<bool()> read_allowed;
 #endif
     std::deque<addon::Lifecycle_observation> queue;
     std::uint64_t first_sequence = 0;
@@ -113,6 +125,7 @@ struct Binding
     bool discarding = false;
     bool observing = false;
     bool closed = false;
+    std::optional<addon::Lifecycle_observation> pending_end;
     bool retired = false;
     std::optional<std::string> final_cursor;
     Clock::time_point bind_deadline = Clock::now() + std::chrono::seconds(60);
@@ -148,6 +161,9 @@ bool update_observation(Binding& binding, observation::Service& service,
     const observation::Configuration& configuration,
     const std::map<std::string, std::shared_ptr<Binding>>& sessions)
 {
+#ifdef KIMI_OBSERVER_TEST_HOOKS
+    if (binding.discovery_gate) binding.discovery_gate();
+#endif
     const auto resolved = find_session_wire(binding.home, binding.session);
     if (resolved) {
         for (const auto& [key, other] : sessions) {
@@ -165,6 +181,17 @@ bool update_observation(Binding& binding, observation::Service& service,
     QStringList directories;
     QStringList files;
     QStringList wires;
+    std::size_t characters = 0;
+    const auto add_interest = [&](QStringList& interests, const fs::path& path) {
+        const auto spelling = observation_path(path);
+        if (interests.contains(spelling)) return;
+        if (std::size_t(interests.size()) >= k_interest_bound ||
+            std::size_t(spelling.size()) > k_interest_characters - characters) {
+            throw std::runtime_error("wire_interest_capacity_exhausted");
+        }
+        characters += std::size_t(spelling.size());
+        interests.append(spelling);
+    };
     const fs::path home = addon::path_from_utf8(binding.home);
     fs::path frontier = home;
     while (!frontier.parent_path().empty() && !directory_exists(frontier.parent_path())) {
@@ -172,31 +199,31 @@ bool update_observation(Binding& binding, observation::Service& service,
         if (parent == frontier) break;
         frontier = parent;
     }
-    files.append(observation_path(frontier));
+    add_interest(files, frontier);
     const fs::path root = home / "sessions";
-    if (directory_exists(home)) files.append(observation_path(root));
+    if (directory_exists(home)) add_interest(files, root);
     if (directory_exists(root)) {
-        directories.append(observation_path(root));
+        add_interest(directories, root);
         std::error_code error;
         for (fs::directory_iterator workspace(root, error), end;
              !error && workspace != end; workspace.increment(error))
         {
             if (workspace->is_symlink(error) || !workspace->is_directory(error)) continue;
             fs::path candidate = workspace->path() / binding.session;
-            files.append(observation_path(candidate));
+            add_interest(files, candidate);
             if (fs::is_symlink(candidate, error)) continue;
             error.clear();
             for (const auto* component : {"agents", "main", "wire.jsonl"}) {
                 if (!directory_exists(candidate)) break;
                 candidate /= component;
-                files.append(observation_path(candidate));
+                add_interest(files, candidate);
                 if (std::string_view(component) == "wire.jsonl") wires.append(observation_path(candidate));
             }
         }
         if (error) throw std::runtime_error("wire_path_unavailable");
     }
     if (binding.path) {
-        files.append(observation_path(*binding.path));
+        add_interest(files, *binding.path);
         wires.append(observation_path(*binding.path));
     }
     directories.removeDuplicates();
@@ -275,6 +302,9 @@ void enqueue(Binding& binding, std::vector<addon::Lifecycle_observation> observa
 bool scan(Binding& binding, addon::Invocation_context* invocation)
 {
     if (binding.retired || !binding.path || !binding.failure.empty()) return false;
+#ifdef KIMI_OBSERVER_TEST_HOOKS
+    if (binding.read_allowed && !binding.read_allowed()) return false;
+#endif
     std::ifstream input(*binding.path, std::ios::binary);
     if (!input) return false;
     input.seekg(0, std::ios::end);
@@ -337,6 +367,16 @@ bool scan(Binding& binding, addon::Invocation_context* invocation)
     return length >= 0 && binding.offset == snapshot_end && binding.failure.empty();
 }
 
+void finish_session(Binding& binding)
+{
+    enqueue(binding, binding.decoder.close("SessionEnd"));
+    if (!binding.failure.empty()) throw std::runtime_error(binding.failure);
+    if (!binding.cursor_key.empty()) enqueue(binding, {*binding.pending_end});
+    if (!binding.failure.empty()) throw std::runtime_error(binding.failure);
+    binding.closed = true;
+    stop_observation(binding);
+}
+
 } // namespace
 
 struct Lifecycle_observer::State
@@ -374,6 +414,18 @@ void Lifecycle_observer::set_scan_gate_for_tests(std::function<void()> gate)
         if (binding) binding->scan_gate = gate;
     }
 }
+void Lifecycle_observer::set_acquisition_failures_for_tests(
+    std::function<void()> discovery_gate, std::function<bool()> read_allowed)
+{
+    std::lock_guard lock(m_state->mutex);
+    for (const auto& [key, binding] : m_state->sessions) {
+        (void)key;
+        if (!binding) continue;
+        binding->discovery_gate = discovery_gate;
+        binding->read_allowed = read_allowed;
+    }
+}
+
 #endif
 
 addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_event_request& request)
@@ -414,22 +466,25 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     else {
         const auto key = request.ledger.current_transition ? request.ledger.current_transition->nonce : std::string{};
         if (const auto found = m_state->sessions.find(key); found != m_state->sessions.end() && found->second && found->second->session == session) {
-            scan(*found->second, nullptr);
-            if (!found->second->failure.empty()) throw std::runtime_error(found->second->failure);
-            enqueue(*found->second, found->second->decoder.close("SessionEnd"));
-            if (!found->second->failure.empty()) throw std::runtime_error(found->second->failure);
+            auto& binding = *found->second;
             observation.session_transition = addon::Session_transition::ENDED;
-            if (!found->second->cursor_key.empty()) {
-                enqueue(*found->second, {observation});
-                if (!found->second->failure.empty()) throw std::runtime_error(found->second->failure);
-                found->second->closed = true;
-                stop_observation(*found->second);
-                // The continuous queue owns the terminal fact so every retained
-                // agent stop precedes it across bounded poll pages.
-                return result;
+            binding.pending_end = observation;
+            if (!binding.closed) {
+                try {
+                    update_observation(binding, *m_state->service, m_state->configuration, m_state->sessions);
+                    if (scan(binding, nullptr)) finish_session(binding);
+                    else if (!binding.failure.empty()) throw std::runtime_error(binding.failure);
+                    else binding.subscription.request_rescan(QStringLiteral("Kimi final wire acquisition is incomplete"));
+                }
+                catch (...) {
+                    binding.subscription.request_rescan(QStringLiteral("Kimi final wire discovery is incomplete"));
+                    if (binding.cursor_key.empty() || !binding.failure.empty()) throw;
+                }
             }
-            found->second->closed = true;
-            stop_observation(*found->second);
+            // The continuous queue retains an unfinished terminal fact until
+            // every final wire byte has been acquired, ahead of its exact cursor.
+            if (!binding.cursor_key.empty()) return result;
+            if (!binding.closed) throw std::runtime_error("wire_final_drain_incomplete");
         }
         result.classification = addon::Classification::EVENT;
         observation.session_transition = addon::Session_transition::ENDED;
@@ -585,16 +640,23 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
             {
                 std::lock_guard lock(m_state->mutex);
                 if (delivery->valid() && !binding->retired && !binding->closed && binding->channel == channel) {
-                    const bool replaced = update_observation(
-                        *binding, *m_state->service, m_state->configuration, m_state->sessions);
-                    if (!replaced) {
-                        const bool acquired = !binding->path || scan(*binding, &context);
-                        if (acquired && observation_covered(*binding)) {
-                            binding->subscription.acknowledge(delivery->batch.capture);
+                    try {
+                        const bool replaced = update_observation(
+                            *binding, *m_state->service, m_state->configuration, m_state->sessions);
+                        if (!replaced) {
+                            const bool acquired = binding->path ? scan(*binding, &context) : !binding->pending_end;
+                            if (acquired && binding->pending_end) finish_session(*binding);
+                            else if (acquired && observation_covered(*binding)) {
+                                binding->subscription.acknowledge(delivery->batch.capture);
+                            }
+                            else {
+                                binding->subscription.request_rescan(QStringLiteral("Kimi wire acquisition is incomplete"));
+                            }
                         }
-                        else {
-                            binding->subscription.request_rescan(QStringLiteral("Kimi wire acquisition is incomplete"));
-                        }
+                    }
+                    catch (...) {
+                        binding->subscription.request_rescan(QStringLiteral("Kimi wire discovery is incomplete"));
+                        throw;
                     }
                 }
             }

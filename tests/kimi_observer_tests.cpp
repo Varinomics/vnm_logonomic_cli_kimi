@@ -333,6 +333,106 @@ void final_append_during_acquisition_keeps_its_own_capture()
     require(retire(observer, nonce), "retire the held-acquisition cursor");
 }
 
+void session_end_retains_failed_drain_and_resolves_new_wire()
+{
+    namespace observation = vnm::filesystem_observation;
+    for (const bool initially_missing : {false, true}) {
+        Workspace workspace;
+        const auto path = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+        if (!initially_missing) {
+            fs::create_directories(path.parent_path());
+            write_bytes(path, {});
+        }
+        const auto service = std::make_shared<observation::Service>();
+        observation::Configuration configuration;
+        configuration.general_interval = std::chrono::milliseconds(25);
+        kimi::Lifecycle_observer observer(service, configuration);
+        const auto nonce = addon::random_nonce_hex();
+        require(reserve(observer, nonce), "reserve final drain owner");
+        observer.classify(start_request(workspace, nonce));
+        {
+            Observe_window window(observer, workspace, nonce);
+            require(wait_until([&] { const auto statistics = service->statistics(); return statistics.dispatches > 0 &&
+                statistics.outstanding == 0 && statistics.pending_registrations == 0; }), "settle initial wire frontier");
+            window.stop();
+        }
+        native_call(workspace, "session");
+        if (!initially_missing) observer.set_acquisition_failures_for_tests({}, [] { return false; });
+        auto end = start_request(workspace, nonce);
+        end.event.name = "SessionEnd";
+        end.ledger.current_transition = addon::Ledger_transition{addon::Transition_kind::START, "session", nonce};
+        observer.classify(end);
+        if (!initially_missing) {
+            const auto unread = poll(observer, nonce);
+            require(unread && unread->observations.empty(), "failed final read must not emit a terminal fact");
+            require(!retire(observer, nonce, unread->resume_cursor), "unread final evidence cannot be acknowledged away");
+            require(service->statistics().subscriptions > 0, "failed drain retains observation ownership");
+            observer.set_acquisition_failures_for_tests({}, {});
+            Observe_window retry(observer, workspace, nonce);
+            require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 3; }),
+                "retained final acquisition retries without a later file edit");
+            retry.stop();
+        }
+        const auto final = poll(observer, nonce);
+        require(final && final->observations.size() == 3 &&
+            final->observations.front().subagent_transition == addon::Subagent_transition::STARTED &&
+            final->observations[1].subagent_transition == addon::Subagent_transition::STOPPED &&
+            final->observations.back().session_transition == addon::Session_transition::ENDED,
+            "resolved final bytes and child close precede terminal delivery");
+        require(retire(observer, nonce, final->resume_cursor), "complete final drain admits only its exact terminal cursor");
+    }
+}
+
+void failed_discovery_retains_reconciliation_across_windows()
+{
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    const auto path = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+    fs::create_directories(path.parent_path());
+    write_bytes(path, {});
+    const auto service = std::make_shared<observation::Service>();
+    observation::Configuration configuration;
+    configuration.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, configuration);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve transient discovery owner");
+    observer.classify(start_request(workspace, nonce));
+    {
+        Observe_window window(observer, workspace, nonce);
+        require(wait_until([&] { const auto statistics = service->statistics(); return statistics.dispatches > 0 &&
+            statistics.outstanding == 0 && statistics.pending_registrations == 0; }), "settle discovery receiver");
+        window.stop();
+    }
+    observer.set_acquisition_failures_for_tests([] { throw std::runtime_error("wire_path_unavailable"); }, {});
+    write_bytes(path, call_record("unread-after-discovery-failure"));
+    {
+        Observe_window failed(observer, workspace, nonce);
+        require(failed.worker.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+            "actual capture reaches the failing discovery boundary");
+        require(failed.context.m_failure == "wire_observation_failed", "discovery failure remains truthful");
+    }
+    observer.set_acquisition_failures_for_tests({}, {});
+    {
+        Observe_window retry(observer, workspace, nonce);
+        require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 1; }),
+            "failed capture retains a successor without any later native file event");
+        retry.stop();
+    }
+    require(retire(observer, nonce), "retire recovered discovery owner");
+}
+
+void workspace_frontier_rejects_excess_before_collecting_interests()
+{
+    Workspace workspace;
+    for (int index = 0; index <= 4096; ++index) {
+        fs::create_directories(workspace.m_root / "sessions" / std::to_string(index));
+    }
+    bool bounded = false;
+    try { kimi::find_session_wire(kimi::path_string(workspace.m_root), "session"); }
+    catch (const std::runtime_error& error) { bounded = std::string(error.what()) == "wire_interest_capacity_exhausted"; }
+    require(bounded, "oversized workspace frontier fails during discovery before allocating subscription interests");
+}
+
 void candidates_reclaim_without_tombstones()
 {
     Workspace workspace;
@@ -510,6 +610,9 @@ int main(int argc, char** argv)
         native_wire_reconciliation_preserves_records_and_final_drain();
         missing_ancestors_and_parent_replacement_reconcile_without_polling();
         final_append_during_acquisition_keeps_its_own_capture();
+        session_end_retains_failed_drain_and_resolves_new_wire();
+        failed_discovery_retains_reconciliation_across_windows();
+        workspace_frontier_rejects_excess_before_collecting_interests();
         return 0;
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
