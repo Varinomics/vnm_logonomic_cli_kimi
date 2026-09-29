@@ -165,6 +165,13 @@ target_link_libraries(kimi_acp_causal_tests PRIVATE kimi_provider)
 kimi_target(kimi_acp_causal_tests)
 add_test(NAME kimi_acp_causal_tests COMMAND kimi_acp_causal_tests)
 set_tests_properties(kimi_acp_causal_tests PROPERTIES TIMEOUT 120 LABELS "addon;protocol;causality")
+if(WIN32)
+    # These executables run from the build tree, outside the assembled package.
+    # Clean copied-package qualification supplies its own runtime environment.
+    set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests
+        kimi_usage_tests kimi_usage_cache_tests kimi_acp_causal_tests PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+endif()
 
 # Exercise this repository's actual producer, never a substitute packaging
 # implementation. The isolated nested configure uses this same SDK source;
