@@ -68,7 +68,24 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_options(${target} PRIVATE "LINKER:--disable-new-dtags")
     endforeach()
 endif()
-configure_file("${CMAKE_CURRENT_LIST_DIR}/assemble_kimi_package.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/assemble-package.cmake.in" @ONLY)
+function(kimi_configure_package_assembler)
+    # Cache overrides can retain native Windows separators. Once substituted
+    # into quoted CMake source, those separators become escape sequences.
+    # Normalize every substituted filesystem path/list in this local scope;
+    # preserve list separators and the caller's selected cache/toolchain values.
+    if(WIN32)
+        foreach(path_variable IN ITEMS
+                KIMI_PACKAGE_DIRECTORY CMAKE_CURRENT_SOURCE_DIR CMAKE_CURRENT_BINARY_DIR
+                CMAKE_CXX_COMPILER CMAKE_OBJDUMP CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND
+                kimi_runtime_search_dirs kimi_compiler_runtime_files kimi_qt_notice_inputs
+                kimi_toml_source KIMI_QTBASE_SOURCE KIMI_RUNTIME_NOTICES_DIRECTORY
+                KIMI_PATCHELF_EXECUTABLE)
+            string(REPLACE "\\" "/" ${path_variable} "${${path_variable}}")
+        endforeach()
+    endif()
+    configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/assemble_kimi_package.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/assemble-package.cmake.in" @ONLY)
+endfunction()
+kimi_configure_package_assembler()
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/assemble-package-$<CONFIG>.cmake"
     INPUT "${CMAKE_CURRENT_BINARY_DIR}/assemble-package.cmake.in")
