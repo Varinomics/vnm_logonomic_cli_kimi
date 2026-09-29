@@ -90,12 +90,13 @@ def main() -> int:
         require(not any(path.exists() or path.is_symlink() for path in (asset_a, asset_b)),
                 'reserved test resource already present')
         asset_a.write_bytes(b'isolated membership oracle\n')
-        configure = [args.cmake, '-S', str(copied), '-B', str(build), '-G', args.generator,
-                     '-DLOGONOMIC_CLI_ADDON_SDK_SOURCE=' + str(sdk),
-                     '-DLOGONOMIC_CLI_ADDON_RECIPE_TESTS=OFF',
-                     '-DKIMI_TOMLPLUSPLUS_SOURCE=' + str(tomlplusplus),
-                     '-DFETCHCONTENT_FULLY_DISCONNECTED=ON',
-                     '-DFETCHCONTENT_UPDATES_DISCONNECTED=ON']
+        configure = [args.cmake, '-S', str(copied), '-B', str(build), '-G', args.generator]
+        definitions = [
+            ('LOGONOMIC_CLI_ADDON_SDK_SOURCE', str(sdk)),
+            ('LOGONOMIC_CLI_ADDON_RECIPE_TESTS', 'OFF'),
+            ('KIMI_TOMLPLUSPLUS_SOURCE', str(tomlplusplus)),
+            ('FETCHCONTENT_FULLY_DISCONNECTED', 'ON'),
+            ('FETCHCONTENT_UPDATES_DISCONNECTED', 'ON')]
         if args.generator_platform:
             configure += ['-A', args.generator_platform]
         if args.toolset:
@@ -105,7 +106,7 @@ def main() -> int:
                            ('prefix_path', 'CMAKE_PREFIX_PATH')):
             value = getattr(args, field)
             if value:
-                configure.append('-D' + key + '=' + value)
+                definitions.append((key, value))
         for field, key in (('framework_source', 'KIMI_FRAMEWORK_SOURCE'),
                            ('dispatch_source', 'FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH'),
                            ('vnm_cmake_source', 'FETCHCONTENT_SOURCE_DIR_VNM_CMAKE'),
@@ -116,7 +117,19 @@ def main() -> int:
                            ('patchelf', 'KIMI_PATCHELF_EXECUTABLE')):
             value = getattr(args, field)
             if value:
-                configure.append('-D' + key + '=' + value)
+                definitions.append((key, value))
+        # PowerShell -File interprets a colon in -DNAME=C:/... as parameter
+        # syntax. A CMake initial-cache file preserves exact values (including
+        # semicolon lists), while the queue still sees the direct CMake command.
+        initial_cache = root / 'initial-cache.cmake'
+        cache_lines = []
+        for key, value in definitions:
+            delimiter = '='
+            while ']' + delimiter + ']' in value:
+                delimiter += '='
+            cache_lines.append(f'set({key} [{delimiter}[{value}]{delimiter}] CACHE STRING "" FORCE)')
+        initial_cache.write_text('\n'.join(cache_lines) + '\n', encoding='utf-8')
+        configure += ['-C', str(initial_cache)]
         queue = shutil.which('queued-build')
         require(queue is not None, 'queued-build is required for nested compiler invocations')
         if args.generator == 'FASTBuild':
