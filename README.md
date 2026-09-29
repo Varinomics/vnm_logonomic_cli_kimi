@@ -16,8 +16,8 @@ subsequent guidance requests, and removed at `SessionEnd`. Resumed sessions use
 the same hook route. This does not change tool approval rules or the user's
 agent instructions.
 
-It uses the public Logonomic CLI add-on SDK, platform APIs and toml++ for
-configuration parsing.
+It uses the public Logonomic CLI add-on SDK, the filesystem observation leaf of
+vnm_framework, QtCore, platform APIs and toml++ for configuration parsing.
 
 The normal launch requests a host-owned transformation of the selected Kimi
 `config.toml`. Only Logonomic's marked hook blocks are replaced. The host owns
@@ -69,13 +69,41 @@ request. Authentication absence remains distinct from a failed quota request.
 
 CMake fetches the SDK from Logonomic `master` by default. An explicit
 `LOGONOMIC_CLI_ADDON_SDK_SOURCE` path overrides that dependency for coordinated
-local development. Use a fresh out-of-source tree. Windows and Linux x86-64 are
+local development. Observation reuses the embedding build's
+`vnm_framework::vnm_filesystem_observation` target. A standalone build accepts
+`KIMI_FRAMEWORK_SOURCE`, otherwise uses the installed `vnm_filesystem_observation`
+leaf package or acquires framework `master`. The leaf selects its owned
+`vnm_qt_dispatch` dependency; source overrides use
+`FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH` and `FETCHCONTENT_SOURCE_DIR_VNM_CMAKE`.
+Only QtCore >=6.11.1 is required; the aggregate GUI/QML framework is not imported.
+Use a fresh out-of-source tree. Windows and Linux x86-64 are
 the currently packaged targets; Windows builds follow the workstation's queued
 Visual Studio 2026 / MSVC v145 build policy.
 
 The `kimi_package` target produces `package/logonomic.cli.kimi` beneath a
 single-configuration build directory, or `package/<config>/logonomic.cli.kimi`
 with a multi-configuration generator, including its integrity index.
+The assembler inspects each executable's actual runtime closure and places its
+non-system libraries beside it. Linux executables use a package-local `$ORIGIN`
+loader path; staged ELF libraries are normalized with `patchelf` (override its
+location with `KIMI_PATCHELF_EXECUTABLE`). Windows resolves its DLLs from the executable directory. SONAME
+files are regular copies because the package contract excludes symlinks. The
+package does not depend on Qt next to Logonomic or on a developer search path.
+A no-op build retains the package and index; changes to dependency bytes or
+membership rebuild both before the package is exported.
+
+Runtime notices come from the selected Qt's matching qtbase source, supplied by
+`KIMI_QTBASE_SOURCE` or discovered at `<Qt-prefix>/../Src/qtbase`. Otherwise the
+build acquires Qt's official qtbase source at the selected runtime's version tag
+for notices only. Its licenses,
+bundled third-party notices and available installation SPDX metadata accompany
+the actual closure. Debian-family runtime dependencies use their installed
+package copyright files. Other external libraries require a notice file named
+`<library-filename>.txt` in `KIMI_RUNTIME_NOTICES_DIRECTORY`; missing notices fail
+assembly. The selected MSVC redistributables carry Microsoft's runtime notice.
+The index marks every copied runtime as third-party and points to its notices
+and resolved-source provenance. The optional `kimi_package_membership` recipe
+forwards these selected sources into its isolated nested build.
 CTest registers focused contract checks,
 package validation, and SDK conformance. Implementation fixtures cover ACP
 admission, hook ownership, Agent correlation/replay, Unicode labels, and quota

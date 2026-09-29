@@ -20,7 +20,12 @@ import time
 
 def run(command: list[str]) -> None:
     print('+', subprocess.list2cmdline(command), flush=True)
-    subprocess.run(command, check=True, timeout=900)
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding='utf-8', errors='replace', timeout=900)
+    print(result.stdout, end='', flush=True)
+    result.check_returncode()
+    if '-dist' in command:
+        require('FBuild: OK:' in result.stdout, 'FASTBuild did not report a successful build')
 
 
 def require(condition: bool, message: str) -> None:
@@ -36,6 +41,9 @@ def main() -> int:
         parser.add_argument('--' + name, default='')
     parser.add_argument('--tomlplusplus-source', required=True,
                         help='Already selected local toml++ source; never fetch a second copy')
+    for name in ('framework-source', 'dispatch-source', 'vnm-cmake-source',
+                 'observation-prefix', 'dispatch-prefix', 'qtbase-source', 'runtime-notices', 'patchelf'):
+        parser.add_argument('--' + name, default='')
     args = parser.parse_args()
     source, sdk = Path(args.source).resolve(), Path(args.sdk).resolve()
     tomlplusplus = Path(args.tomlplusplus_source).resolve(strict=True)
@@ -50,6 +58,10 @@ def main() -> int:
         # copying so the temporary source cannot recursively include itself.
         protected_inputs = [source, sdk]
         protected_inputs.append(tomlplusplus)
+        for value in (args.framework_source, args.dispatch_source, args.vnm_cmake_source,
+                      args.qtbase_source, args.runtime_notices):
+            if value:
+                protected_inputs.append(Path(value).resolve(strict=True))
         for protected in protected_inputs:
             require(root != protected and root not in protected.parents and
                     protected not in root.parents,
@@ -94,10 +106,30 @@ def main() -> int:
             value = getattr(args, field)
             if value:
                 configure.append('-D' + key + '=' + value)
-        run(configure)
+        for field, key in (('framework_source', 'KIMI_FRAMEWORK_SOURCE'),
+                           ('dispatch_source', 'FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH'),
+                           ('vnm_cmake_source', 'FETCHCONTENT_SOURCE_DIR_VNM_CMAKE'),
+                           ('observation_prefix', 'vnm_filesystem_observation_DIR'),
+                           ('dispatch_prefix', 'vnm_qt_dispatch_DIR'),
+                           ('qtbase_source', 'KIMI_QTBASE_SOURCE'),
+                           ('runtime_notices', 'KIMI_RUNTIME_NOTICES_DIRECTORY'),
+                           ('patchelf', 'KIMI_PATCHELF_EXECUTABLE')):
+            value = getattr(args, field)
+            if value:
+                configure.append('-D' + key + '=' + value)
+        queue = shutil.which('queued-build')
+        require(queue is not None, 'queued-build is required for nested compiler invocations')
+        if args.generator == 'FASTBuild':
+            run([queue, '--check-xenia'])
+        run([queue, '--slots', '1', '--', *configure])
         command = [args.cmake, '--build', str(build), '--target', args.target]
         if args.config:
             command += ['--config', args.config]
+        if args.generator == 'FASTBuild':
+            command += ['--', '-dist', '-nolocalrace']
+        else:
+            command += ['--parallel', '2']
+        command = [queue, '--slots', '2', '--', *command]
         run(command)
         candidates = []
         for index in (build / 'package').rglob('package.files.json'):
@@ -121,6 +153,20 @@ def main() -> int:
                             'payload differs from the exact current source resource')
                     require(entries[0]['sha256'].lower() == hashlib.sha256(expected_bytes).hexdigest(),
                             'indexed digest differs from exact source and payload bytes')
+            runtime_entries = [entry for entry in index['files']
+                               if entry['resource'].get('provenance') == 'provenance/runtime.txt'
+                               and entry['path'].startswith(('adapter/', 'helpers/'))]
+            require(any('Qt6Core' in entry['path'] for entry in runtime_entries),
+                    'actual adapter QtCore runtime is absent from the indexed closure')
+            for entry in runtime_entries:
+                payload = package / entry['path']
+                require(payload.is_file() and not payload.is_symlink(),
+                        'runtime closure contains a non-regular package member')
+                require(entry['resource']['origin'] == 'third-party'
+                        and entry['resource']['notice'] == 'notices/runtime.txt',
+                        'runtime attribution is absent from integrity index')
+                require(entry['sha256'].lower() == hashlib.sha256(payload.read_bytes()).hexdigest(),
+                        'runtime digest differs from packaged bytes')
             # The public validator checks index membership and content, not
             # just the existence of a freshly written index file.
             run([args.validator, str(package), '--platform', args.platform])

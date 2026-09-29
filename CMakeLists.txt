@@ -54,6 +54,8 @@ else()
     set(kimi_toml_source "${kimi_toml_SOURCE_DIR}")
 endif()
 
+include(cmake/kimi_observation_dependency.cmake)
+
 function(kimi_target target)
     target_link_libraries(${target} PRIVATE logonomic_cli_addon_sdk::sdk)
     # The Windows API selection belongs to the platform, so a MinGW build gets
@@ -69,14 +71,19 @@ function(kimi_target target)
     endif()
 endfunction()
 
-add_library(kimi_provider STATIC
+set(kimi_provider_sources
     src/kimi_accounts.cpp src/kimi_usage.cpp
     src/kimi_acp.cpp src/kimi_config.cpp src/kimi_guidance.cpp src/kimi_launcher.cpp
     src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_wire.cpp)
-kimi_target(kimi_provider)
-target_include_directories(kimi_provider PUBLIC src)
-target_link_libraries(kimi_provider PUBLIC logonomic_cli_addon_sdk::sdk)
-target_link_libraries(kimi_provider PRIVATE tomlplusplus::tomlplusplus)
+function(kimi_add_provider target)
+    add_library(${target} STATIC ${kimi_provider_sources})
+    kimi_target(${target})
+    target_include_directories(${target} PUBLIC src)
+    target_link_libraries(${target} PUBLIC logonomic_cli_addon_sdk::sdk
+        vnm_framework::vnm_filesystem_observation)
+    target_link_libraries(${target} PRIVATE tomlplusplus::tomlplusplus)
+endfunction()
+kimi_add_provider(kimi_provider)
 
 add_executable(kimi_adapter src/adapter.cpp)
 target_link_libraries(kimi_adapter PRIVATE kimi_provider)
@@ -101,45 +108,15 @@ endif()
 logonomic_cli_addon_package_platform(KIMI_PLATFORM)
 logonomic_cli_addon_package_directory(logonomic.cli.kimi KIMI_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
-file(GLOB_RECURSE package_files CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/assets/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/notices/*")
-# Directory membership is an input too: removing a resource, or adding one
-# with an older timestamp, must rebuild the indexed package. file(GENERATE)
-# changes this file only when membership changes, preserving no-op builds.
-file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
-    CONTENT "${package_files}\n")
-add_custom_command(
-    OUTPUT "${KIMI_PACKAGE_DIRECTORY}/package.files.json"
-    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${KIMI_PACKAGE_DIRECTORY}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${KIMI_PACKAGE_DIRECTORY}/adapter" "${KIMI_PACKAGE_DIRECTORY}/helpers"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/assets" "${KIMI_PACKAGE_DIRECTORY}/assets"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities" "${KIMI_PACKAGE_DIRECTORY}/capabilities"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance" "${KIMI_PACKAGE_DIRECTORY}/provenance"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/package/notices" "${KIMI_PACKAGE_DIRECTORY}/notices"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${kimi_toml_source}/LICENSE" "${KIMI_PACKAGE_DIRECTORY}/notices/tomlplusplus-LICENSE.txt"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${KIMI_PACKAGE_DIRECTORY}/logonomic-cli-addon.json"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:kimi_adapter>" "${KIMI_PACKAGE_DIRECTORY}/adapter/kimi_adapter${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:kimi_helper>" "${KIMI_PACKAGE_DIRECTORY}/helpers/kimi_helper${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:kimi_launch_bridge>" "${KIMI_PACKAGE_DIRECTORY}/helpers/kimi_launch_bridge${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:kimi_quota_probe>" "${KIMI_PACKAGE_DIRECTORY}/helpers/kimi_quota_probe${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMAND "$<TARGET_FILE:logonomic_cli_addon_index>" "${KIMI_PACKAGE_DIRECTORY}"
-        --third-party "assets/kimi.svg" "notices/lobe_icons_mit.txt"
-            "provenance/lobe_icons.json"
-        --third-party "assets/kimi-color.svg" "notices/lobe_icons_mit.txt"
-            "provenance/lobe_icons.json"
-        --third-party "adapter/kimi_adapter${CMAKE_EXECUTABLE_SUFFIX}"
-            "notices/tomlplusplus-LICENSE.txt" "provenance/tomlplusplus.json"
-        --third-party "helpers/kimi_helper${CMAKE_EXECUTABLE_SUFFIX}"
-            "notices/tomlplusplus-LICENSE.txt" "provenance/tomlplusplus.json"
+include(cmake/kimi_package_runtime.cmake)
+# Inspect the executable closure on every build: an external shared library can
+# change without relinking an executable. The assembler compares exact inputs
+# and leaves a complete unchanged package (including its index) untouched.
+add_custom_target(kimi_package ALL
+    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/assemble-package-$<CONFIG>.cmake"
+    BYPRODUCTS "${KIMI_PACKAGE_DIRECTORY}/package.files.json"
     DEPENDS kimi_adapter kimi_helper kimi_launch_bridge kimi_quota_probe logonomic_cli_addon_index
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
-        "${kimi_toml_source}/LICENSE"
     VERBATIM)
-add_custom_target(kimi_package ALL DEPENDS "${KIMI_PACKAGE_DIRECTORY}/package.files.json")
 logonomic_cli_addon_install_package("${KIMI_PACKAGE_DIRECTORY}" logonomic.cli.kimi TARGET kimi_package)
 
 # Everything below is the package's own test suite, which only its standalone
@@ -149,8 +126,10 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
 endif()
 
 enable_testing()
+kimi_add_provider(kimi_observer_test_provider)
+target_compile_definitions(kimi_observer_test_provider PUBLIC KIMI_OBSERVER_TEST_HOOKS)
 add_executable(kimi_observer_tests tests/kimi_observer_tests.cpp)
-target_link_libraries(kimi_observer_tests PRIVATE kimi_provider)
+target_link_libraries(kimi_observer_tests PRIVATE kimi_observer_test_provider)
 kimi_target(kimi_observer_tests)
 add_dependencies(kimi_observer_tests kimi_package)
 add_test(NAME kimi_observer_tests COMMAND kimi_observer_tests "${KIMI_PACKAGE_DIRECTORY}")
@@ -201,6 +180,14 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_membership_tests.py"
             "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--sdk=${_membership_sdk_source}"
             "--tomlplusplus-source=${_membership_toml_source}"
+            "--framework-source=${kimi_framework_source}"
+            "--dispatch-source=${kimi_dispatch_source}"
+            "--vnm-cmake-source=${kimi_vnm_cmake_source}"
+            "--observation-prefix=${vnm_filesystem_observation_DIR}"
+            "--dispatch-prefix=${vnm_qt_dispatch_DIR}"
+            "--qtbase-source=${KIMI_QTBASE_SOURCE}"
+            "--runtime-notices=${KIMI_RUNTIME_NOTICES_DIRECTORY}"
+            "--patchelf=${KIMI_PATCHELF_EXECUTABLE}"
             "--cmake=${CMAKE_COMMAND}" "--target=kimi_package" "--package-id=logonomic.cli.kimi"
             "--generator=${CMAKE_GENERATOR}" "--config=$<CONFIG>" "--build-type=${CMAKE_BUILD_TYPE}"
             "--generator-platform=${CMAKE_GENERATOR_PLATFORM}" "--toolset=${CMAKE_GENERATOR_TOOLSET}"
