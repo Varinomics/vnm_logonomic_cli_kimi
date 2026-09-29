@@ -3,6 +3,19 @@
 This standalone C++20 package supplies Kimi launcher discovery, account selection,
 interactive launch and exact resume, delegated ACP implementation sessions, quota,
 historical token usage, hook delivery, and continuous Agent lifecycle observation.
+
+When Logonomic requests session guidance, the hook saves the complete UTF-8
+instructions under the selected Kimi home's `scratch/logonomic` directory and
+returns a short file-reading reminder. The complete title, summary, worktree
+and coordination instructions remain available without an unsolicited terminal
+dump. Kimi's default agent can use native `Read`; a custom agent needs an
+available file-reading tool. If its tool policy prevents reading files, the
+optional guidance is unavailable and the ordinary session continues.
+The file is scoped to the provider session and package generation, replaced on
+subsequent guidance requests, and removed at `SessionEnd`. Resumed sessions use
+the same hook route. This does not change tool approval rules or the user's
+agent instructions.
+
 It uses the public Logonomic CLI add-on SDK, platform APIs and toml++ for
 configuration parsing.
 

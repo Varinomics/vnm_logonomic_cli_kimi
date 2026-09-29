@@ -71,7 +71,7 @@ endfunction()
 
 add_library(kimi_provider STATIC
     src/kimi_accounts.cpp src/kimi_usage.cpp
-    src/kimi_acp.cpp src/kimi_config.cpp src/kimi_launcher.cpp
+    src/kimi_acp.cpp src/kimi_config.cpp src/kimi_guidance.cpp src/kimi_launcher.cpp
     src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_wire.cpp)
 kimi_target(kimi_provider)
 target_include_directories(kimi_provider PUBLIC src)

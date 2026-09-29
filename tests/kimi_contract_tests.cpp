@@ -1,6 +1,7 @@
 #include "kimi_accounts.h"
 #include "kimi_acp.h"
 #include "kimi_config.h"
+#include "kimi_guidance.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
 #include "kimi_observer.h"
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -103,6 +105,55 @@ timeout = 1
     try { (void)kimi::updated_config("command = '''unterminated\n"); }
     catch (const std::exception&) { rejected = true; }
     require(rejected, "invalid input fails before any transformed bytes can be committed");
+}
+
+void session_guidance()
+{
+    namespace fs = std::filesystem;
+    struct Fixture
+    {
+        fs::path root = fs::temp_directory_path() / ("kimi-guidance-" + addon::random_nonce_hex());
+        ~Fixture() { std::error_code error; fs::remove_all(root, error); }
+    } fixture;
+    const auto path = kimi::session_guidance_path(fixture.root, "generation-alpha", "session-alpha");
+    const auto other = kimi::session_guidance_path(fixture.root, "generation-alpha", "session-beta");
+    const auto resumed = kimi::session_guidance_path(fixture.root, "generation-beta", "session-alpha");
+    require(path != other && path != resumed, "guidance is isolated by provider session and package generation");
+    const auto traversal = kimi::session_guidance_path(fixture.root, "generation-alpha", "../../outside");
+    require(traversal.parent_path().parent_path() == fixture.root / "scratch" / "logonomic",
+        "untrusted native identities cannot escape the guidance directory");
+    const std::string instruction =
+        "Record the session title and summary. Report worktrees before editing.\n"
+        "Use delegation and the session mailbox. Preserve Unicode: \xE6\x9D\xB1\xE4\xBA\xAC.\n";
+    const auto reminder = kimi::publish_session_guidance(path, instruction);
+    const auto read = [](const fs::path& file) {
+        std::ifstream input(file, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    };
+    // Oracle: UserPromptSubmit stdout is both native model context and visible
+    // hook output. The user requested a short reminder with the complete guide
+    // available through Read, preserving every requested instruction.
+    require(read(path) == instruction, "native Read receives the complete UTF-8 instructions");
+    require(reminder.find(addon::serialize_json(Json(kimi::path_string(path)))) != std::string::npos &&
+        reminder.find("native Read") != std::string::npos,
+        "hook output points the native Read tool to the saved guide");
+    require(reminder.find("Record the session title") == std::string::npos,
+        "the hook must not print the internal manual unsolicited");
+    (void)kimi::publish_session_guidance(other, "Other session guidance");
+    (void)kimi::publish_session_guidance(path, "Reconsider the recorded summary and read pending mailbox messages.");
+    require(read(path) == "Reconsider the recorded summary and read pending mailbox messages.",
+        "periodic instructions replace the same bounded session file");
+    require(read(other) == "Other session guidance", "an update cannot overwrite another session");
+    require(std::distance(fs::directory_iterator(path.parent_path()), fs::directory_iterator()) == 1,
+        "repeated updates leave one complete file and no temporary artifacts");
+    bool refused = false;
+    try { (void)kimi::publish_session_guidance(path, "invalid \xFF"); }
+    catch (const std::exception&) { refused = true; }
+    require(refused && read(path).starts_with("Reconsider"), "invalid UTF-8 cannot replace complete guidance");
+    kimi::remove_session_guidance(path);
+    require(!fs::exists(path.parent_path()) && fs::exists(other),
+        "session end removes its own guidance while preserving other sessions");
+    kimi::remove_session_guidance(path);
 }
 
 void wire_layout()
@@ -589,6 +640,7 @@ int main()
 {
     try {
         configuration();
+        session_guidance();
         wire_layout();
         saturated_session_end();
 #ifndef _WIN32

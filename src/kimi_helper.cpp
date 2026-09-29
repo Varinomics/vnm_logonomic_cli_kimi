@@ -1,4 +1,5 @@
 #include "kimi_config.h"
+#include "kimi_guidance.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
 
@@ -69,12 +70,16 @@ int main()
     const auto nonce = addon::random_nonce_hex();
     auto body = kimi::object({{"session_id", Json(kimi::text(*payload, "session_id"))},
         {"source", Json(kimi::text(*payload, "source"))}});
+    std::filesystem::path guidance;
     try {
         kimi::Environment runtime;
         for (const auto key : {"KIMI_CODE_HOME", "HOME", "USERPROFILE"}) {
             if (const auto* value = std::getenv(key)) runtime.emplace_back(key, value);
         }
-        body.set("kimi_code_home", Json(kimi::code_home(runtime, kimi::path_string(std::filesystem::current_path()))));
+        const auto home = kimi::code_home(runtime, kimi::path_string(std::filesystem::current_path()));
+        body.set("kimi_code_home", Json(home));
+        guidance = kimi::session_guidance_path(addon::path_from_utf8(home), environment->generation_nonce,
+            kimi::text(*payload, "session_id"));
     }
     catch (const std::exception&) { return 1; }
     auto result = client.deliver_provider_event(name, body, id, nonce);
@@ -91,8 +96,22 @@ int main()
             title = client.request_title_instruction("kimi", name, changed_files);
         }
         if (title.completed && title.accepted && !title.instruction.empty()) {
-            std::fwrite(title.instruction.data(), 1, title.instruction.size(), stdout);
-            std::fputc('\n', stdout);
+            try {
+                const auto reminder = kimi::publish_session_guidance(guidance, title.instruction);
+                std::fwrite(reminder.data(), 1, reminder.size(), stdout);
+                std::fputc('\n', stdout);
+            }
+            catch (const std::exception&) {
+                std::fputs("Logonomic session guidance could not be saved.\n", stderr);
+                return 1;
+            }
+        }
+    }
+    if (name == "SessionEnd") {
+        try { kimi::remove_session_guidance(guidance); }
+        catch (const std::exception&) {
+            std::fputs("Logonomic session guidance could not be removed.\n", stderr);
+            return 1;
         }
     }
     return 0;
