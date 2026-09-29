@@ -148,6 +148,191 @@ std::optional<addon::Poll_observations_result> poll(kimi::Lifecycle_observer& ob
         : std::nullopt;
 }
 
+bool wait_until(const std::function<bool()>& predicate)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!predicate()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return true;
+}
+
+class Observe_window final
+{
+public:
+    Observe_window(kimi::Lifecycle_observer& observer, const Workspace& workspace, const std::string& nonce)
+    {
+        prepare_observe(context, workspace, nonce);
+        worker = std::async(std::launch::async, [&observer, this] { observer.handle(context); });
+    }
+    ~Observe_window()
+    {
+        context.m_cancel = true;
+        worker.wait();
+    }
+    void stop()
+    {
+        context.m_cancel = true;
+        worker.wait();
+    }
+    Context context;
+    std::future<void> worker;
+};
+
+std::string call_record(const std::string& id)
+{
+    return "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.call\","
+        "\"name\":\"Agent\",\"toolCallId\":\"" + id + "\"}}\n";
+}
+
+void write_bytes(const fs::path& path, const std::string& bytes, bool append = false)
+{
+    std::ofstream output(path, std::ios::binary | (append ? std::ios::app : std::ios::trunc));
+    output << bytes;
+    output.close();
+    require(static_cast<bool>(output), "wire fixture write must complete");
+}
+
+void native_wire_reconciliation_preserves_records_and_final_drain()
+{
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    const auto path = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+    fs::create_directories(path.parent_path());
+    write_bytes(path, {});
+    const auto service = std::make_shared<observation::Service>();
+    observation::Configuration configuration;
+    configuration.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, configuration);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve native reconciliation owner");
+    observer.classify(start_request(workspace, nonce));
+    Observe_window window(observer, workspace, nonce);
+    const auto settled = [&] {
+        const auto statistics = service->statistics();
+        return statistics.dispatches > 0 && statistics.outstanding == 0 &&
+            statistics.pending_registrations == 0 && statistics.retained_events == 0;
+    };
+    require(wait_until(settled), "initial wire acquisition follows native registration");
+    const auto first = call_record("first-child");
+    const auto split = first.size() / 2;
+    auto dispatches = service->statistics().dispatches;
+    write_bytes(path, first.substr(0, split), true);
+    require(wait_until([&] { return service->statistics().dispatches > dispatches && settled(); }),
+        "a partial append reaches the actual receiver");
+    require(poll(observer, nonce)->observations.empty(), "a partial record is not an observation");
+    write_bytes(path, first.substr(split), true);
+    require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 1; }),
+        "the final half converges without another write");
+    const auto original = poll(observer, nonce);
+    require(original && poll(observer, nonce)->resume_cursor == original->resume_cursor,
+        "unacknowledged records remain replayable");
+    require(wait_until(settled), "record application releases its capture");
+    dispatches = service->statistics().dispatches;
+    write_bytes(path.parent_path() / "irrelevant.txt", "unrelated sibling contents\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    require(service->statistics().dispatches == dispatches, "unrelated sibling content does not acquire the wire");
+
+    write_bytes(path, call_record("truncated-child"));
+    require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 2; }),
+        "truncation rewinds bytes without replaying an already emitted record");
+    const auto replacement = path.parent_path() / "replacement.jsonl";
+    write_bytes(replacement, call_record("replaced-child"));
+    fs::remove(path);
+    fs::rename(replacement, path);
+    require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 3; }),
+        "replacement is acquired without a later file notification");
+
+    window.stop();
+    write_bytes(path, call_record("final-child"), true);
+    auto end = start_request(workspace, nonce);
+    end.event.name = "SessionEnd";
+    end.ledger.current_transition = addon::Ledger_transition{addon::Transition_kind::START, "session", nonce};
+    observer.classify(end);
+    const auto final = poll(observer, nonce);
+    require(final && !final->more && final->observations.size() == 9,
+        "final drain retains four starts, four stops and the terminal fact");
+    require(final->observations.back().session_transition == addon::Session_transition::ENDED,
+        "all child observations precede SessionEnd");
+    require(retire(observer, nonce, final->resume_cursor), "exact final acknowledgement retires the binding");
+    require(wait_until([&] { const auto statistics = service->statistics(); return statistics.subscriptions == 0 &&
+        statistics.outstanding == 0 && statistics.pending_registrations == 0 && statistics.retiring_groups == 0; }),
+        "terminal retirement releases observation ownership");
+}
+
+void missing_ancestors_and_parent_replacement_reconcile_without_polling()
+{
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    fs::remove(workspace.m_root);
+    const auto service = std::make_shared<observation::Service>();
+    observation::Configuration configuration;
+    configuration.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, configuration);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve missing home owner");
+    observer.classify(start_request(workspace, nonce));
+    Observe_window window(observer, workspace, nonce);
+    require(wait_until([&] { const auto statistics = service->statistics(); return statistics.dispatches > 0 &&
+        statistics.outstanding == 0 && statistics.pending_registrations == 0; }), "arm missing ancestor frontier");
+    const auto idle_dispatches = service->statistics().dispatches;
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    require(service->statistics().dispatches == idle_dispatches, "missing wire does not cause private rebind polling");
+    native_call(workspace, "session");
+    require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 1; }),
+        "one creation of the complete missing chain wakes binding and post-arm acquisition");
+    const auto directory = workspace.m_root / "sessions/workspace/session/agents/main";
+    fs::rename(directory, directory.parent_path() / "old-main");
+    fs::create_directory(directory);
+    write_bytes(directory / "wire.jsonl", call_record("replacement-parent-child"));
+    require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 2; }),
+        "new main directory replaces old native coverage without an extra edit");
+    require(retire(observer, nonce), "abandonment wakes an active receiver");
+    window.stop();
+    require(window.context.m_failure == "correlation_retired", "retired capture cannot publish observe success");
+}
+
+void final_append_during_acquisition_keeps_its_own_capture()
+{
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    const auto path = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+    fs::create_directories(path.parent_path());
+    write_bytes(path, {});
+    const auto service = std::make_shared<observation::Service>();
+    observation::Configuration configuration;
+    configuration.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, configuration);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve held wire acquisition");
+    observer.classify(start_request(workspace, nonce));
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::atomic<bool> held = false;
+    observer.set_scan_gate_for_tests([&] {
+        if (!held.exchange(true)) {
+            entered.set_value();
+            require(released.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+                "held wire acquisition must be released");
+        }
+    });
+    Observe_window window(observer, workspace, nonce);
+    require(entered_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+        "hold actual acquisition after its snapshot length was captured");
+    write_bytes(path, call_record("quiet-final-child"), true);
+    require(wait_until([&] { return service->statistics().retained_events > 0; }),
+        "actual native final write reaches the outstanding acquisition");
+    release.set_value();
+    require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 1; }),
+        "old capture acknowledgement cannot lose the final append without another edit");
+    window.stop();
+    observer.set_scan_gate_for_tests({});
+    require(retire(observer, nonce), "retire the held-acquisition cursor");
+}
+
 void candidates_reclaim_without_tombstones()
 {
     Workspace workspace;
@@ -322,6 +507,9 @@ int main(int argc, char** argv)
         retirement_releases_only_its_owner();
         final_page_requires_exact_acknowledgment();
         in_flight_watch_stops_on_retirement();
+        native_wire_reconciliation_preserves_records_and_final_drain();
+        missing_ancestors_and_parent_replacement_reconcile_without_polling();
+        final_append_during_acquisition_keeps_its_own_capture();
         return 0;
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

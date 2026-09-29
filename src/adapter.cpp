@@ -15,6 +15,7 @@
 #include <logonomic_cli_addon/session_contracts.h>
 
 #include <exception>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -135,7 +136,8 @@ int main()
         {"helper-ingress", 2}, {"coordination-delivery", 1}, {"legacy-state-import", 1},
         {"accounts", 2}, {"usage-scan", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
     };
-    kimi::Lifecycle_observer observer;
+    const auto observation_service = std::make_shared<vnm::filesystem_observation::Service>();
+    kimi::Lifecycle_observer observer(observation_service, {});
     addon::Adapter_runtime runtime(std::move(options));
     runtime.set_invoke_handler([&](auto& context) { invoke(context, observer); });
     return runtime.run();

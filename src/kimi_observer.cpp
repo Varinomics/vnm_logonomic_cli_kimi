@@ -6,19 +6,13 @@
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
 #include <logonomic_cli_addon/sha256.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <poll.h>
-#include <sys/inotify.h>
-#include <unistd.h>
-#endif
+#include <QDir>
+#include <QFileInfo>
 
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <chrono>
-#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -31,6 +25,8 @@
 namespace kimi {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
+namespace observation = vnm::filesystem_observation;
+namespace path_name = vnm::path_name;
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -87,77 +83,6 @@ std::optional<fs::path> find_session_wire(const std::string& home, const std::st
 
 namespace {
 
-class Directory_watch
-{
-public:
-    explicit Directory_watch(const fs::path& directory)
-    {
-#ifdef _WIN32
-        m_handle = FindFirstChangeNotificationW(directory.c_str(), FALSE,
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE);
-        if (m_handle == INVALID_HANDLE_VALUE) throw std::runtime_error("wire_watch_failed");
-#else
-        m_descriptor = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-        if (m_descriptor < 0) throw std::runtime_error("wire_watch_failed");
-        if (inotify_add_watch(m_descriptor, directory.c_str(), IN_MODIFY | IN_CLOSE_WRITE | IN_CREATE |
-                IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF) < 0) {
-            close(m_descriptor);
-            m_descriptor = -1;
-            throw std::runtime_error("wire_watch_failed");
-        }
-#endif
-    }
-    ~Directory_watch()
-    {
-#ifdef _WIN32
-        FindCloseChangeNotification(m_handle);
-#else
-        close(m_descriptor);
-#endif
-    }
-    Directory_watch(const Directory_watch&) = delete;
-    Directory_watch& operator=(const Directory_watch&) = delete;
-    bool changed()
-    {
-#ifdef _WIN32
-        const auto result = WaitForSingleObject(m_handle, 100);
-        if (result == WAIT_TIMEOUT) return false;
-        if (result != WAIT_OBJECT_0 || !FindNextChangeNotification(m_handle)) m_invalidated = true;
-        return true;
-#else
-        pollfd descriptor{m_descriptor, POLLIN, 0};
-        const auto result = poll(&descriptor, 1, 100);
-        if (result < 0) throw std::runtime_error("wire_watch_failed");
-        if (result == 0) return false;
-        std::array<char, 8192> events{};
-        for (;;) {
-            const auto count = read(m_descriptor, events.data(), events.size());
-            if (count <= 0) break;
-            std::size_t offset = 0;
-            while (offset + sizeof(inotify_event) <= static_cast<std::size_t>(count)) {
-                inotify_event event{};
-                std::memcpy(&event, events.data() + offset, sizeof(event));
-                if ((event.mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) != 0) m_invalidated = true;
-                offset += sizeof(event) + event.len;
-            }
-        }
-        return true;
-#endif
-    }
-    bool invalidated() const
-    {
-        return m_invalidated;
-    }
-
-private:
-#ifdef _WIN32
-    HANDLE m_handle = INVALID_HANDLE_VALUE;
-#else
-    int m_descriptor = -1;
-#endif
-    bool m_invalidated = false;
-};
-
 struct Binding
 {
     explicit Binding(std::string id, std::string root)
@@ -170,6 +95,13 @@ struct Binding
     std::string nonce;
     std::optional<fs::path> path;
     Wire_decoder decoder;
+    observation::Subscription subscription;
+    std::shared_ptr<observation::Wait_channel> channel;
+    QStringList watched_directories;
+    QStringList watched_files;
+#ifdef KIMI_OBSERVER_TEST_HOOKS
+    std::function<void()> scan_gate;
+#endif
     std::deque<addon::Lifecycle_observation> queue;
     std::uint64_t first_sequence = 0;
     std::uint64_t next_sequence = 0;
@@ -186,6 +118,145 @@ struct Binding
     Clock::time_point bind_deadline = Clock::now() + std::chrono::seconds(60);
 };
 
+QString observation_path(const fs::path& path)
+{
+    return path_name::normalized(QString::fromStdString(path_string(path)));
+}
+
+void stop_observation(Binding& binding)
+{
+    binding.subscription.reset();
+    if (binding.channel) binding.channel->cancel();
+    binding.channel.reset();
+    binding.watched_directories.clear();
+    binding.watched_files.clear();
+}
+
+bool directory_exists(const fs::path& path)
+{
+    std::error_code error;
+    const bool exists = fs::is_directory(path, error);
+    if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
+        throw std::runtime_error("wire_path_unavailable");
+    }
+    return exists;
+}
+
+// Missing descendants are represented by the first absent child of an existing
+// directory. Its creation replaces these interests and earns a post-arm scan.
+bool update_observation(Binding& binding, observation::Service& service,
+    const observation::Configuration& configuration,
+    const std::map<std::string, std::shared_ptr<Binding>>& sessions)
+{
+    const auto resolved = find_session_wire(binding.home, binding.session);
+    if (resolved) {
+        for (const auto& [key, other] : sessions) {
+            (void)key;
+            if (other && other.get() != &binding && !other->closed && other->path == resolved) {
+                throw std::runtime_error("wire_file_already_bound");
+            }
+        }
+    }
+    if (binding.path && !resolved) {
+        binding.bind_deadline = Clock::now() + std::chrono::seconds(60);
+    }
+    binding.path = resolved;
+
+    QStringList directories;
+    QStringList files;
+    QStringList wires;
+    const fs::path home = addon::path_from_utf8(binding.home);
+    fs::path frontier = home;
+    while (!frontier.parent_path().empty() && !directory_exists(frontier.parent_path())) {
+        const auto parent = frontier.parent_path();
+        if (parent == frontier) break;
+        frontier = parent;
+    }
+    files.append(observation_path(frontier));
+    const fs::path root = home / "sessions";
+    if (directory_exists(home)) files.append(observation_path(root));
+    if (directory_exists(root)) {
+        directories.append(observation_path(root));
+        std::error_code error;
+        for (fs::directory_iterator workspace(root, error), end;
+             !error && workspace != end; workspace.increment(error))
+        {
+            if (workspace->is_symlink(error) || !workspace->is_directory(error)) continue;
+            fs::path candidate = workspace->path() / binding.session;
+            files.append(observation_path(candidate));
+            if (fs::is_symlink(candidate, error)) continue;
+            error.clear();
+            for (const auto* component : {"agents", "main", "wire.jsonl"}) {
+                if (!directory_exists(candidate)) break;
+                candidate /= component;
+                files.append(observation_path(candidate));
+                if (std::string_view(component) == "wire.jsonl") wires.append(observation_path(candidate));
+            }
+        }
+        if (error) throw std::runtime_error("wire_path_unavailable");
+    }
+    if (binding.path) {
+        files.append(observation_path(*binding.path));
+        wires.append(observation_path(*binding.path));
+    }
+    directories.removeDuplicates();
+    directories.sort();
+    files.removeDuplicates();
+    files.sort();
+    if (binding.channel && directories == binding.watched_directories && files == binding.watched_files) {
+        return false;
+    }
+
+    observation::Subscription_options options;
+    options.mode = observation::Watch_mode::DIRECT;
+    options.interval = configuration.general_interval;
+    options.policy_epoch = std::make_shared<path_name::Policy_epoch>();
+    QList<path_name::Key> exact_keys;
+    QList<path_name::Key> wire_keys;
+    QList<path_name::Key> directory_keys;
+    for (const auto& directory : directories) {
+        options.directories.append({directory, 0});
+        directory_keys.append(options.policy_epoch->key(directory));
+    }
+    for (const auto& file : files) exact_keys.append(options.policy_epoch->key(file));
+    for (const auto& wire : wires) wire_keys.append(options.policy_epoch->key(wire));
+    options.exact_files = files;
+    options.classifier = [exact_keys, wire_keys, directory_keys](const observation::Event& event) {
+        const auto matches = [&](const auto& keys) {
+            return std::any_of(keys.cbegin(), keys.cend(), [&](const auto& key) {
+                return path_name::matches_key(event.path, key) || path_name::matches_key(event.old_path, key);
+            });
+        };
+        if (matches(wire_keys)) return true;
+        if (event.kind == observation::Event_kind::MODIFIED) return false;
+        if (matches(exact_keys)) return true;
+        if (event.entry_type == observation::Entry_type::NON_DIRECTORY) return false;
+        return std::any_of(directory_keys.cbegin(), directory_keys.cend(), [&](const auto& key) {
+            return path_name::matches_key(QFileInfo(event.path).absolutePath(), key) ||
+                (!event.old_path.isEmpty() && path_name::matches_key(QFileInfo(event.old_path).absolutePath(), key));
+        });
+    };
+    const auto channel = std::make_shared<observation::Wait_channel>();
+    auto subscription = service.subscribe(std::move(options), channel);
+    stop_observation(binding);
+    binding.subscription = std::move(subscription);
+    binding.channel = channel;
+    binding.watched_directories = std::move(directories);
+    binding.watched_files = std::move(files);
+    return true;
+}
+
+bool observation_covered(const Binding& binding)
+{
+    for (const auto& directory : binding.watched_directories) {
+        if (!binding.subscription.covers_directory(directory)) return false;
+    }
+    for (const auto& file : binding.watched_files) {
+        if (!binding.subscription.covers_directory(QFileInfo(file).absolutePath())) return false;
+    }
+    return true;
+}
+
 void enqueue(Binding& binding, std::vector<addon::Lifecycle_observation> observations)
 {
     if (binding.retired || !binding.failure.empty()) return;
@@ -201,11 +272,11 @@ void enqueue(Binding& binding, std::vector<addon::Lifecycle_observation> observa
     }
 }
 
-void scan(Binding& binding, addon::Invocation_context* invocation)
+bool scan(Binding& binding, addon::Invocation_context* invocation)
 {
-    if (binding.retired || !binding.path || !binding.failure.empty()) return;
+    if (binding.retired || !binding.path || !binding.failure.empty()) return false;
     std::ifstream input(*binding.path, std::ios::binary);
-    if (!input) return;
+    if (!input) return false;
     input.seekg(0, std::ios::end);
     const auto length = input.tellg();
     bool rewind = length < 0 || static_cast<std::uint64_t>(length) < binding.offset;
@@ -226,6 +297,9 @@ void scan(Binding& binding, addon::Invocation_context* invocation)
     input.seekg(static_cast<std::streamoff>(binding.offset));
     std::array<char, 65536> bytes{};
     const auto snapshot_end = length < 0 ? binding.offset : static_cast<std::uint64_t>(length);
+#ifdef KIMI_OBSERVER_TEST_HOOKS
+    if (binding.scan_gate) binding.scan_gate();
+#endif
     while (input && binding.offset < snapshot_end && (!invocation || !invocation->cancel_requested()) &&
            !binding.closed && binding.failure.empty()) {
         const auto remaining = std::min<std::uint64_t>(bytes.size(), snapshot_end - binding.offset);
@@ -260,12 +334,15 @@ void scan(Binding& binding, addon::Invocation_context* invocation)
     input.seekg(static_cast<std::streamoff>(binding.anchor_offset));
     input.read(binding.anchor.data(), static_cast<std::streamsize>(size));
     if (input.gcount() != static_cast<std::streamsize>(size)) binding.anchor.clear();
+    return length >= 0 && binding.offset == snapshot_end && binding.failure.empty();
 }
 
 } // namespace
 
 struct Lifecycle_observer::State
 {
+    std::shared_ptr<observation::Service> service;
+    observation::Configuration configuration;
     std::mutex mutex;
     // A null binding is a host-reserved candidate. Only authenticated
     // classification can populate its native home/session identity.
@@ -273,8 +350,31 @@ struct Lifecycle_observer::State
     std::map<std::string, std::shared_ptr<Binding>> cursors;
 };
 
-Lifecycle_observer::Lifecycle_observer() : m_state(std::make_unique<State>()) {}
+Lifecycle_observer::Lifecycle_observer()
+: Lifecycle_observer(std::make_shared<observation::Service>(), {})
+{}
+
+Lifecycle_observer::Lifecycle_observer(std::shared_ptr<observation::Service> service,
+    observation::Configuration configuration)
+: m_state(std::make_unique<State>())
+{
+    if (!service) throw std::invalid_argument("Kimi observer requires a process observation service");
+    configuration.validate();
+    m_state->service = std::move(service);
+    m_state->configuration = configuration;
+}
 Lifecycle_observer::~Lifecycle_observer() = default;
+
+#ifdef KIMI_OBSERVER_TEST_HOOKS
+void Lifecycle_observer::set_scan_gate_for_tests(std::function<void()> gate)
+{
+    std::lock_guard lock(m_state->mutex);
+    for (const auto& [key, binding] : m_state->sessions) {
+        (void)key;
+        if (binding) binding->scan_gate = gate;
+    }
+}
+#endif
 
 addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_event_request& request)
 {
@@ -323,11 +423,13 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
                 enqueue(*found->second, {observation});
                 if (!found->second->failure.empty()) throw std::runtime_error(found->second->failure);
                 found->second->closed = true;
+                stop_observation(*found->second);
                 // The continuous queue owns the terminal fact so every retained
                 // agent stop precedes it across bounded poll pages.
                 return result;
             }
             found->second->closed = true;
+            stop_observation(*found->second);
         }
         result.classification = addon::Classification::EVENT;
         observation.session_transition = addon::Session_transition::ENDED;
@@ -374,6 +476,7 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
                 }
                 if (binding) {
                     binding->retired = true;
+                    stop_observation(*binding);
                     m_state->cursors.erase(binding->cursor_key);
                     binding->path.reset();
                     binding->queue.clear();
@@ -454,12 +557,10 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
     }
     std::string error;
     const auto deadline = Clock::now() + std::chrono::milliseconds(request->window_ms);
-    std::unique_ptr<Directory_watch> watch;
-    int retry_delay = 25;
     std::uint64_t reported_sequence = initial_sequence;
     try {
         while (!context.cancel_requested() && Clock::now() < deadline) {
-            bool bound = false;
+            std::shared_ptr<observation::Wait_channel> channel;
             {
                 std::lock_guard lock(m_state->mutex);
                 if (binding->retired) break;
@@ -469,46 +570,35 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
                     context.report_progress(available, std::nullopt, addon::observe_progress_note(available));
                 }
                 if (binding->closed) break;
-                if (!binding->path) {
-                    binding->path = find_session_wire(binding->home, binding->session);
-                    if (binding->path) {
-                        for (const auto& [key, other] : m_state->sessions) {
-                            (void)key;
-                            if (other && other != binding && !other->closed && other->path == binding->path) {
-                                binding->path.reset();
-                                throw std::runtime_error("wire_file_already_bound");
-                            }
+                if (!binding->channel) {
+                    update_observation(*binding, *m_state->service, m_state->configuration, m_state->sessions);
+                }
+                if (!binding->failure.empty()) { error = binding->failure; break; }
+                if (!binding->path && Clock::now() >= binding->bind_deadline) { error = "wire_bind_timeout"; break; }
+                channel = binding->channel;
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+            // This wait only bounds SDK cancellation/deadline latency. A timeout
+            // does not trigger a filesystem search or read.
+            auto delivery = channel->wait(std::min(remaining, std::chrono::milliseconds(100)));
+            if (!delivery) continue;
+            {
+                std::lock_guard lock(m_state->mutex);
+                if (delivery->valid() && !binding->retired && !binding->closed && binding->channel == channel) {
+                    const bool replaced = update_observation(
+                        *binding, *m_state->service, m_state->configuration, m_state->sessions);
+                    if (!replaced) {
+                        const bool acquired = !binding->path || scan(*binding, &context);
+                        if (acquired && observation_covered(*binding)) {
+                            binding->subscription.acknowledge(delivery->batch.capture);
+                        }
+                        else {
+                            binding->subscription.request_rescan(QStringLiteral("Kimi wire acquisition is incomplete"));
                         }
                     }
                 }
-                if (binding->path && !watch) {
-                    watch = std::make_unique<Directory_watch>(binding->path->parent_path());
-                    scan(*binding, &context);
-                }
-                bound = binding->path.has_value();
-                if (!binding->failure.empty()) { error = binding->failure; break; }
-                if (!bound && Clock::now() >= binding->bind_deadline) { error = "wire_bind_timeout"; break; }
-                if (binding->next_sequence > reported_sequence) {
-                    reported_sequence = binding->next_sequence;
-                    const auto available = reported_sequence - initial_sequence;
-                    context.report_progress(available, std::nullopt, addon::observe_progress_note(available));
-                }
             }
-            if (!bound) {
-                context.wait_for_cancel(retry_delay);
-                retry_delay = std::min(retry_delay * 2, 2000);
-                continue;
-            }
-            if (watch->changed()) {
-                std::lock_guard lock(m_state->mutex);
-                if (binding->retired) break;
-                scan(*binding, &context);
-                if (watch->invalidated()) {
-                    watch.reset();
-                    binding->path.reset();
-                    binding->bind_deadline = Clock::now() + std::chrono::seconds(60);
-                }
-            }
+            delivery->completion.complete();
         }
     }
     catch (const std::exception& exception) { error = exception.what(); }
