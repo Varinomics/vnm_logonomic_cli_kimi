@@ -478,8 +478,8 @@ int main(int argc, char** argv)
         }
         result = run(arguments[2], arguments[4]);
     }
-    catch (const std::exception&) {
-        result = kimi::object({{"status", Json("error")}, {"error", Json("Kimi quota reporting failed.")}});
+    catch (const std::exception& error) {
+        result = kimi::quota_probe_failure(error.what());
     }
     const auto encoded = addon::serialize_json(result) + '\n';
     std::fwrite(encoded.data(), 1, encoded.size(), stdout);

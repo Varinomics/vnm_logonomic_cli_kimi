@@ -456,7 +456,8 @@ std::optional<Json> normalized_reply(const char* reply)
 
 // The adapter's final inspection of that helper output, decoded as the host
 // decodes a quota@2 result; empty when the adapter refuses the output.
-std::optional<addon::Quota_inspect_result> inspected_quota(const Json& normalized)
+std::optional<addon::Quota_inspect_result> inspected_quota(
+    const Json& normalized, addon::Contract_failure* out_failure = nullptr)
 {
     class Context : public addon::Invocation_context
     {
@@ -466,10 +467,16 @@ std::optional<addon::Quota_inspect_result> inspected_quota(const Json& normalize
         bool wait_for_cancel(int) override { return false; }
         void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
         void succeed(Json value) override { payload = std::move(value); }
-        void fail(addon::Result_status, std::string, std::string) override { failed = true; }
+        void fail(addon::Result_status, std::string reason, std::string detail) override
+        {
+            failed = true;
+            failure.reason_code = std::move(reason);
+            failure.detail      = std::move(detail);
+        }
         bool finished() const override { return payload || failed; }
         addon::Invoke_request invocation;
         std::optional<Json> payload;
+        addon::Contract_failure failure;
         bool failed = false;
     } inspection;
     addon::Probe_inspect_request request;
@@ -485,7 +492,10 @@ std::optional<addon::Quota_inspect_result> inspected_quota(const Json& normalize
     catch (const std::exception&) {
         return std::nullopt;
     }
-    if (!inspection.payload) return std::nullopt;
+    if (!inspection.payload) {
+        if (out_failure) *out_failure = inspection.failure;
+        return std::nullopt;
+    }
     addon::Contract_failure failure;
     return addon::decode_quota_inspect_result(*inspection.payload, true, &failure, 2);
 }
@@ -500,9 +510,10 @@ void quota_usages()
         }
     };
 
-    // Oracle: a reply carrying data.quota is Kimi Code 2.0.2's shape (observed
-    // 2026-09-22), which names both windows. It is read as that shape alone:
-    // summary and limits never override or complete it.
+    // Oracle: https://moonshotai.github.io/kimi-code/en/reference/server-api.html
+    // GET /api/v1/oauth/usage reports whichever windows the account has.
+    // A successful empty usages object was also observed from Kimi 2.1.1.
+    // Summary and limits never override or complete the quota shape.
     const auto both = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
         "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T17:00:00Z"},
         "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}},
@@ -512,15 +523,38 @@ void quota_usages()
         kimi::member(kimi::member(*both, "primary"),   "used_percent").as_number() == 25 &&
         kimi::member(kimi::member(*both, "secondary"), "used_percent").as_number() == 50,
         "quota.usages wins over summary and limits in the same reply");
+    const auto primary_only = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+        "limit5h":{"usedRatio":0.25}}}}})");
+    const auto primary_observed = primary_only ? inspected_quota(*primary_only) : std::nullopt;
+    check(primary_observed && primary_observed->observation &&
+        primary_observed->observation->state == addon::Quota_status::READY &&
+        primary_observed->observation->primary && !primary_observed->observation->secondary &&
+        primary_observed->observation->primary->used_percent == 25,
+        "an absent weekly window does not discard reported five-hour quota");
+    const auto secondary_only = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
+        "limit7d":{"usedRatio":0.5}}}}})");
+    const auto secondary_observed = secondary_only ? inspected_quota(*secondary_only) : std::nullopt;
+    check(secondary_observed && secondary_observed->observation &&
+        secondary_observed->observation->state == addon::Quota_status::READY &&
+        !secondary_observed->observation->primary && secondary_observed->observation->secondary &&
+        secondary_observed->observation->secondary->used_percent == 50,
+        "an absent five-hour window does not discard reported weekly quota");
+    const auto empty = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{},"extraUsage":null},
+        "summary":{"used":90,"limit":100,"window":{"duration":1,"unit":"week"}},
+        "limits":[{"used":80,"limit":100,"window":{"duration":5,"unit":"hour"}}]}})");
+    const auto empty_observed = empty ? inspected_quota(*empty) : std::nullopt;
+    check(empty_observed && empty_observed->complete && empty_observed->observation &&
+        empty_observed->observation->state == addon::Quota_status::UNAVAILABLE &&
+        !empty_observed->observation->primary && !empty_observed->observation->secondary,
+        "an empty successful usage reply is unavailable without invented values or an authentication failure");
+    check(!inspected_quota(json(R"({"status":"unavailable","primary":{"used_percent":0,"window_minutes":300,"window_label":"5-hour"}})")),
+        "unavailable quota cannot carry a fabricated usage value");
     const struct
     {
         const char* description;
         const char* reply;
     }
     refused[] = {
-        {"quota.usages without its seven-day window is refused",
-            R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
-                "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T17:00:00Z"}}}}})"},
         {"a null five-hour window is refused, not completed from summary and limits",
             R"({"code":0,"data":{"kind":"ok","quota":{"usages":{"limit5h":null,
                 "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}},
@@ -530,10 +564,8 @@ void quota_usages()
             R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
                 "limit5h":{"usedRatio":"0.25","resetAt":"2026-09-22T17:00:00Z"},
                 "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}}}})"},
-        {"an empty quota.usages is refused, not filled from summary and limits",
-            R"({"code":0,"data":{"kind":"ok","quota":{"usages":{}},
-                "summary":{"used":90,"limit":100,"window":{"duration":1,"unit":"week"}},
-                "limits":[{"used":80,"limit":100,"window":{"duration":5,"unit":"hour"}}]}})"},
+        {"a missing usages object remains malformed",
+            R"({"code":0,"data":{"kind":"ok","quota":{}}})"},
     };
     for (const auto& reply : refused) {
         check(!normalized_reply(reply.reply), reply.description);
@@ -567,7 +599,21 @@ void quota_usages()
         "limit7d":{"usedRatio":0.5,"resetAt":"2026-09-28T09:00:00Z"}}}}})");
     check(!malformed || !inspected_quota(*malformed), "a malformed reset time never reaches the host");
 
-    require(failures == 0, "quota.usages is read only as its own complete shape");
+    // Probe failures must retain a safe cause; arbitrary exception or reply
+    // text must never become a diagnostic, because it can contain credentials.
+    addon::Contract_failure failure;
+    auto timeout = kimi::quota_probe_failure("quota_http_timeout");
+    timeout.set("detail", Json("Bearer private-test-token"));
+    check(!inspected_quota(timeout, &failure) && failure.reason_code == "quota_http_timeout" &&
+        failure.detail == "The Kimi quota service did not respond in time.",
+        "the adapter keeps the recognized timeout cause and uses its own safe diagnostic");
+    const auto unknown = kimi::quota_probe_failure("Bearer private-test-token");
+    check(!inspected_quota(unknown, &failure) && failure.reason_code == "quota_probe_failed" &&
+        failure.detail.find("private-test-token") == std::string::npos &&
+        addon::serialize_json(unknown).find("private-test-token") == std::string::npos,
+        "unknown exception text is not copied into helper output or host diagnostics");
+
+    require(failures == 0, "quota.usages preserves reported windows, absence and failures");
 }
 
 void account_names()

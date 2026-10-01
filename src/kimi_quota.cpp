@@ -139,15 +139,20 @@ Json normalize_quota(const Json& response)
     }
     if (text(data, "kind") != "ok") throw std::runtime_error("invalid_quota_response");
     auto result = object({{"status", Json("ok")}});
-    // Kimi Code 2.0.2 reports quota.usages instead of summary and limits;
-    // earlier releases, which the package still supports, send the latter.
-    // A reply carrying quota is read as that shape alone, and it names both
-    // windows: a missing one is a truncated reply, not an absent window.
+    // The server API reports only the quota windows the account has.
+    // Read this shape alone; summary and limits belong to the earlier reply.
     if (data.find("quota")) {
         const auto& usages = member(member(data, "quota"), "usages");
         if (!usages.is_object()) throw std::runtime_error("invalid_quota_usages");
-        result.set("primary",   ratio_window(member(usages, "limit5h"), "5-hour", 300));
-        result.set("secondary", ratio_window(member(usages, "limit7d"), "Weekly", 10080));
+        if (const auto* usage = usages.find("limit5h")) {
+            result.set("primary", ratio_window(*usage, "5-hour", 300));
+        }
+        if (const auto* usage = usages.find("limit7d")) {
+            result.set("secondary", ratio_window(*usage, "Weekly", 10080));
+        }
+        if (!result.find("primary") && !result.find("secondary")) {
+            result.set("status", Json("unavailable"));
+        }
         return result;
     }
     if (!member(data, "summary").is_null()) result.set("secondary", window(member(data, "summary"), "Weekly", 10080));
@@ -167,6 +172,61 @@ Json normalize_quota(const Json& response)
     }
     if (!result.find("primary") && !result.find("secondary")) throw std::runtime_error("quota_window_unavailable");
     return result;
+}
+
+Json quota_probe_failure(std::string_view reason)
+{
+    // Only package-owned diagnostics cross the helper boundary. Exceptions
+    // and upstream messages can contain profile paths or credentials.
+    static constexpr struct
+    {
+        std::string_view reason;
+        const char*      detail;
+    }
+    failures[] = {
+        {"invalid_quota_request",    "The Kimi quota check has an invalid executable or profile path."},
+        {"invalid_utf8_path",        "The Kimi executable or profile path is not valid UTF-8."},
+        {"quota_environment_failed", "The Kimi quota service could not inherit its process environment."},
+        {"quota_start_failed",       "The Kimi quota service could not be started."},
+        {"quota_server_not_ready",   "The Kimi quota service did not become ready."},
+        {"invalid_owned_server",     "The Kimi quota service published an invalid connection record."},
+        {"ambiguous_owned_server",   "The Kimi quota service published conflicting connection records."},
+        {"invalid_quota_file",       "The Kimi quota service's local connection file could not be read."},
+        {"invalid_quota_token",      "The Kimi quota service's local connection token is invalid."},
+        {"socket_start_failed",      "A local connection to the Kimi quota service could not be created."},
+        {"quota_socket_failed",      "A local connection to the Kimi quota service could not be configured."},
+        {"quota_connect_failed",     "The Kimi quota service could not be reached."},
+        {"quota_http_timeout",       "The Kimi quota service did not respond in time."},
+        {"quota_send_failed",        "The quota request could not be sent to the Kimi service."},
+        {"quota_receive_failed",     "The reply from the Kimi quota service could not be read."},
+        {"quota_http_failed",        "The Kimi quota service rejected the local usage request."},
+        {"quota_response_limit",     "The Kimi quota reply exceeded the supported message size."},
+        {"invalid_http_header",      "The Kimi quota service returned an invalid HTTP header."},
+        {"invalid_http_length",      "The Kimi quota service returned an incomplete or invalid HTTP body."},
+        {"invalid_http_encoding",    "The Kimi quota service returned an unsupported HTTP encoding."},
+        {"ambiguous_http_length",    "The Kimi quota service returned conflicting HTTP body lengths."},
+        {"invalid_http_chunk",       "The Kimi quota service returned an invalid HTTP chunk."},
+        {"quota_request_rejected",   "Kimi rejected the quota request."},
+        {"quota_unavailable",        "Kimi could not retrieve quota from its account service."},
+        {"invalid_quota_response",   "Kimi returned an invalid quota response."},
+        {"invalid_quota_usages",     "Kimi returned an invalid list of quota windows."},
+        {"invalid_quota_usage",      "Kimi returned an invalid quota usage value."},
+        {"invalid_quota_integer",    "Kimi returned an invalid numeric quota value."},
+        {"invalid_quota_reset",      "Kimi returned an invalid quota reset time."},
+        {"invalid_quota_window",     "Kimi returned an invalid quota window."},
+        {"invalid_quota_limit",      "Kimi returned an invalid quota limit."},
+        {"invalid_quota_limits",     "Kimi returned an invalid list of quota limits."},
+        {"duplicate_quota_window",   "Kimi returned conflicting quota windows."},
+        {"quota_window_unavailable", "Kimi returned no supported quota windows."},
+    };
+    for (const auto& failure : failures) {
+        if (reason == failure.reason) {
+            return object({{"status", Json("error")}, {"reason_code", Json(std::string(failure.reason))},
+                {"detail", Json(failure.detail)}});
+        }
+    }
+    return object({{"status", Json("error")}, {"reason_code", Json("quota_probe_failed")},
+        {"detail", Json("The Kimi quota check failed unexpectedly.")}});
 }
 
 void handle_quota(addon::Invocation_context& context)
@@ -219,14 +279,24 @@ void handle_quota(addon::Invocation_context& context)
     const auto payload = parse(request->inspection.stdout_bytes);
     if (!payload || !payload->is_object()) { context.fail(addon::Result_status::FAILED, "invalid_quota_response"); return; }
     const auto status = text(*payload, "status");
-    if (status != "ok" && status != "not_logged_in") { context.fail(addon::Result_status::FAILED, "quota_probe_failed"); return; }
+    if (status == "error") {
+        const auto failure = quota_probe_failure(text(*payload, "reason_code"));
+        context.fail(addon::Result_status::FAILED, text(failure, "reason_code"), text(failure, "detail"));
+        return;
+    }
+    if (status != "ok" && status != "not_logged_in" && status != "unavailable") {
+        context.fail(addon::Result_status::FAILED, "invalid_quota_response");
+        return;
+    }
     addon::Quota_observation observation;
     if (request->account_context) observation.scope.source_account_key = request->account_context->adapter_account_key;
     observation.scope.observed_at_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
     observation.scope.fresh_for_ms = 60000;
-    observation.state = status == "ok" ? addon::Quota_status::READY : addon::Quota_status::NOT_LOGGED_IN;
-    if (status == "not_logged_in" && (payload->find("primary") || payload->find("secondary"))) {
+    observation.state = status == "ok"            ? addon::Quota_status::READY :
+                        status == "not_logged_in" ? addon::Quota_status::NOT_LOGGED_IN :
+                                                    addon::Quota_status::UNAVAILABLE;
+    if (status != "ok" && (payload->find("primary") || payload->find("secondary"))) {
         throw std::runtime_error("invalid_quota_response");
     }
     if (payload->find("primary")) observation.primary = observation_window(member(*payload, "primary"));
