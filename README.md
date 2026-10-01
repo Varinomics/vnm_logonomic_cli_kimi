@@ -61,8 +61,13 @@ background completion and file replay. Ambiguous session paths are rejected.
 Delegated execution requires the native ACP contract and a supported observed
 version (at least 0.39.1); future releases are not rejected by an upper version
 ceiling. Interactive resume additionally verifies native `--session [id]` support
-and the installed SessionStart hook. The quota helper starts an owned loopback
-server, accepts only that process's registry entry, and shuts it down after the
+and the installed SessionStart hook. The quota helper reads managed usage over
+HTTPS when the selected official Kimi endpoint and file credential are known
+and native token renewal is not due. Kimi remains the sole owner of credential
+renewal and storage. Proxy/TLS overrides, unsupported configuration, and failed
+direct requests use the native route within the same supervised operation.
+That route starts an owned loopback server, accepts only that process's registry
+entry, and shuts it down after the
 request. Authentication absence remains distinct from a failed quota request.
 
 ## Building and qualification

@@ -74,7 +74,7 @@ endfunction()
 set(kimi_provider_sources
     src/kimi_accounts.cpp src/kimi_usage.cpp
     src/kimi_acp.cpp src/kimi_config.cpp src/kimi_guidance.cpp src/kimi_launcher.cpp
-    src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_wire.cpp)
+    src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_quota_direct.cpp src/kimi_wire.cpp)
 function(kimi_add_provider target)
     add_library(${target} STATIC ${kimi_provider_sources})
     kimi_target(${target})
@@ -93,11 +93,14 @@ target_link_libraries(kimi_helper PRIVATE kimi_provider)
 kimi_target(kimi_helper)
 logonomic_cli_addon_add_launch_bridge(kimi_launch_bridge)
 kimi_target(kimi_launch_bridge)
-add_executable(kimi_quota_probe src/kimi_quota_probe.cpp)
+add_executable(kimi_quota_probe src/kimi_quota_probe.cpp src/kimi_quota_http.cpp)
 target_link_libraries(kimi_quota_probe PRIVATE kimi_provider)
 kimi_target(kimi_quota_probe)
 if(WIN32)
-    target_link_libraries(kimi_quota_probe PRIVATE ws2_32)
+    target_link_libraries(kimi_quota_probe PRIVATE ws2_32 winhttp)
+else()
+    find_package(CURL REQUIRED)
+    target_link_libraries(kimi_quota_probe PRIVATE CURL::libcurl)
 endif()
 if(MINGW)
     # The probe's Windows entry point is wmain, which MinGW links only with
@@ -143,6 +146,10 @@ add_executable(kimi_contract_tests tests/kimi_contract_tests.cpp)
 target_link_libraries(kimi_contract_tests PRIVATE kimi_provider)
 kimi_target(kimi_contract_tests)
 add_test(NAME kimi_contract_tests COMMAND kimi_contract_tests)
+add_executable(kimi_quota_direct_tests tests/kimi_quota_direct_tests.cpp)
+target_link_libraries(kimi_quota_direct_tests PRIVATE kimi_provider)
+kimi_target(kimi_quota_direct_tests)
+add_test(NAME kimi_quota_direct_tests COMMAND kimi_quota_direct_tests)
 add_executable(kimi_usage_tests tests/kimi_usage_tests.cpp)
 target_link_libraries(kimi_usage_tests PRIVATE kimi_provider)
 kimi_target(kimi_usage_tests)
@@ -169,7 +176,7 @@ if(WIN32)
     # These executables run from the build tree, outside the assembled package.
     # Clean copied-package qualification supplies its own runtime environment.
     set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests
-        kimi_usage_tests kimi_usage_cache_tests kimi_acp_causal_tests PROPERTIES
+        kimi_usage_tests kimi_usage_cache_tests kimi_acp_causal_tests kimi_quota_direct_tests PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 

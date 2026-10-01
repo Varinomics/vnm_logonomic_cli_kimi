@@ -1,6 +1,9 @@
 #include "kimi_quota.h"
+#include "kimi_quota_direct.h"
+#include "kimi_quota_http.h"
 #include "kimi_launcher.h"
 
+#include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/package_source.h>
 
 #ifdef _WIN32
@@ -301,10 +304,11 @@ void wait_socket(const Socket& socket, bool writing, Clock::time_point deadline)
     if (ready <= 0) throw std::runtime_error("quota_http_timeout");
 }
 
-std::string http(unsigned short port, const std::string& token, bool shutdown)
+std::string http(unsigned short port, const std::string& token, bool shutdown, Clock::time_point operation_deadline)
 {
     Socket socket;
-    const auto deadline = Clock::now() + std::chrono::milliseconds(shutdown ? 3000 : 10000);
+    const auto deadline = std::min(operation_deadline,
+        Clock::now() + std::chrono::milliseconds(shutdown ? 3000 : 10000));
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
@@ -418,15 +422,60 @@ std::string http(unsigned short port, const std::string& token, bool shutdown)
     return body;
 }
 
+std::optional<Json> direct_quota(const fs::path& directory, Clock::time_point deadline)
+{
+    try {
+        const auto route = kimi::direct_quota_route(
+            read_file(directory / "config.toml", 4 * 1024 * 1024), addon::current_process_environment());
+        if (!route) {
+            return std::nullopt;
+        }
+        auto bytes = read_file(directory / "credentials" / (route->credential_name + ".json"), 4 * 1024 * 1024);
+        Scrub_string scrub_bytes{bytes};
+        const auto record = kimi::parse(bytes);
+        if (!record) {
+            return std::nullopt;
+        }
+        const auto now       = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto remaining = std::chrono::duration<double>(deadline - Clock::now()).count();
+        auto token = kimi::current_quota_access_token(*record, now, remaining);
+        if (!token) {
+            return std::nullopt;
+        }
+        Scrub_string scrub_token{*token};
+        const auto raw = kimi::get_managed_quota(route->host, *token, deadline);
+        if (!raw) {
+            return std::nullopt;
+        }
+        const auto response = kimi::parse(*raw);
+        return response ? kimi::normalize_managed_quota(*response) : std::nullopt;
+    }
+    catch (const std::runtime_error&) {
+        // An unreadable/rotating credential or unsupported reply is left to
+        // the native manager; no exception text crosses the helper boundary.
+        return std::nullopt;
+    }
+}
+
 Json run(const std::string& program, const std::string& home)
 {
+    // Matches the host's quota operation budget. Its process job/cgroup remains
+    // authoritative for cancellation and generation retirement, including DNS
+    // or native startup that cannot finish inside the remaining time.
+    const auto operation_deadline = Clock::now() + std::chrono::seconds(30);
     const auto executable = kimi::regular_file(addon::path_from_utf8(program));
     const auto directory = addon::path_from_utf8(home);
     if (!executable || !kimi::native_image(*executable) || !directory.is_absolute()) throw std::runtime_error("invalid_quota_request");
+    if (const auto direct = direct_quota(directory, operation_deadline)) {
+        return *direct;
+    }
+    if (Clock::now() >= operation_deadline) {
+        throw std::runtime_error("quota_http_timeout");
+    }
     const auto registry = directory / "server" / "instances";
     const auto preexisting = registry_names(registry);
     Owned_server child(kimi::path_string(*executable));
-    const auto deadline = Clock::now() + std::chrono::seconds(10);
+    const auto deadline = std::min(operation_deadline, Clock::now() + std::chrono::seconds(10));
     std::optional<unsigned short> port;
     while (child.alive() && Clock::now() < deadline) {
         port = owned_port(registry, child.pid(), preexisting);
@@ -438,17 +487,17 @@ Json run(const std::string& program, const std::string& home)
     Scrub_string scrub_token{token};
     if (token.empty() || token.find_first_of("\r\n") != std::string::npos) throw std::runtime_error("invalid_quota_token");
     try {
-        const auto raw = http(*port, token, false);
+        const auto raw = http(*port, token, false, operation_deadline);
         const auto response = kimi::parse(raw);
         if (!response) throw std::runtime_error("invalid_quota_response");
         auto result = kimi::normalize_quota(*response);
-        try { http(*port, token, true); } catch (const std::exception&) {}
+        try { http(*port, token, true, operation_deadline); } catch (const std::exception&) {}
         std::fill(token.begin(), token.end(), '\0');
         child.wait_for_shutdown();
         return result;
     }
     catch (...) {
-        try { http(*port, token, true); } catch (const std::exception&) {}
+        try { http(*port, token, true, operation_deadline); } catch (const std::exception&) {}
         std::fill(token.begin(), token.end(), '\0');
         child.wait_for_shutdown();
         throw;
