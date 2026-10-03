@@ -46,12 +46,24 @@ file(GLOB kimi_qt_sbom_inputs "${kimi_qt_prefix}/sbom/qtbase-*.spdx")
 list(APPEND kimi_qt_notice_inputs ${kimi_qt_sbom_inputs})
 set(kimi_runtime_search_dirs "$<TARGET_FILE_DIR:Qt6::Core>")
 set(kimi_compiler_runtime_files "")
+set(kimi_debug_runtime_files "")
 if(MSVC)
     # This module resolves redistributables from the active compiler, not PATH.
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
     include(InstallRequiredSystemLibraries)
     set(kimi_compiler_runtime_files "${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}")
-    foreach(runtime IN LISTS kimi_compiler_runtime_files)
+    function(kimi_find_debug_runtime_files output)
+        # Debug CRT and UCRT are private debugging/testing inputs, not release
+        # redistributables. Keep their discovery settings local to this call.
+        set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS "")
+        set(CMAKE_INSTALL_DEBUG_LIBRARIES TRUE)
+        set(CMAKE_INSTALL_DEBUG_LIBRARIES_ONLY TRUE)
+        set(CMAKE_INSTALL_UCRT_LIBRARIES TRUE)
+        include(InstallRequiredSystemLibraries)
+        set(${output} "${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}" PARENT_SCOPE)
+    endfunction()
+    kimi_find_debug_runtime_files(kimi_debug_runtime_files)
+    foreach(runtime IN LISTS kimi_compiler_runtime_files kimi_debug_runtime_files)
         get_filename_component(runtime_dir "${runtime}" DIRECTORY)
         list(APPEND kimi_runtime_search_dirs "${runtime_dir}")
     endforeach()
@@ -77,7 +89,8 @@ function(kimi_configure_package_assembler)
         foreach(path_variable IN ITEMS
                 KIMI_PACKAGE_DIRECTORY CMAKE_CURRENT_SOURCE_DIR CMAKE_CURRENT_BINARY_DIR
                 CMAKE_CXX_COMPILER CMAKE_OBJDUMP CMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND
-                kimi_runtime_search_dirs kimi_compiler_runtime_files kimi_qt_notice_inputs
+                kimi_runtime_search_dirs kimi_compiler_runtime_files kimi_debug_runtime_files
+                kimi_qt_notice_inputs
                 kimi_toml_source KIMI_QTBASE_SOURCE KIMI_RUNTIME_NOTICES_DIRECTORY
                 KIMI_PATCHELF_EXECUTABLE)
             string(REPLACE "\\" "/" ${path_variable} "${${path_variable}}")
@@ -85,7 +98,15 @@ function(kimi_configure_package_assembler)
     endif()
     configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/assemble_kimi_package.cmake.in"
         "${CMAKE_CURRENT_BINARY_DIR}/assemble-package.cmake.in" @ONLY)
+    if(MSVC)
+        configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/check_kimi_runtime_closure.cmake.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure.cmake.in" @ONLY)
+    endif()
 endfunction()
 kimi_configure_package_assembler()
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/assemble-package-$<CONFIG>.cmake"
     INPUT "${CMAKE_CURRENT_BINARY_DIR}/assemble-package.cmake.in")
+if(MSVC)
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure-$<CONFIG>.cmake"
+        INPUT "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure.cmake.in")
+endif()

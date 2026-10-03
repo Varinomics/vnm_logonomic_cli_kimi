@@ -106,6 +106,10 @@ the actual closure. Debian-family runtime dependencies use their installed
 package copyright files. Other external libraries require a notice file named
 `<library-filename>.txt` in `KIMI_RUNTIME_NOTICES_DIRECTORY`; missing notices fail
 assembly. The selected MSVC redistributables carry Microsoft's runtime notice.
+MSVC Debug packages instead select Debug CRT and Debug UCRT from the active
+toolchain and Windows SDK. Their separate notice and resolved-source provenance
+identify private debugging/testing deployment only; they are not production
+redistributables.
 The index marks every copied runtime as third-party and points to its notices
 and resolved-source provenance. The optional `kimi_package_membership` recipe
 forwards these selected sources into its isolated nested build.

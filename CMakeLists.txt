@@ -157,6 +157,11 @@ add_test(NAME kimi_usage_tests COMMAND kimi_usage_tests)
 add_test(NAME kimi_package_validation COMMAND logonomic_cli_addon_validate "${KIMI_PACKAGE_DIRECTORY}" --platform "${KIMI_PLATFORM}")
 add_test(NAME kimi_package_conformance COMMAND logonomic_cli_addon_conformance "${KIMI_PACKAGE_DIRECTORY}")
 set_tests_properties(kimi_contract_tests kimi_package_validation kimi_package_conformance PROPERTIES TIMEOUT 120)
+if(MSVC)
+    add_test(NAME kimi_package_runtime_closure
+        COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure-$<CONFIG>.cmake")
+    set_tests_properties(kimi_package_runtime_closure PROPERTIES TIMEOUT 120)
+endif()
 # The real 100001-file regression includes filesystem setup and teardown.
 set_tests_properties(kimi_usage_tests PROPERTIES TIMEOUT 2400)
 add_executable(kimi_usage_cache_tests tests/kimi_usage_cache_tests.cpp)
