@@ -91,7 +91,7 @@ local development. Observation reuses the embedding build's
 leaf package or acquires framework `master`. The leaf selects its owned
 `vnm_qt_dispatch` dependency; source overrides use
 `FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH` and `FETCHCONTENT_SOURCE_DIR_VNM_CMAKE`.
-Only QtCore >=6.11.1 is required; the aggregate GUI/QML framework is not imported.
+Only QtCore >=6.12 is required; the aggregate GUI/QML framework is not imported.
 Use a fresh out-of-source tree. Windows and Linux x86-64 are
 the currently packaged targets; Windows builds follow the workstation's queued
 Visual Studio 2026 / MSVC v145 build policy.

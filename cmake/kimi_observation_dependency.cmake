@@ -17,7 +17,7 @@ if(NOT TARGET vnm_framework::vnm_filesystem_observation)
         endif()
     endif()
 endif()
-find_package(Qt6 6.11.1 REQUIRED COMPONENTS Core)
+find_package(Qt6 6.12 REQUIRED COMPONENTS Core)
 # Capture actual source selections for the isolated recipe, including an
 # embedded target acquired by its parent rather than by this directory.
 get_target_property(kimi_observation_imported
