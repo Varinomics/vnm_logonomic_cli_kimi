@@ -6,6 +6,7 @@
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/sha256.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/usage_temporal.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -47,6 +48,7 @@ struct File_record
     std::string cwd;
     bool stale_breakdown = false;
     std::optional<addon::Usage_record> usage;
+    std::optional<Json> temporal_carrier;
 };
 
 class Scan_workspace;
@@ -130,6 +132,132 @@ std::string local_date(std::uint64_t milliseconds)
         throw std::runtime_error("usage_timestamp_invalid");
     }
     return date;
+}
+
+std::optional<std::string> epoch_instant(std::uint64_t milliseconds)
+{
+    // RFC3339 has four-digit years. This bounds optional representation only.
+    if (milliseconds > 253402300799999ull) return std::nullopt;
+    const std::chrono::sys_time<std::chrono::milliseconds> instant{
+        std::chrono::milliseconds{static_cast<std::int64_t>(milliseconds)}};
+    const auto day = std::chrono::floor<std::chrono::days>(instant);
+    const std::chrono::year_month_day date{day};
+    const std::chrono::hh_mm_ss time{instant - day};
+    char text[25]{};
+    const auto size = std::snprintf(text, sizeof(text), "%04d-%02u-%02uT%02lld:%02lld:%02lld.%03lldZ",
+        static_cast<int>(date.year()), static_cast<unsigned>(date.month()), static_cast<unsigned>(date.day()),
+        static_cast<long long>(time.hours().count()), static_cast<long long>(time.minutes().count()),
+        static_cast<long long>(time.seconds().count()), static_cast<long long>(time.subseconds().count()));
+    if (size != 24) return std::nullopt;
+    return std::string(text, 24);
+}
+
+addon::Usage_temporal unavailable_temporal(const addon::Usage_record& record, std::string reason)
+{
+    addon::Usage_temporal evidence;
+    evidence.parent = {record.record_id, record.total_tokens, "provider-file", std::nullopt};
+    evidence.unavailable_tokens = record.total_tokens;
+    evidence.coverage_reason = std::move(reason);
+    return evidence;
+}
+
+void assign_temporal(addon::Usage_record& record, addon::Usage_temporal evidence)
+{
+    if (!addon::decode_usage_temporal(addon::encode_usage_temporal(evidence), nullptr)) {
+        evidence.portions.clear();
+        evidence.unavailable_tokens = evidence.parent.total_tokens;
+        evidence.coverage_reason = "capacity";
+        if (!addon::decode_usage_temporal(addon::encode_usage_temporal(evidence), nullptr)) {
+            record.temporal.reset();
+            return;
+        }
+    }
+    record.temporal = std::move(evidence);
+}
+
+void publish_temporal(addon::Usage_record& record, addon::Usage_temporal evidence)
+{
+    assign_temporal(record, std::move(evidence));
+    const auto valid_record = [&record] {
+        const auto encoded = addon::encode_usage_record(record, 3);
+        return addon::decode_usage_record(encoded, nullptr, 3) &&
+            addon::parse_json(addon::serialize_json(encoded), {}, nullptr);
+    };
+    if (!record.temporal || valid_record()) return;
+    evidence = *record.temporal;
+    evidence.portions.clear();
+    evidence.unavailable_tokens = record.total_tokens;
+    evidence.coverage_reason = "capacity";
+    assign_temporal(record, std::move(evidence));
+    if (record.temporal && !valid_record()) record.temporal.reset();
+}
+
+Json spool_record(const addon::Usage_record& record, bool temporal)
+{
+    auto value = addon::encode_usage_record(record, 2);
+    if (temporal && record.temporal) {
+        value.set("usage-temporal", addon::encode_usage_temporal(*record.temporal));
+        if (addon::serialize_json(value).size() > addon::Json_parse_limits{}.max_bytes) {
+            value.erase("usage-temporal");
+        }
+    }
+    return value;
+}
+
+std::optional<addon::Usage_record> spool_record(const Json& value)
+{
+    auto accounting = value;
+    accounting.erase("usage-temporal");
+    auto record = addon::decode_usage_record(accounting, nullptr, 2);
+    if (record) {
+        const auto* payload = value.find("usage-temporal");
+        auto evidence = payload ? addon::decode_usage_temporal(*payload, nullptr) : std::nullopt;
+        if (evidence && evidence->parent.record_id == record->record_id &&
+            evidence->parent.total_tokens == record->total_tokens)
+        {
+            record->temporal = std::move(evidence);
+        }
+    }
+    return record;
+}
+
+void merge_temporal(addon::Usage_record& accumulated, const addon::Usage_record& incoming,
+    addon::Invocation_context& context)
+{
+    if (!accumulated.temporal && !incoming.temporal) return;
+    auto evidence = accumulated.temporal.value_or(unavailable_temporal(accumulated, "missing-evidence"));
+    const auto other = incoming.temporal.value_or(unavailable_temporal(incoming, "missing-evidence"));
+    add(evidence.parent.total_tokens, incoming.total_tokens);
+    add(evidence.unavailable_tokens, other.unavailable_tokens);
+    const bool partial_capacity = evidence.coverage_reason == "capacity" || other.coverage_reason == "capacity";
+    if (!evidence.retained_from) evidence.retained_from = other.retained_from;
+    std::map<std::string, std::uint64_t> positions;
+    bool capacity = false;
+    const std::array<const std::vector<addon::Usage_temporal_portion>*, 2> sources{
+        &evidence.portions, &other.portions};
+    for (const auto* portions : sources) {
+        for (const auto& portion : *portions) {
+            check_cancel(context);
+            if (!positions.contains(portion.instant) && positions.size() == addon::k_max_usage_temporal_portions) {
+                capacity = true;
+                break;
+            }
+            add(positions[portion.instant], portion.total_tokens);
+        }
+        if (capacity) break;
+    }
+    evidence.portions.clear();
+    if (capacity) {
+        evidence.unavailable_tokens = evidence.parent.total_tokens;
+        evidence.coverage_reason = "capacity";
+    }
+    else {
+        for (const auto& [instant, tokens] : positions) evidence.portions.push_back({"instant", instant, {}, {}, tokens});
+        evidence.coverage_reason = evidence.unavailable_tokens ?
+            (partial_capacity ? "capacity" : "missing-evidence") : "complete";
+    }
+    // The accounting total is updated by the authoritative merger immediately after this.
+    assign_temporal(accumulated, std::move(evidence));
 }
 
 std::string path_key(const fs::path& path)
@@ -263,21 +391,34 @@ public:
         const auto event = parse(line);
         if (!event || !event->is_object()) throw std::runtime_error("usage_record_invalid");
         if (text(*event, "type") != "usage.record") return;
-        const auto date = local_date(count(member(*event, "time")));
+        const auto& native_time = member(*event, "time");
+        const auto milliseconds = count(native_time);
+        const auto date = local_date(milliseconds);
         const auto& usage = member(*event, "usage");
         if (!usage.is_object()) throw std::runtime_error("usage_record_invalid");
         bool recognized = false;
+        std::uint64_t event_tokens = 0;
         constexpr std::array<std::string_view, 4> names{"inputOther", "output", "inputCacheRead", "inputCacheCreation"};
         for (std::size_t index = 0; index < names.size(); ++index) {
             if (const auto* value = usage.find(names[index])) {
                 const auto tokens = count(*value);
                 add(m_record.total_tokens, tokens);
+                add(event_tokens, tokens);
                 add(m_values[index], tokens);
                 ++m_coverage[index];
                 recognized = true;
             }
         }
         if (!recognized) throw std::runtime_error("usage_counters_missing");
+        if (event_tokens && !m_temporal_capacity) {
+            const auto instant = native_time.is_integer() ? epoch_instant(milliseconds) : std::nullopt;
+            if (!instant) add(m_temporal_unavailable, event_tokens);
+            else if (!m_positions.contains(*instant) && m_positions.size() == addon::k_max_usage_temporal_portions) {
+                m_positions.clear();
+                m_temporal_capacity = true;
+            }
+            else add(m_positions[*instant], event_tokens);
+        }
         const auto model = text(*event, "model");
         if (!m_record.model || m_record.model->empty()) m_record.model = model;
         else if (!model.empty() && *m_record.model != model) m_record.model = "multiple";
@@ -296,6 +437,13 @@ public:
                 m_coverage[index] ? addon::Usage_support::SUPPORTED : addon::Usage_support::UNKNOWN};
         }
         attribute(m_record, cwd);
+        auto evidence = unavailable_temporal(m_record, m_temporal_capacity ? "capacity" : "complete");
+        if (!m_temporal_capacity) {
+            evidence.unavailable_tokens = m_temporal_unavailable;
+            if (m_temporal_unavailable) evidence.coverage_reason = "missing-evidence";
+            for (const auto& [instant, tokens] : m_positions) evidence.portions.push_back({"instant", instant, {}, {}, tokens});
+        }
+        assign_temporal(m_record, std::move(evidence));
         return std::move(m_record);
     }
 
@@ -304,6 +452,9 @@ private:
     std::array<std::uint64_t, 4> m_values{};
     std::array<std::uint64_t, 4> m_coverage{};
     std::uint64_t                m_records = 0;
+    std::map<std::string, std::uint64_t> m_positions;
+    std::uint64_t m_temporal_unavailable = 0;
+    bool m_temporal_capacity = false;
 };
 
 void require_io(bool condition)
@@ -594,7 +745,7 @@ private:
     std::uint64_t m_bytes = 0;
 };
 
-Json encode_file(std::string_view path, const File_record& file)
+Json encode_file_accounting(std::string_view path, const File_record& file)
 {
     return object({{"path", Json(path)}, {"size", Json(file.size)},
         {"modified_msecs", Json(file.modified_ms)}, {"recorded_cwd", Json(file.cwd)},
@@ -602,11 +753,30 @@ Json encode_file(std::string_view path, const File_record& file)
         {"usage", file.usage ? addon::encode_usage_record(*file.usage, 2) : Json{}}});
 }
 
+Json encode_file(std::string_view path, const File_record& file, bool temporal = true)
+{
+    auto row = encode_file_accounting(path, file);
+    if (!temporal) return row;
+    if (file.usage && file.usage->temporal) {
+        auto evidence = *file.usage->temporal;
+        evidence.retained_from.reset();
+        auto carrier = object({{"version", Json(1)},
+            {"parent_sha256_hex", Json(addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(row))))},
+            {"evidence", addon::encode_usage_temporal(evidence)}});
+        row.set("usage-temporal", std::move(carrier));
+    }
+    else if (file.temporal_carrier) row.set("usage-temporal", *file.temporal_carrier);
+    if (addon::serialize_json(row).size() > addon::Json_parse_limits{}.max_bytes) row.erase("usage-temporal");
+    return row;
+}
+
 File_record decode_file(const Json& row)
 {
+    auto accounting = row;
+    accounting.erase("usage-temporal");
     File_record file;
     const auto path = text(row, "path");
-    if (!exact_keys(row, {"path", "size", "modified_msecs", "recorded_cwd", "usage", "stale_breakdown"}) ||
+    if (!exact_keys(accounting, {"path", "size", "modified_msecs", "recorded_cwd", "usage", "stale_breakdown"}) ||
         !addon::path_from_utf8(path).is_absolute() || !member(row, "modified_msecs").is_integer() ||
         !member(row, "stale_breakdown").is_boolean())
     {
@@ -620,6 +790,31 @@ File_record decode_file(const Json& row)
         addon::Contract_failure failure;
         file.usage = addon::decode_usage_record(member(row, "usage"), &failure, 2);
         if (!file.usage) throw std::runtime_error("usage_cache_record_invalid");
+    }
+    if (const auto* carrier = row.find("usage-temporal")) {
+        file.temporal_carrier = *carrier;
+        if (file.usage && exact_keys(*carrier, {"version", "parent_sha256_hex", "evidence"}) &&
+            member(*carrier, "version").is_integer() && member(*carrier, "version").as_integer() == 1 &&
+            text(*carrier, "parent_sha256_hex") ==
+                addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(accounting))) &&
+            addon::serialize_json(*carrier).size() <= addon::k_max_usage_temporal_bytes)
+        {
+            auto evidence = addon::decode_usage_temporal(member(*carrier, "evidence"), nullptr);
+            if (evidence && evidence->parent.record_id == file.usage->record_id &&
+                evidence->parent.total_tokens == file.usage->total_tokens &&
+                evidence->parent.snapshot_id == "provider-file" && !evidence->parent.source_account_key &&
+                !evidence->retained_from &&
+                std::all_of(evidence->portions.begin(), evidence->portions.end(), [](const auto& portion) {
+                    return portion.basis == "instant" && portion.instant.size() == 24 &&
+                        portion.instant[10] == 'T' && portion.instant[19] == '.' && portion.instant.back() == 'Z' &&
+                        portion.instant.substr(17, 2) != "60" &&
+                        portion.instant >= "1970-01-01T00:00:00.000Z";
+                }))
+            {
+                evidence->retained_from.reset();
+                file.usage->temporal = std::move(evidence);
+            }
+        }
     }
     return file;
 }
@@ -800,6 +995,7 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
         if (!previous || !previous->stale_breakdown || previous->size != current.size ||
             previous->modified_ms != current.modified_ms) throw;
         parsed = previous->usage;
+        current.temporal_carrier = previous->temporal_carrier;
         current.stale_breakdown = true;
         stable = true;
     }
@@ -808,6 +1004,7 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
             previous->size == current.size && previous->modified_ms == current.modified_ms)
         {
             parsed = previous->usage;
+            current.temporal_carrier = previous->temporal_carrier;
         }
         current.usage = std::move(parsed);
     }
@@ -826,6 +1023,7 @@ void merge_usage(addon::Usage_record& accumulated, const addon::Usage_record& re
     {
         throw std::runtime_error("usage_session_path_conflict");
     }
+    merge_temporal(accumulated, record, context);
     add(accumulated.total_tokens, record.total_tokens);
     accumulated.completed_date = std::max(accumulated.completed_date, record.completed_date);
     if (!accumulated.model || accumulated.model->empty()) accumulated.model = record.model;
@@ -983,6 +1181,10 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             const auto row = cached_rows.value();
             path = text(row, "path");
             file = decode_file(row);
+            if (file->usage && file->usage->temporal && selection && selection->accepted) {
+                file->usage->temporal->retained_from = addon::Usage_temporal_retained_from{
+                    selection->accepted->snapshot_id, selection->accepted->manifest_sha256_hex};
+            }
             cached_rows.next();
             if (cached_rows.available() && cached_rows.key() == key) throw std::runtime_error("usage_cache_duplicate");
         }
@@ -1001,13 +1203,13 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         }
         if (!file) continue;
         if (file->usage) attribute(*file->usage, file->cwd);
-        write_line(cache_output, addon::serialize_json(encode_file(path, *file)));
+        write_line(cache_output, addon::serialize_json(encode_file(path, *file, selection != nullptr)));
         if (file->usage) {
             // Hex-encoded UTF-8 preserves the record-ID ordering without
             // allowing an ID to introduce the spool's tab delimiter.
             const auto& id = file->usage->record_id;
             const auto sort_key = addon::to_hex(reinterpret_cast<const std::uint8_t*>(id.data()), id.size());
-            sessions.add(sort_key, addon::encode_usage_record(*file->usage, 2));
+            sessions.add(sort_key, spool_record(*file->usage, selection != nullptr));
         }
     }
     cache_output.close();
@@ -1020,14 +1222,14 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         check_cancel(context);
         const auto key = session_rows.key();
         addon::Contract_failure failure;
-        auto record = addon::decode_usage_record(session_rows.value(), &failure, 2);
+        auto record = spool_record(session_rows.value());
         if (!record) throw std::runtime_error("usage_result_unrepresentable");
         session_rows.next();
         std::uint64_t session_files = 1;
         bool mixed_coverage = false;
         while (session_rows.available() && session_rows.key() == key) {
             check_cancel(context);
-            const auto incoming = addon::decode_usage_record(session_rows.value(), &failure, 2);
+            const auto incoming = spool_record(session_rows.value());
             if (!incoming) throw std::runtime_error("usage_result_unrepresentable");
             ++session_files;
             merge_usage(*record, *incoming, mixed_coverage, context);
@@ -1042,7 +1244,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             }
         }
         if (!addon::decode_usage_record(addon::encode_usage_record(*record, 2), &failure, 2)) throw std::runtime_error("usage_result_unrepresentable");
-        write_line(output, addon::serialize_json(addon::encode_usage_record(*record, 2)));
+        write_line(output, addon::serialize_json(spool_record(*record, selection != nullptr)));
     }
     output.close();
     require_io(static_cast<bool>(output));
@@ -1065,8 +1267,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
     while (read_line(input, line)) {
         check_cancel(context);
         const auto value = parse(line);
-        addon::Contract_failure failure;
-        const auto record = value ? addon::decode_usage_record(*value, &failure, 2) : std::nullopt;
+        const auto record = value ? spool_record(*value) : std::nullopt;
         if (!record) throw std::runtime_error("usage_result_unrepresentable");
         result.push_back(*record);
     }
@@ -1193,23 +1394,44 @@ void handle_usage(addon::Invocation_context& context)
     }
     else records.seekg(0);
     std::uint64_t end = begin;
+    std::size_t encoded_records_bytes = 0;
+    const auto append = [&](const addon::Usage_record& record) {
+        const auto previous_bytes = encoded_records_bytes;
+        if (!addon::append_usage_page_record(page, record, encoded_records_bytes, version)) return false;
+        if (addon::serialize_json(addon::encode_usage_scan_result(page, version)).size() <=
+            addon::limits::k_max_frame_bytes - 65536) return true;
+        page.records.pop_back();
+        encoded_records_bytes = previous_bytes;
+        return false;
+    };
     std::string line;
     while (page.records.size() < addon::k_max_usage_page_records && read_line(records, line)) {
         check_cancel(context);
         const auto value = parse(line);
-        auto record = value ? addon::decode_usage_record(*value, &failure, 2) : std::nullopt;
+        auto record = value ? spool_record(*value) : std::nullopt;
         if (!record) throw std::runtime_error("usage_result_unrepresentable");
         // A surviving wire log can be only a subset of a session's events.
-        if (version == 3) record->aggregate_evidence = "partial";
-        page.records.push_back(std::move(*record));
+        if (version == 3) {
+            record->aggregate_evidence = "partial";
+            auto evidence = record->temporal.value_or(unavailable_temporal(*record, "missing-evidence"));
+            evidence.parent = {record->record_id, record->total_tokens, snapshot_id, snapshot.scope.source_account_key};
+            publish_temporal(*record, std::move(evidence));
+        }
+        else record->temporal.reset();
         const auto next = static_cast<std::uint64_t>(records.tellg());
         page.next_cursor = std::to_string(next);
-        if (addon::serialize_json(addon::encode_usage_scan_result(page, version)).size() >
-            addon::limits::k_max_frame_bytes - 65536)
-        {
-            page.records.pop_back();
-            if (end == begin) throw std::runtime_error("usage_record_frame_capacity");
-            break;
+        if (!append(*record)) {
+            if (!page.records.empty()) break;
+            if (record->temporal) {
+                auto evidence = *record->temporal;
+                evidence.portions.clear();
+                evidence.unavailable_tokens = record->total_tokens;
+                evidence.coverage_reason = "capacity";
+                publish_temporal(*record, std::move(evidence));
+                if (append(*record)) { end = next; continue; }
+                record->temporal.reset();
+            }
+            if (!append(*record)) throw std::runtime_error("usage_record_frame_capacity");
         }
         end = next;
     }

@@ -46,6 +46,17 @@ log's cached usage while its size and modification time are unchanged; equal
 values are taken to mean unchanged content, the check the pre-cutover scanner
 used, because wire logs are append-only and repair rereads every log.
 
+On `usage-scan@3`, `usage-temporal@1` preserves positive increments from native
+integer epoch-millisecond timestamps before Agent files are reduced to a
+conversation. The UTC representation retains every native millisecond; the
+consumer chooses its reporting timezone. Unsupported timestamps contribute
+unavailable temporal tokens, and no conversation completion date is used to
+distribute earlier usage. Optional proof is bounded independently of accounting
+history and stored in a versioned per-file carrier whose digest binds the
+original accounting row. Missing, unknown or damaged carriers leave cached
+accounting usable, including history whose original logs have been deleted.
+The ordinary `usage-scan@2` output and mutable cache retain their existing format.
+
 Credentials and session history stay in the selected Kimi profile. Hooks invoke
 the package helper through the host-provided helpers directory.
 

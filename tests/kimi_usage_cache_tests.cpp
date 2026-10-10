@@ -7,11 +7,15 @@
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/profile_storage.h>
 #include <logonomic_cli_addon/usage_scan.h>
+#include <logonomic_cli_addon/usage_temporal.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <map>
 #include <optional>
 #include <utility>
 #include <stdexcept>
@@ -412,6 +416,338 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(host.shutdown(1000, nullptr), "packaged adapter exits without contacting a model");
 }
 
+class Temporal_host final
+{
+public:
+    Temporal_host(const fs::path& package, const fs::path& fixture)
+        : profile(fixture / "profile"), host(options(package, fixture), nullptr)
+    {
+        fs::create_directories(profile);
+        addon::Contract_failure failure;
+        check(host.start(&failure), failure.detail);
+        std::string error;
+        const auto allocated = addon::allocate_profile_storage_root(host.profile_storage_root(),
+            "logonomic.cli.kimi", &error, kimi::account_key(profile));
+        check(allocated.has_value(), error);
+        storage = addon::path_from_utf8(*allocated);
+        request.context.launcher = {"kimi", addon::k_runner_direct, {}};
+        request.context.launcher_argv = {"kimi"};
+        request.context.profile_storage = addon::Profile_storage_context{1, *allocated};
+        request.context.account_context = addon::Account_context{2, kimi::account_key(profile),
+            addon::path_to_utf8(profile)};
+        request.context.launch_environment = addon::Launch_environment{addon::host_platform_id(),
+            addon::Json_value::object(), addon::Environment_bootstrap_evidence{addon::path_to_utf8(profile)}};
+        addon::Simulator_invocation_options invocation;
+        invocation.profile_storage = request.context.profile_storage;
+        const auto id = host.invoke({"profile-storage", 1}, "acknowledge", addon::Json_value::object(), 5000, invocation);
+        const auto outcome = host.wait_outcome(id, 6000);
+        check(outcome && outcome->status == addon::Host_status::SUCCESS, "temporal host storage acknowledged");
+    }
+
+    ~Temporal_host() { host.shutdown(1000, nullptr); }
+
+    void select(const std::string& name, std::optional<addon::Usage_cache_reference> accepted = std::nullopt)
+    {
+        request.snapshot_id.reset();
+        request.cursor.reset();
+        request.mode = "incremental";
+        const auto root = storage / name;
+        check(fs::create_directory(root), "allocate temporal candidate");
+        request.cache_selection = addon::Usage_cache_selection{std::move(accepted), addon::path_to_utf8(root)};
+    }
+
+    addon::Usage_scan_page scan(std::uint16_t version = 3)
+    {
+        auto input = request;
+        if (version == 2) input.cache_selection.reset();
+        addon::Usage_scan_page result;
+        bool first = true;
+        page_count = 0;
+        do {
+            const auto id = host.invoke({"usage-scan", version}, "scan", addon::encode_usage_scan_request(input, version), 30000);
+            const auto outcome = host.wait_outcome(id, 31000);
+            check(outcome && outcome->status == addon::Host_status::SUCCESS,
+                "temporal scan succeeds: " + (outcome ? outcome->reason_code : "timeout"));
+            addon::Contract_failure failure;
+            const auto page = addon::decode_usage_scan_result(outcome->payload, &failure, version);
+            check(page.has_value(), "temporal page decodes: " + failure.detail);
+            check(addon::serialize_json(outcome->payload).size() < 4 * 1024 * 1024 - 65536,
+                "original Kimi page byte ceiling preserved");
+            if (first) {
+                result = *page;
+                first = false;
+            }
+            else {
+                check(page->snapshot_id == result.snapshot_id && page->cache_candidate == result.cache_candidate,
+                    "temporal continuation preserves exact snapshot and candidate");
+                result.records.insert(result.records.end(), page->records.begin(), page->records.end());
+            }
+            ++page_count;
+            if (page->complete) break;
+            input.snapshot_id = page->snapshot_id;
+            input.cursor = page->next_cursor;
+        } while (true);
+        return result;
+    }
+
+    addon::Usage_cache_reference sealed(const std::string& name, const std::vector<addon::Json_value>& rows)
+    {
+        const auto root = storage / name;
+        check(fs::create_directory(root), "allocate cache mutation fixture");
+        std::string bytes;
+        for (const auto& row : rows) bytes += addon::serialize_json(row) + '\n';
+        write(root / "files.json", bytes);
+        addon::Contract_failure failure;
+        const auto reference = addon::seal_usage_cache_candidate(addon::path_to_utf8(root),
+            request.context.profile_storage->root, request.context.account_context, "fixture-" + name,
+            "kimi-wire-cache@1", [] { return false; }, &failure);
+        check(reference.has_value(), "seal original-account cache fixture: " + failure.detail);
+        return *reference;
+    }
+
+    fs::path profile;
+    fs::path storage;
+    addon::Usage_scan_request request;
+    std::size_t page_count = 0;
+
+private:
+    static addon::Simulator_options options(const fs::path& package, const fs::path& fixture)
+    {
+        addon::Simulator_options result;
+        result.package_directory = package;
+        result.profile_storage_root = fixture / "storage";
+        return result;
+    }
+    addon::Host_simulator host;
+};
+
+std::string native_event(std::uint64_t time, unsigned input, unsigned output = 0, unsigned read = 0, unsigned create = 0)
+{
+    return "{\"type\":\"usage.record\",\"time\":" + std::to_string(time) +
+        ",\"usage\":{\"inputOther\":" + std::to_string(input) + ",\"output\":" + std::to_string(output) +
+        ",\"inputCacheRead\":" + std::to_string(read) + ",\"inputCacheCreation\":" + std::to_string(create) + "}}\n";
+}
+
+std::vector<addon::Json_value> cache_rows(const addon::Usage_cache_reference& reference)
+{
+    std::ifstream input(addon::path_from_utf8(reference.root) / "files.json", std::ios::binary);
+    check(static_cast<bool>(input), "open sealed temporal fixture");
+    std::vector<addon::Json_value> rows;
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto parsed = addon::parse_json(line, {}, nullptr);
+        check(parsed.has_value(), "read exact cache row");
+        rows.push_back(*parsed);
+    }
+    return rows;
+}
+
+std::map<std::string, std::uint64_t> proved(const addon::Usage_record& record, const addon::Usage_scan_page& page,
+    const Temporal_host& fixture, std::uint64_t unavailable)
+{
+    check(record.temporal.has_value(), "valid accounting parent has temporal envelope");
+    const auto& evidence = *record.temporal;
+    check(evidence.parent.record_id == record.record_id && evidence.parent.total_tokens == record.total_tokens &&
+        evidence.parent.snapshot_id == page.snapshot_id &&
+        evidence.parent.source_account_key == fixture.request.context.account_context->adapter_account_key,
+        "temporal proof binds exact admitted ID, H, snapshot and source account");
+    std::uint64_t total = evidence.unavailable_tokens;
+    std::map<std::string, std::uint64_t> positions;
+    for (const auto& portion : evidence.portions) {
+        check(portion.basis == "instant" && portion.total_tokens > 0 && portion.date.empty() && portion.calendar.empty(),
+            "only genuinely positive native instants are emitted");
+        total += portion.total_tokens;
+        positions[portion.instant] += portion.total_tokens;
+    }
+    check(total == record.total_tokens && evidence.unavailable_tokens == unavailable,
+        "dated and unavailable portions conserve exact accounting H");
+    return positions;
+}
+
+void temporal_cache_contract(const fs::path& package, const fs::path& fixture)
+{
+    Temporal_host host(package, fixture);
+    const auto session = host.profile / "sessions/workspace/dated-session";
+    const auto source_a = session / "agents/a/wire.jsonl";
+    const auto source_b = session / "agents/b/wire.jsonl";
+    const auto repository_a = fixture / "repository-a";
+    const auto repository_b = fixture / "repository-b";
+    fs::create_directories(repository_a / ".git");
+    fs::create_directories(repository_b / ".git");
+    const auto cwd = [&](const fs::path& path) {
+        auto state = addon::Json_value::object();
+        state.set("cwd", addon::Json_value(addon::path_to_utf8(path)));
+        write(session / "state.json", addon::serialize_json(state));
+    };
+    cwd(repository_a);
+    constexpr std::uint64_t early = 1791503999999ull;
+    constexpr std::uint64_t late = 1791594000001ull;
+    const auto repeated = native_event(early, 10, 4, 2, 3);
+    write(source_a, repeated + repeated + native_event(late, 7, 5) + "{\"type\":\"other\"}\n" + native_event(late, 999).substr(0, native_event(late, 999).size() - 1));
+    auto unsupported = native_event(late, 2);
+    unsupported.insert(unsupported.find(",\"usage\""), ".0");
+    write(source_b, native_event(early, 2) + native_event(0, 3) + unsupported + native_event(late + 1, 0));
+    const auto legacy = host.scan(2);
+    check(legacy.records.size() == 1 && legacy.records.front().total_tokens == 57 && !legacy.records.front().temporal,
+        "usage2 keeps original repeated-event accounting without temporal output");
+    host.select("observed");
+    const auto observed = host.scan();
+    check(observed.records.size() == 1 && observed.cache_candidate, "two native agent files reduce to one original conversation");
+    const auto& record = observed.records.front();
+    check(record.record_id == "kimi:dated-session" && record.total_tokens == 57 && record.input.value == 34 &&
+        record.output.value == 13 && record.cache_read.value == 4 && record.cache_creation.value == 6 &&
+        !record.cost_microusd.value && record.repository_usage &&
+        record.repository_usage->allocations.front().repository_path == addon::path_to_utf8(repository_a),
+        "native categories, conversation, unknown cost and repository accounting stay exact");
+    const std::map<std::string, std::uint64_t> expected{{"1970-01-01T00:00:00.000Z", 3},
+        {"2026-10-08T23:59:59.999Z", 40}, {"2026-10-10T01:00:00.001Z", 12}};
+    check(proved(record, observed, host, 2) == expected && record.completed_date > "2026-10-08",
+        "raw epoch milliseconds survive reduction despite latest date outside an earlier day");
+    check(!record.temporal->retained_from, "fresh native proof has no retained custody claim");
+
+    cwd(repository_b);
+    host.select("rebound", observed.cache_candidate);
+    const auto rebound = host.scan();
+    check(proved(rebound.records.front(), rebound, host, 2) == expected &&
+        rebound.records.front().repository_usage->allocations.front().repository_path == addon::path_to_utf8(repository_b),
+        "original canonical digest validates before unchanged-fingerprint cwd and repository rebinding");
+    check(rebound.records.front().temporal->retained_from &&
+        rebound.records.front().temporal->retained_from->snapshot_id == observed.cache_candidate->snapshot_id &&
+        rebound.records.front().temporal->retained_from->manifest_sha256_hex == observed.cache_candidate->manifest_sha256_hex,
+        "cache proof names exact selected snapshot and manifest custody");
+    check(fs::remove(source_a) && fs::remove(source_b), "delete originals after accepted proof");
+    host.select("retained", rebound.cache_candidate);
+    const auto retained = host.scan();
+    check(proved(retained.records.front(), retained, host, 2) == expected &&
+        retained.records.front().temporal->retained_from->snapshot_id == rebound.cache_candidate->snapshot_id &&
+        retained.records.front().temporal->retained_from->manifest_sha256_hex == rebound.cache_candidate->manifest_sha256_hex,
+        "deleted originals preserve history under exact current accepted custody");
+    const auto original_rows = cache_rows(*rebound.cache_candidate);
+    const auto replay = [&](const std::string& name, const std::vector<addon::Json_value>& rows) {
+        const auto accepted = host.sealed(name + "-input", rows);
+        host.select(name + "-output", accepted);
+        const auto result = host.scan();
+        check(result.records.size() == 1 && result.cache_candidate, "optional carrier damage preserves accounting and sealed cache");
+        addon::Contract_failure failure;
+        check(addon::validate_usage_cache_candidate(accepted, host.request.context.profile_storage->root,
+            host.request.context.account_context, [] { return false; }, &failure).has_value(),
+            "accepted mutation fixture remains immutable");
+        return result;
+    };
+    for (const auto& kind : {"absent", "unknown", "damaged", "digest", "oversize", "native-shape", "parent-account", "parent-snapshot"}) {
+        auto rows = original_rows;
+        for (auto& row : rows) {
+            if (!row.find("usage")) continue;
+            if (std::string(kind) == "absent") row.erase("usage-temporal");
+            else if (std::string(kind) == "damaged") row.set("usage-temporal", addon::Json_value("damaged"));
+            else {
+                auto carrier = *row.find("usage-temporal");
+                if (std::string(kind) == "unknown") carrier.set("version", addon::Json_value(99));
+                if (std::string(kind) == "digest") carrier.set("parent_sha256_hex", addon::Json_value(std::string(64, '0')));
+                if (std::string(kind) == "oversize") carrier.set("opaque", addon::Json_value(std::string(addon::k_max_usage_temporal_bytes + 1, 'x')));
+                if (std::string(kind) == "native-shape" || std::string(kind) == "parent-account" ||
+                    std::string(kind) == "parent-snapshot")
+                {
+                    auto evidence = addon::decode_usage_temporal(*carrier.find("evidence"), nullptr);
+                    if (std::string(kind) == "native-shape") evidence->portions.front().instant = "2026-10-08T23:59:59.999000001Z";
+                    if (std::string(kind) == "parent-account") evidence->parent.source_account_key = "foreign-account";
+                    if (std::string(kind) == "parent-snapshot") evidence->parent.snapshot_id = "foreign-snapshot";
+                    carrier.set("evidence", addon::encode_usage_temporal(*evidence));
+                }
+                row.set("usage-temporal", std::move(carrier));
+            }
+        }
+        const auto result = replay(kind, rows);
+        check(result.records.front().total_tokens == 57 && proved(result.records.front(), result, host, 57).empty(),
+            std::string(kind) + " optional evidence withdraws locally, preserving H and older cache usability");
+        if (std::string(kind) == "unknown") {
+            const auto replayed = cache_rows(*result.cache_candidate);
+            for (const auto& row : replayed) if (row.find("usage")) {
+                check(row.find("usage-temporal") && row.find("usage-temporal")->find("version")->as_integer() == 99,
+                    "unknown independently versioned carrier remains opaque during cache replay");
+            }
+        }
+    }
+    auto corrected_rows = original_rows;
+    for (auto& row : corrected_rows) {
+        if (!row.find("usage")) continue;
+        auto accounting = addon::decode_usage_record(*row.find("usage"), nullptr, 2);
+        check(accounting.has_value(), "original canonical accounting fixture decodes");
+        if (accounting->total_tokens == 50) {
+            ++accounting->total_tokens;
+            ++*accounting->input.value;
+            ++accounting->repository_usage->allocations.front().total_tokens;
+            row.set("usage", addon::encode_usage_record(*accounting, 2));
+        }
+    }
+    const auto corrected = replay("changed-accounting", corrected_rows);
+    const std::map<std::string, std::uint64_t> remaining{{"1970-01-01T00:00:00.000Z", 3}, {"2026-10-08T23:59:59.999Z", 2}};
+    check(corrected.records.front().total_tokens == 58 && proved(corrected.records.front(), corrected, host, 53) == remaining,
+        "one changed canonical parent digest withdraws only that file's proof, never its accounting");
+
+    auto control_rows = original_rows;
+    const std::string control_id = "kimi:control-\x01-parent";
+    for (auto& row : control_rows) if (row.find("usage")) {
+        auto accounting = addon::decode_usage_record(*row.find("usage"), nullptr, 2);
+        accounting->record_id = control_id;
+        accounting->session_key = control_id;
+        const auto encoded = addon::encode_usage_record(*accounting, 2);
+        const auto original = addon::decode_usage_record(encoded, nullptr, 2);
+        check(original && original->record_id == control_id,
+            "original usage2 grammar admits the exact nonNUL control parent ID");
+        row.set("usage", encoded);
+    }
+    const auto control = replay("control-parent", control_rows);
+    check(control.records.front().record_id == control_id && control.records.front().total_tokens == 57 &&
+        !control.records.front().temporal, "invalid optional parent grammar omits proof while preserving original admitted ID and H");
+
+    auto wrong_snapshot = *rebound.cache_candidate;
+    wrong_snapshot.snapshot_id = "different-snapshot";
+    host.select("wrong-snapshot", wrong_snapshot);
+    const auto id = host.request;
+    bool refused = false;
+    try { host.scan(); }
+    catch (const std::runtime_error&) { refused = true; }
+    check(refused, "selected snapshot mismatch cannot receive retained temporal custody");
+    check(host.request.cache_selection->accepted == id.cache_selection->accepted, "refusal keeps exact accepted reference");
+}
+
+void temporal_capacity_contract(const fs::path& package, const fs::path& fixture)
+{
+    Temporal_host host(package, fixture);
+    constexpr std::uint64_t start = 1791503999999ull;
+    const auto source = [&](const std::string& session, const std::string& agent, unsigned begin, unsigned count, bool zero = false) {
+        std::string bytes;
+        for (unsigned index = begin; index < begin + count; ++index) bytes += native_event(start + index, 1);
+        if (zero) bytes += native_event(start + begin + count, 0);
+        write(host.profile / "sessions/workspace" / session / "agents" / agent / "wire.jsonl", bytes);
+    };
+    source("file-overflow", "a", 0, 4097);
+    source("merge-overflow", "a", 0, 2048);
+    source("merge-overflow", "b", 2048, 2049);
+    write(host.profile / "sessions/workspace/zero/agents/a/wire.jsonl", native_event(start, 0));
+    for (unsigned index = 0; index < 16; ++index) source("bounded-" + std::to_string(index), "a", 0, 4096, true);
+    host.select("capacity");
+    const auto page = host.scan();
+    check(page.records.size() == 19 && host.page_count > 1, "optional bytes trigger real bounded continuation before record-count limit");
+    std::uint64_t total = 0;
+    for (const auto& record : page.records) {
+        total += record.total_tokens;
+        if (record.record_id == "kimi:zero") {
+            check(record.total_tokens == 0 && proved(record, page, host, 0).empty(), "H zero never fabricates a positive portion");
+        }
+        else if (record.record_id.find("overflow") != std::string::npos) {
+            check(record.total_tokens == 4097 && proved(record, page, host, 4097).empty() &&
+                record.temporal->coverage_reason == "capacity", "per-file and conversation position overflow withdraw only optional evidence");
+        }
+        else {
+            check(record.total_tokens == 4096 && proved(record, page, host, 0).size() == 4096,
+                "maximum positive positions survive and an additional zero event consumes no position");
+        }
+    }
+    check(total == 16 * 4096 + 2 * 4097, "multi-page capacity refusal preserves every original accounting increment");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -420,6 +756,8 @@ int main(int argc, char** argv)
         check(argc == 2, "expected built package directory");
         Workspace workspace;
         adapter_cache_contract(addon::path_from_utf8(argv[1]), workspace.m_path);
+        temporal_cache_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "temporal");
+        temporal_capacity_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "capacity");
         return 0;
     }
     catch (const std::exception& error) {

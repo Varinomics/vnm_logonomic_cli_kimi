@@ -135,6 +135,7 @@ int main()
         {"interactive-resume", 2}, {"quota", 2}, {"lifecycle-events", 2},
         {"helper-ingress", 2}, {"coordination-delivery", 1}, {"legacy-state-import", 1},
         {"accounts", 2}, {"usage-scan", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
+        {addon::k_usage_temporal_capability_id, addon::k_usage_temporal_version},
     };
     const auto observation_service = std::make_shared<vnm::filesystem_observation::Service>();
     kimi::Lifecycle_observer observer(observation_service, {});
