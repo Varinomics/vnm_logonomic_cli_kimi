@@ -712,6 +712,98 @@ void temporal_cache_contract(const fs::path& package, const fs::path& fixture)
     check(host.request.cache_selection->accepted == id.cache_selection->accepted, "refusal keeps exact accepted reference");
 }
 
+void temporal_refresh_contract(const fs::path& package, const fs::path& fixture)
+{
+    Temporal_host host(package, fixture);
+    const auto source = host.profile / "sessions/workspace/refreshed-session/agents/main/wire.jsonl";
+    constexpr std::uint64_t early = 1791503999999ull;
+    constexpr std::uint64_t late  = 1791594000001ull;
+    auto unsupported = native_event(late, 2);
+    unsupported.insert(unsupported.find(",\"usage\""), ".0");
+    const auto native = native_event(early, 10, 4, 2, 3) + native_event(late, 7, 5) + unsupported;
+    write(source, native);
+    host.select("observed");
+    const auto observed = host.scan();
+    check(observed.records.size() == 1 && observed.cache_candidate, "native refresh fixture has one conversation");
+    const auto accounting = addon::serialize_json_canonical(addon::encode_usage_record(observed.records.front(), 2));
+    const auto original_rows = cache_rows(*observed.cache_candidate);
+    auto absent_rows = original_rows;
+    for (auto& row : absent_rows) row.erase("usage-temporal");
+    const auto accepted = host.sealed("absent-input", absent_rows);
+    host.select("refreshed", accepted);
+    const auto refreshed = host.scan();
+    const std::map<std::string, std::uint64_t> expected{
+        {"2026-10-08T23:59:59.999Z", 19}, {"2026-10-10T01:00:00.001Z", 12}};
+    check(refreshed.records.size() == 1 && refreshed.records.front().total_tokens == 33 &&
+        proved(refreshed.records.front(), refreshed, host, 2) == expected,
+        "unchanged surviving logs refresh absent temporal evidence from exact native increments");
+    check(addon::serialize_json_canonical(addon::encode_usage_record(refreshed.records.front(), 2)) == accounting &&
+        !refreshed.records.front().temporal->retained_from,
+        "native temporal enrichment preserves all accounting and does not claim retained proof");
+    addon::Contract_failure failure;
+    check(addon::validate_usage_cache_candidate(accepted, host.request.context.profile_storage->root,
+        host.request.context.account_context, [] { return false; }, &failure).has_value(),
+        "refresh leaves the selected accounting cache immutable");
+
+    auto unknown_rows = original_rows;
+    for (auto& row : unknown_rows) {
+        if (const auto* value = row.find("usage-temporal")) {
+            auto carrier = *value;
+            carrier.set("version", addon::Json_value(99));
+            row.set("usage-temporal", std::move(carrier));
+        }
+    }
+    host.select("unknown-output", host.sealed("unknown-input", unknown_rows));
+    const auto unknown = host.scan();
+    check(proved(unknown.records.front(), unknown, host, 33).empty(),
+        "unrecognized temporal evidence remains capability-local with a surviving source");
+    for (const auto& row : cache_rows(*unknown.cache_candidate)) {
+        if (row.find("usage")) {
+            check(row.find("usage-temporal") && row.find("usage-temporal")->find("version")->as_integer() == 99,
+                "unchanged replay preserves opaque unknown temporal evidence");
+        }
+    }
+
+    const auto modified = fs::last_write_time(source);
+    write(source, std::string(native.size() - 1, 'x') + '\n');
+    fs::last_write_time(source, modified);
+    host.select("invalid-source-output", accepted);
+    const auto invalid_source = host.scan();
+    check(addon::serialize_json_canonical(addon::encode_usage_record(invalid_source.records.front(), 2)) == accounting &&
+        proved(invalid_source.records.front(), invalid_source, host, 33).empty(),
+        "failed optional enrichment preserves same-fingerprint accounting with unavailable temporal evidence");
+    host.select("reused", refreshed.cache_candidate);
+    const auto reused = host.scan();
+    check(proved(reused.records.front(), reused, host, 2) == expected &&
+        reused.records.front().temporal->retained_from.has_value(),
+        "valid refreshed evidence remains eligible for ordinary fingerprint reuse");
+    for (const auto& reason : {"missing-evidence", "capacity"}) {
+        auto rows = original_rows;
+        for (auto& row : rows) {
+            if (const auto* value = row.find("usage-temporal")) {
+                auto carrier = *value;
+                auto evidence = addon::decode_usage_temporal(*carrier.find("evidence"), nullptr);
+                evidence->portions.clear();
+                evidence->unavailable_tokens = 33;
+                evidence->coverage_reason = reason;
+                carrier.set("evidence", addon::encode_usage_temporal(*evidence));
+                row.set("usage-temporal", std::move(carrier));
+            }
+        }
+        host.select(std::string(reason) + "-output", host.sealed(std::string(reason) + "-input", rows));
+        const auto unavailable = host.scan();
+        check(proved(unavailable.records.front(), unavailable, host, 33).empty() &&
+            unavailable.records.front().temporal->retained_from.has_value(),
+            "valid unavailable evidence remains eligible for unchanged-fingerprint reuse");
+    }
+    write(source, "invalid changed source\n");
+    host.select("changed-source-output", accepted);
+    bool refused = false;
+    try { host.scan(); }
+    catch (const std::runtime_error&) { refused = true; }
+    check(refused, "changed native source remains subject to core accounting validation");
+}
+
 void temporal_capacity_contract(const fs::path& package, const fs::path& fixture)
 {
     Temporal_host host(package, fixture);
@@ -757,6 +849,7 @@ int main(int argc, char** argv)
         Workspace workspace;
         adapter_cache_contract(addon::path_from_utf8(argv[1]), workspace.m_path);
         temporal_cache_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "temporal");
+        temporal_refresh_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "refresh");
         temporal_capacity_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "capacity");
         return 0;
     }

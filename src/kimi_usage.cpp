@@ -964,13 +964,16 @@ void store_cache(const fs::path& destination, const fs::path& temporary)
 }
 
 std::optional<File_record> refresh_file(const fs::path& path, const std::optional<File_record>& previous,
-    std::string_view mode, const Json& workspaces, addon::Invocation_context& context)
+    std::string_view mode, bool temporal, const Json& workspaces, addon::Invocation_context& context)
 {
     const auto session = path.parent_path().parent_path().parent_path();
     const auto cwd = recorded_cwd(session, workspaces);
+    // Unchanged accounting may predate the optional native temporal evidence.
+    const bool refresh_temporal = mode == "incremental" && temporal && previous && previous->usage &&
+        !previous->temporal_carrier;
     File_record current;
     current.cwd = cwd;
-    if (mode == "incremental" && previous && !previous->stale_breakdown) {
+    if (mode == "incremental" && previous && !previous->stale_breakdown && !refresh_temporal) {
         std::error_code error;
         const auto size = fs::file_size(path, error);
         if (!error) {
@@ -992,15 +995,16 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
     }
     catch (...) {
         check_cancel(context);
-        if (!previous || !previous->stale_breakdown || previous->size != current.size ||
+        if (!previous || (!previous->stale_breakdown && !refresh_temporal) || previous->size != current.size ||
             previous->modified_ms != current.modified_ms) throw;
         parsed = previous->usage;
         current.temporal_carrier = previous->temporal_carrier;
-        current.stale_breakdown = true;
+        current.stale_breakdown = previous->stale_breakdown;
         stable = true;
     }
     if (stable) {
         if (!current.stale_breakdown && mode == "incremental" && previous && !previous->stale_breakdown &&
+            !refresh_temporal &&
             previous->size == current.size && previous->modified_ms == current.modified_ms)
         {
             parsed = previous->usage;
@@ -1198,7 +1202,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
                 live_rows.next();
                 ++processed;
             }
-            file = refresh_file(addon::path_from_utf8(path), file, mode, workspaces, context);
+            file = refresh_file(addon::path_from_utf8(path), file, mode, selection != nullptr, workspaces, context);
             context.report_progress(processed, total, {});
         }
         if (!file) continue;
