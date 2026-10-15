@@ -4,8 +4,9 @@
 #include <logonomic_cli_addon/sha256.h>
 #include <toml++/toml.hpp>
 
+#include <QByteArray>
+
 #include <algorithm>
-#include <charconv>
 #include <cmath>
 #include <stdexcept>
 
@@ -97,9 +98,14 @@ std::optional<double> ratio(const Json& value)
     if (bytes.empty()) {
         return 0.0; // The upstream parser uses JavaScript Number(string).
     }
-    double result = 0;
-    const auto parsed = std::from_chars(bytes.data(), bytes.data() + bytes.size(), result);
-    if (parsed.ec != std::errc{} || parsed.ptr != bytes.data() + bytes.size() || !std::isfinite(result)) {
+    // Keep the decimal from_chars spelling while using QtCore's C-locale
+    // conversion, available on every supported macOS deployment target.
+    if (bytes.front() == '+' || bytes.find_first_not_of("0123456789.eE+-") != std::string::npos) {
+        return std::nullopt;
+    }
+    bool parsed       = false;
+    const auto result = QByteArray::fromStdString(bytes).toDouble(&parsed);
+    if (!parsed || !std::isfinite(result)) {
         return std::nullopt;
     }
     return result;

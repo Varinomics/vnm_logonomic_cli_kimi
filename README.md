@@ -92,9 +92,9 @@ leaf package or acquires framework `master`. The leaf selects its owned
 `vnm_qt_dispatch` dependency; source overrides use
 `FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH` and `FETCHCONTENT_SOURCE_DIR_VNM_CMAKE`.
 Only QtCore >=6.12 is required; the aggregate GUI/QML framework is not imported.
-Use a fresh out-of-source tree. Windows and Linux x86-64 are
-the currently packaged targets; Windows builds follow the workstation's queued
-Visual Studio 2026 / MSVC v145 build policy.
+Use a fresh out-of-source tree. Packages target Windows and Linux x86-64 and
+macOS ARM64. Windows builds follow the workstation's queued Visual Studio 2026 /
+MSVC v145 build policy. macOS runtime assembly also requires Python >=3.9.
 
 The `kimi_package` target produces `package/logonomic.cli.kimi` beneath a
 single-configuration build directory, or `package/<config>/logonomic.cli.kimi`
@@ -105,6 +105,11 @@ loader path; staged ELF libraries are normalized with `patchelf` (override its
 location with `KIMI_PATCHELF_EXECUTABLE`). Windows resolves its DLLs from the executable directory. SONAME
 files are regular copies because the package contract excludes symlinks. The
 package does not depend on Qt next to Logonomic or on a developer search path.
+macOS shares its non-system native libraries beneath `helpers/runtime/`, rewrites their
+loader paths within the package, and applies ad-hoc signatures after relocation.
+Its deployment report records original and staged bytes and inspects every
+native slice. Controlled Release executables cannot contain debugging data;
+required supplied runtimes retain their original debugging data.
 A no-op build retains the package and index; changes to dependency bytes or
 membership rebuild both before the package is exported.
 
