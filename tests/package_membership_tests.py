@@ -169,7 +169,8 @@ def main() -> int:
             runtime_entries = [entry for entry in index['files']
                                if entry['resource'].get('provenance') == 'provenance/runtime.txt'
                                and entry['path'].startswith(('adapter/', 'helpers/'))]
-            require(any('Qt6Core' in entry['path'] for entry in runtime_entries),
+            require(any('Qt6Core' in entry['path'] or Path(entry['path']).name == 'QtCore'
+                        for entry in runtime_entries),
                     'actual adapter QtCore runtime is absent from the indexed closure')
             for entry in runtime_entries:
                 payload = package / entry['path']

@@ -1,7 +1,10 @@
 #include "kimi_quota_direct.h"
 
+#include <QLocale>
+
 #include <cstdio>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 
@@ -109,6 +112,33 @@ void responses()
         "unsupported response preserves the native compatibility route");
 }
 
+void numeric_strings()
+{
+    // Oracle: the existing ratio contract accepts complete finite decimal
+    // strings, independently of the user's locale; blank strings mean zero.
+    const auto previous_locale = QLocale();
+    QLocale::setDefault(QLocale(QLocale::German, QLocale::Germany));
+    const auto parse_ratio = [](const std::string& text) {
+        auto response = json(R"({"usages":{"limit_5h":{}}})");
+        response.find("usages")->find("limit_5h")->set("used_ratio", kimi::Json(text));
+        return kimi::normalize_managed_quota(response);
+    };
+    for (const auto& [text, expected] : {std::pair{" 1.25\t", 125.0}, {".5", 50.0}, {"5.", 500.0},
+        {"1.25e-1", 12.5}, {"1e+1", 1000.0}, {"", 0.0}, {" \t", 0.0}, {"-0", 0.0}})
+    {
+        const auto result = parse_ratio(text);
+        require(result && kimi::member(kimi::member(*result, "primary"), "used_percent").as_number() == expected,
+            "complete decimal quota strings remain locale-independent");
+    }
+    for (const auto& text : {"+1.25", "1,25", "1.25suffix", "1.25 0", "0x1", "nan", "inf", "-inf",
+        "1e9999", "1e-9999"})
+    {
+        require(!parse_ratio(text), "invalid, partial and non-finite quota strings stay native-owned");
+    }
+    require(!parse_ratio(std::string("1\0.25", 5)), "an embedded null cannot terminate a numeric quota string");
+    QLocale::setDefault(previous_locale);
+}
+
 } // namespace
 
 int main()
@@ -117,6 +147,7 @@ int main()
         routes();
         credentials();
         responses();
+        numeric_strings();
         std::puts("Kimi direct quota contracts passed");
         return 0;
     }

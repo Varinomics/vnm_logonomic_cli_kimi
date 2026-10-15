@@ -373,7 +373,7 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
             if (error) return std::string{};
             const auto modified = fs::last_write_time(path, error);
             if (error) return std::string{};
-            result += path_string(target) + ':' + std::to_string(size) + ':' + std::to_string(modified.time_since_epoch().count()) + '\n';
+            result += path_string(target) + ':' + std::to_string(size) + ':' + addon::file_time_ticks_text(modified) + '\n';
         }
         return result;
     };

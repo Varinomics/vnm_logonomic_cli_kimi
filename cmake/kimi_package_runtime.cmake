@@ -80,6 +80,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_options(${target} PRIVATE "LINKER:--disable-new-dtags")
     endforeach()
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+    logonomic_cli_addon_macos_runtime_deployer(KIMI_MACOS_RUNTIME_DEPLOYER)
+    foreach(target kimi_adapter kimi_helper kimi_launch_bridge kimi_quota_probe)
+        target_link_options(${target} PRIVATE "LINKER:-headerpad_max_install_names")
+    endforeach()
+endif()
 function(kimi_configure_package_assembler)
     # Cache overrides can retain native Windows separators. Once substituted
     # into quoted CMake source, those separators become escape sequences.
@@ -101,12 +108,15 @@ function(kimi_configure_package_assembler)
     if(MSVC)
         configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/check_kimi_runtime_closure.cmake.in"
             "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure.cmake.in" @ONLY)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/check_kimi_macos_runtime_closure.cmake.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure.cmake.in" @ONLY)
     endif()
 endfunction()
 kimi_configure_package_assembler()
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/assemble-package-$<CONFIG>.cmake"
     INPUT "${CMAKE_CURRENT_BINARY_DIR}/assemble-package.cmake.in")
-if(MSVC)
+if(MSVC OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure-$<CONFIG>.cmake"
         INPUT "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure.cmake.in")
 endif()

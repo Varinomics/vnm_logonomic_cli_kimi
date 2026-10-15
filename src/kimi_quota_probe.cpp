@@ -273,9 +273,23 @@ public:
     ~Socket() { closesocket(m_socket); WSACleanup(); }
     SOCKET value() const { return m_socket; }
 #else
+#ifdef __APPLE__
+    Socket() : m_socket(socket(AF_INET, SOCK_STREAM, 0))
+#else
     Socket() : m_socket(socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0))
+#endif
     {
         if (m_socket < 0) throw std::runtime_error("socket_start_failed");
+#ifdef __APPLE__
+        const auto flags = fcntl(m_socket, F_GETFD, 0);
+        const int no_sigpipe = 1;
+        if (flags < 0 || fcntl(m_socket, F_SETFD, flags | FD_CLOEXEC) != 0 ||
+            setsockopt(m_socket, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)) != 0) {
+            close(m_socket);
+            m_socket = -1;
+            throw std::runtime_error("socket_start_failed");
+        }
+#endif
     }
     ~Socket() { close(m_socket); }
     int value() const { return m_socket; }
@@ -298,7 +312,9 @@ void wait_socket(const Socket& socket, bool writing, Clock::time_point deadline)
     fd_set selected;
     FD_ZERO(&selected);
     FD_SET(socket.value(), &selected);
-    timeval timeout{static_cast<long>(remaining / 1000000), static_cast<long>(remaining % 1000000)};
+    timeval timeout{};
+    timeout.tv_sec  = static_cast<decltype(timeout.tv_sec)>(remaining / 1000000);
+    timeout.tv_usec = static_cast<decltype(timeout.tv_usec)>(remaining % 1000000);
     const auto ready = select(static_cast<int>(socket.value() + 1), writing ? nullptr : &selected,
         writing ? &selected : nullptr, nullptr, &timeout);
     if (ready <= 0) throw std::runtime_error("quota_http_timeout");
@@ -345,7 +361,7 @@ std::string http(unsigned short port, const std::string& token, bool shutdown, C
     while (offset < request.size()) {
         wait_socket(socket, true, deadline);
         const auto count = send(socket.value(), request.data() + offset, static_cast<int>(request.size() - offset),
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
             0);
 #else
             MSG_NOSIGNAL);
