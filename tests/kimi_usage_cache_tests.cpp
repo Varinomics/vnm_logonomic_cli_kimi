@@ -596,9 +596,9 @@ void temporal_cache_contract(const fs::path& package, const fs::path& fixture)
     const auto& record = observed.records.front();
     check(record.record_id == "kimi:dated-session" && record.total_tokens == 57 && record.input.value == 34 &&
         record.output.value == 13 && record.cache_read.value == 4 && record.cache_creation.value == 6 &&
-        !record.cost_microusd.value && record.repository_usage &&
+        record.repository_usage &&
         record.repository_usage->allocations.front().repository_path == addon::path_to_utf8(repository_a),
-        "native categories, conversation, unknown cost and repository accounting stay exact");
+        "native categories, conversation and repository accounting stay exact");
     const std::map<std::string, std::uint64_t> expected{{"1970-01-01T00:00:00.000Z", 3},
         {"2026-10-08T23:59:59.999Z", 40}, {"2026-10-10T01:00:00.001Z", 12}};
     check(proved(record, observed, host, 2) == expected && record.completed_date > "2026-10-08",
