@@ -78,14 +78,7 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         if (capability == "managed-configuration") transform_configuration(context);
         else
         if (capability == "profile-storage" && request.operation == "acknowledge") {
-            std::string error;
-            const auto* value = request.payload.find("profile_storage");
-            const auto storage = value ? addon::decode_profile_storage_context(*value, &error) : std::nullopt;
-            if (!kimi::exact_keys(request.payload, {"profile_storage"}) || !storage) {
-                context.fail(addon::Result_status::FAILED, "profile_storage_mismatch");
-                return;
-            }
-            context.succeed(kimi::object({{"profile_storage", addon::profile_storage_member(*storage)}}));
+            addon::acknowledge_profile_storage(context);
         }
         else
         if (capability == "lifecycle-events" || capability == "helper-ingress" ||
