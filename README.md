@@ -95,6 +95,8 @@ Only QtCore >=6.12 is required; the aggregate GUI/QML framework is not imported.
 Use a fresh out-of-source tree. Packages target Windows and Linux x86-64 and
 macOS ARM64. Windows builds follow the workstation's queued Visual Studio 2026 /
 MSVC v145 build policy. macOS runtime assembly also requires Python >=3.9.
+Outside Windows, the quota probe links libcurl, so its development files are
+required to configure.
 
 The `kimi_package` target produces `package/logonomic.cli.kimi` beneath a
 single-configuration build directory, or `package/<config>/logonomic.cli.kimi`
@@ -135,8 +137,8 @@ admission, hook ownership, Agent correlation/replay, Unicode labels, and quota
 normalization. Qualification is a separate step; source availability does not
 establish a successful build or test run.
 
-The package recipe proves the Windows/Linux x86-64 compiler target during
-configuration. `cmake --install` exports a fresh artifact beneath its install-time
+The package recipe proves the Windows/Linux x86-64 or macOS ARM64 compiler target
+during configuration. `cmake --install` exports a fresh artifact beneath its install-time
 prefix and preserves executable permissions. An existing per-package destination,
 including a dangling symlink, is refused. POSIX `DESTDIR` staging is supported;
 nonempty `DESTDIR` with a drive-letter prefix is refused. Export is not atomic:
