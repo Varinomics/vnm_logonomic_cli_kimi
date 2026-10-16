@@ -111,6 +111,7 @@ endif()
 logonomic_cli_addon_package_platform(KIMI_PLATFORM)
 logonomic_cli_addon_package_directory(logonomic.cli.kimi KIMI_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
+logonomic_cli_addon_package_indexer(kimi_package_indexer kimi_index_dependencies)
 include(cmake/kimi_package_runtime.cmake)
 # Inspect the executable closure on every build: an external shared library can
 # change without relinking an executable. The assembler compares exact inputs
