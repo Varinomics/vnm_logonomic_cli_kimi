@@ -174,9 +174,14 @@ add_executable(kimi_usage_cache_tests tests/kimi_usage_cache_tests.cpp)
 target_link_libraries(kimi_usage_cache_tests PRIVATE kimi_provider)
 kimi_target(kimi_usage_cache_tests)
 add_dependencies(kimi_usage_cache_tests kimi_package)
-add_test(NAME kimi_usage_cache_tests
-    COMMAND kimi_usage_cache_tests "${KIMI_PACKAGE_DIRECTORY}")
-set_tests_properties(kimi_usage_cache_tests PROPERTIES TIMEOUT 180 LABELS "usage;cache;packaged-adapter")
+set(KIMI_USAGE_CACHE_PHASE_TESTS)
+foreach(phase IN ITEMS cache temporal refresh capacity)
+    set(test_name kimi_usage_cache_tests_${phase})
+    add_test(NAME ${test_name}
+        COMMAND kimi_usage_cache_tests "${KIMI_PACKAGE_DIRECTORY}" ${phase})
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 180 LABELS "usage;cache;packaged-adapter")
+    list(APPEND KIMI_USAGE_CACHE_PHASE_TESTS ${test_name})
+endforeach()
 
 add_executable(kimi_acp_causal_tests tests/kimi_acp_causal_tests.cpp)
 target_link_libraries(kimi_acp_causal_tests PRIVATE kimi_provider)
@@ -187,7 +192,7 @@ if(WIN32)
     # These executables run from the build tree, outside the assembled package.
     # Clean copied-package qualification supplies its own runtime environment.
     set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests
-        kimi_usage_tests kimi_usage_cache_tests kimi_acp_causal_tests kimi_quota_direct_tests PROPERTIES
+        kimi_usage_tests ${KIMI_USAGE_CACHE_PHASE_TESTS} kimi_acp_causal_tests kimi_quota_direct_tests PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 

@@ -7,9 +7,11 @@
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/profile_storage.h>
 #include <logonomic_cli_addon/usage_scan.h>
+#include <logonomic_cli_addon/usage_session.h>
 #include <logonomic_cli_addon/usage_temporal.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -208,6 +210,29 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
             [] { return false; }, &failure).has_value(), "sealed candidate remains intact: " + failure.detail);
     };
 
+    const auto check_session_facts = [&](const addon::Usage_scan_page& page) {
+        std::vector<addon::Usage_session_identity> identities;
+        for (std::size_t index = 0; index < std::min(page.records.size(), addon::k_max_usage_page_records); ++index) {
+            const auto& record = page.records[index];
+            check(!record.capabilities.find(addon::k_usage_session_capability_id),
+                "ordinary scan records remain unchanged for hosts without session-fact support");
+            identities.push_back({record.record_id, record.session_key});
+        }
+        const auto id = host.invoke({addon::k_usage_session_capability_id, addon::k_usage_session_version},
+            addon::k_usage_session_describe_operation, addon::encode_usage_session_request(identities), 5000);
+        const auto outcome = host.wait_outcome(id, 6000);
+        check(outcome && outcome->status == addon::Host_status::SUCCESS, "packaged adapter describes usage sessions");
+        const auto descriptions = addon::decode_usage_session_result(outcome->payload, &failure);
+        check(descriptions && descriptions->size() == identities.size(), "session facts preserve page cardinality");
+        for (std::size_t index = 0; index < identities.size(); ++index) {
+            const auto& description = descriptions->at(index);
+            check(description.identity == identities[index] && description.session &&
+                description.session->provider_session_id == identities[index].record_id.substr(5) &&
+                !description.session->excludes_turn_in_flight,
+                "Kimi facts join prefixed usage to native lifecycle IDs without inventing a completed-turn cutoff");
+        }
+    };
+
     check(total(all_pages(request, 2)) == 2700, "v2 retains its existing namespace and telemetry");
     for (const auto& path : sources) {
         check(fs::remove(path), "remove fixture source");
@@ -225,6 +250,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(!first.complete && first.records.size() == 256 && first.cache_candidate,
         "packaged first page supplies a sealed bounded candidate");
     validate(*first.cache_candidate);
+    check_session_facts(first);
     request.snapshot_id = first.snapshot_id;
     request.cursor = first.next_cursor;
     auto changed = request;
@@ -272,6 +298,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     select("recovered", first.cache_candidate);
     const auto recovered = all_pages(request, 3);
     check(total(recovered) == 2700, "rejected candidate cannot become retained history after source deletion");
+    check_session_facts(recovered);
     validate(*first.cache_candidate);
     validate(*lower.cache_candidate);
 
@@ -456,7 +483,7 @@ public:
         request.cache_selection = addon::Usage_cache_selection{std::move(accepted), addon::path_to_utf8(root)};
     }
 
-    addon::Usage_scan_page scan(std::uint16_t version = 3)
+    addon::Usage_scan_page scan(std::uint16_t version = 3, int deadline_ms = 30000)
     {
         auto input = request;
         if (version == 2) input.cache_selection.reset();
@@ -464,8 +491,8 @@ public:
         bool first = true;
         page_count = 0;
         do {
-            const auto id = host.invoke({"usage-scan", version}, "scan", addon::encode_usage_scan_request(input, version), 30000);
-            const auto outcome = host.wait_outcome(id, 31000);
+            const auto id = host.invoke({"usage-scan", version}, "scan", addon::encode_usage_scan_request(input, version), deadline_ms);
+            const auto outcome = host.wait_outcome(id, deadline_ms + 1000);
             check(outcome && outcome->status == addon::Host_status::SUCCESS,
                 "temporal scan succeeds: " + (outcome ? outcome->reason_code : "timeout"));
             addon::Contract_failure failure;
@@ -820,7 +847,9 @@ void temporal_capacity_contract(const fs::path& package, const fs::path& fixture
     write(host.profile / "sessions/workspace/zero/agents/a/wire.jsonl", native_event(start, 0));
     for (unsigned index = 0; index < 16; ++index) source("bounded-" + std::to_string(index), "a", 0, 4096, true);
     host.select("capacity");
-    const auto page = host.scan();
+    // The first page seals all ~70,000 events before returning. Give that
+    // bounded workload the long-cache budget, within the phase's CTest limit.
+    const auto page = host.scan(3, 120000);
     check(page.records.size() == 19 && host.page_count > 1, "optional bytes trigger real bounded continuation before record-count limit");
     std::uint64_t total = 0;
     for (const auto& record : page.records) {
@@ -845,12 +874,26 @@ void temporal_capacity_contract(const fs::path& package, const fs::path& fixture
 int main(int argc, char** argv)
 {
     try {
-        check(argc == 2, "expected built package directory");
+        check(argc == 2 || argc == 3, "expected built package directory and optional phase");
+        const std::string phase = argc == 3 ? argv[2] : "";
+        check(phase.empty() || phase == "cache" || phase == "temporal" ||
+            phase == "refresh" || phase == "capacity", "unknown usage cache test phase");
         Workspace workspace;
-        adapter_cache_contract(addon::path_from_utf8(argv[1]), workspace.m_path);
-        temporal_cache_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "temporal");
-        temporal_refresh_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "refresh");
-        temporal_capacity_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "capacity");
+        const auto run_phase = [&](const char* name, const auto& contract, const fs::path& fixture) {
+            if (!phase.empty() && phase != name) {
+                return;
+            }
+            const auto started = std::chrono::steady_clock::now();
+            std::cerr << "usage cache phase " << name << " begin" << std::endl;
+            contract(addon::path_from_utf8(argv[1]), fixture);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started);
+            std::cerr << "usage cache phase " << name << " end " << elapsed.count() << "ms" << std::endl;
+        };
+        run_phase("cache", adapter_cache_contract, workspace.m_path);
+        run_phase("temporal", temporal_cache_contract, workspace.m_path / "temporal");
+        run_phase("refresh", temporal_refresh_contract, workspace.m_path / "refresh");
+        run_phase("capacity", temporal_capacity_contract, workspace.m_path / "capacity");
         return 0;
     }
     catch (const std::exception& error) {

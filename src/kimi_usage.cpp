@@ -1447,4 +1447,33 @@ void handle_usage(addon::Invocation_context& context)
     context.succeed(addon::encode_usage_scan_result(page, version));
 }
 
+std::optional<addon::Usage_session_fact> describe_usage_session(const addon::Usage_session_identity& identity)
+{
+    if (!identity.session_key || identity.record_id != *identity.session_key ||
+        canonical_usage_session_id(*identity.session_key) != *identity.session_key)
+    {
+        return std::nullopt;
+    }
+    return addon::Usage_session_fact{identity.session_key->substr(5), false};
+}
+
+void handle_usage_session(addon::Invocation_context& context)
+{
+    if (context.request().operation != addon::k_usage_session_describe_operation) {
+        context.reject_unknown_operation();
+        return;
+    }
+    addon::Contract_failure failure;
+    const auto request = addon::decode_usage_session_request(context.request().payload, &failure);
+    if (!request) {
+        context.fail(addon::Result_status::FAILED, failure.reason_code);
+        return;
+    }
+    std::vector<addon::Usage_session_description> result;
+    for (const auto& identity : *request) {
+        result.push_back({identity, describe_usage_session(identity)});
+    }
+    context.succeed(addon::encode_usage_session_result(result));
+}
+
 } // namespace kimi

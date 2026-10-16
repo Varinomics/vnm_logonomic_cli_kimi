@@ -75,6 +75,8 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         else
         if (capability == "usage-scan") kimi::handle_usage(context);
         else
+        if (capability == addon::k_usage_session_capability_id) kimi::handle_usage_session(context);
+        else
         if (capability == "managed-configuration") transform_configuration(context);
         else
         if (capability == "profile-storage" && request.operation == "acknowledge") {
@@ -129,6 +131,7 @@ int main()
         {"helper-ingress", 2}, {"coordination-delivery", 1}, {"legacy-state-import", 1},
         {"accounts", 2}, {"usage-scan", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
         {addon::k_usage_temporal_capability_id, addon::k_usage_temporal_version},
+        {addon::k_usage_session_capability_id, addon::k_usage_session_version},
     };
     const auto observation_service = std::make_shared<vnm::filesystem_observation::Service>();
     kimi::Lifecycle_observer observer(observation_service, {});
