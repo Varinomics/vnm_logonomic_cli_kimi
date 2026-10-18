@@ -13,6 +13,7 @@
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/profile_storage.h>
 #include <logonomic_cli_addon/session_contracts.h>
+#include <logonomic_cli_addon/usage_owned_event_correction.h>
 
 #include <exception>
 #include <memory>
@@ -73,7 +74,7 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         else
         if (capability == "accounts") kimi::handle_accounts(context);
         else
-        if (capability == "usage-scan") kimi::handle_usage(context);
+        if (capability == "usage-scan" || capability == addon::k_usage_owned_event_correction_capability_id) kimi::handle_usage(context);
         else
         if (capability == addon::k_usage_session_capability_id) kimi::handle_usage_session(context);
         else
@@ -105,6 +106,10 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         }
         else kimi::handle_preparation(context);
     }
+    catch (const kimi::Usage_ownership_unavailable&) {
+        context.fail(context.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
+            context.cancel_requested() ? "cancelled" : "usage_ownership_unavailable");
+    }
     catch (const std::exception&) {
         if (context.cancel_requested()) {
             context.fail(addon::Result_status::CANCELLED, "cancelled");
@@ -132,6 +137,7 @@ int main()
         {"accounts", 2}, {"usage-scan", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
         {addon::k_usage_temporal_capability_id, addon::k_usage_temporal_version},
         {addon::k_usage_session_capability_id, addon::k_usage_session_version},
+        {addon::k_usage_owned_event_correction_capability_id, addon::k_usage_owned_event_correction_version},
     };
     const auto observation_service = std::make_shared<vnm::filesystem_observation::Service>();
     kimi::Lifecycle_observer observer(observation_service, {});

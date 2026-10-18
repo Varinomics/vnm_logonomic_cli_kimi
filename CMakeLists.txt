@@ -72,7 +72,7 @@ function(kimi_target target)
 endfunction()
 
 set(kimi_provider_sources
-    src/kimi_accounts.cpp src/kimi_usage.cpp
+    src/kimi_accounts.cpp src/kimi_usage.cpp src/kimi_usage_correction.cpp
     src/kimi_acp.cpp src/kimi_config.cpp src/kimi_guidance.cpp src/kimi_launcher.cpp
     src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_quota_direct.cpp src/kimi_wire.cpp)
 function(kimi_add_provider target)
@@ -160,6 +160,10 @@ add_executable(kimi_usage_tests tests/kimi_usage_tests.cpp)
 target_link_libraries(kimi_usage_tests PRIVATE kimi_provider)
 kimi_target(kimi_usage_tests)
 add_test(NAME kimi_usage_tests COMMAND kimi_usage_tests)
+add_executable(kimi_usage_correction_tests tests/kimi_usage_correction_tests.cpp)
+target_link_libraries(kimi_usage_correction_tests PRIVATE kimi_provider)
+kimi_target(kimi_usage_correction_tests)
+add_test(NAME kimi_usage_correction_tests COMMAND kimi_usage_correction_tests)
 add_test(NAME kimi_package_validation COMMAND logonomic_cli_addon_validate "${KIMI_PACKAGE_DIRECTORY}" --platform "${KIMI_PLATFORM}")
 add_test(NAME kimi_package_conformance COMMAND logonomic_cli_addon_conformance "${KIMI_PACKAGE_DIRECTORY}")
 set_tests_properties(kimi_contract_tests kimi_package_validation kimi_package_conformance PROPERTIES TIMEOUT 120)
@@ -181,7 +185,7 @@ target_link_libraries(kimi_usage_cache_tests PRIVATE kimi_provider)
 kimi_target(kimi_usage_cache_tests)
 add_dependencies(kimi_usage_cache_tests kimi_package)
 set(KIMI_USAGE_CACHE_PHASE_TESTS)
-foreach(phase IN ITEMS cache temporal refresh capacity)
+foreach(phase IN ITEMS cache temporal refresh capacity owned)
     set(test_name kimi_usage_cache_tests_${phase})
     add_test(NAME ${test_name}
         COMMAND kimi_usage_cache_tests "${KIMI_PACKAGE_DIRECTORY}" ${phase})
@@ -198,7 +202,7 @@ if(WIN32)
     # These executables run from the build tree, outside the assembled package.
     # Clean copied-package qualification supplies its own runtime environment.
     set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests
-        kimi_usage_tests ${KIMI_USAGE_CACHE_PHASE_TESTS} kimi_acp_causal_tests kimi_quota_direct_tests
+        kimi_usage_tests kimi_usage_correction_tests ${KIMI_USAGE_CACHE_PHASE_TESTS} kimi_acp_causal_tests kimi_quota_direct_tests
         kimi_wire_cancellation_tests PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()

@@ -1,4 +1,5 @@
 #include "kimi_usage.h"
+#include "kimi_usage_correction.h"
 #include "kimi_accounts.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
@@ -49,6 +50,13 @@ struct File_record
     bool stale_breakdown = false;
     std::optional<addon::Usage_record> usage;
     std::optional<Json> temporal_carrier;
+    std::optional<Json> fork_carrier;
+    std::optional<Json> fork_evidence;
+    std::uint64_t event_begin = 0;
+    std::uint64_t event_end = 0;
+    std::uint64_t accepted_event_count = 0;
+    bool legacy_prefix_matches = false;
+    bool retained_prefix_matches = false;
 };
 
 class Scan_workspace;
@@ -195,6 +203,8 @@ void publish_temporal(addon::Usage_record& record, addon::Usage_temporal evidenc
 Json spool_record(const addon::Usage_record& record, bool temporal)
 {
     auto value = addon::encode_usage_record(record, 2);
+    if (record.aggregate_evidence) value.set("aggregate-evidence", Json(*record.aggregate_evidence));
+    if (!record.capabilities.as_object().empty()) value.set("record-capabilities", record.capabilities);
     if (temporal && record.temporal) {
         value.set("usage-temporal", addon::encode_usage_temporal(*record.temporal));
         if (addon::serialize_json(value).size() > addon::Json_parse_limits{}.max_bytes) {
@@ -208,8 +218,12 @@ std::optional<addon::Usage_record> spool_record(const Json& value)
 {
     auto accounting = value;
     accounting.erase("usage-temporal");
+    accounting.erase("record-capabilities");
+    accounting.erase("aggregate-evidence");
     auto record = addon::decode_usage_record(accounting, nullptr, 2);
     if (record) {
+        if (const auto* capabilities = value.find("record-capabilities")) record->capabilities = *capabilities;
+        if (const auto* evidence = value.find("aggregate-evidence")) record->aggregate_evidence = evidence->as_string();
         const auto* payload = value.find("usage-temporal");
         auto evidence = payload ? addon::decode_usage_temporal(*payload, nullptr) : std::nullopt;
         if (evidence && evidence->parent.record_id == record->record_id &&
@@ -285,8 +299,10 @@ std::optional<std::string> repository(std::string_view cwd)
 void attribute(addon::Usage_record& record, std::string_view cwd)
 {
     addon::Usage_repository allocation;
-    if (const auto root = repository(cwd)) allocation.allocations.push_back({*root, record.total_tokens});
-    else allocation.unattributed_tokens = record.total_tokens;
+    if (record.total_tokens) {
+        if (const auto root = repository(cwd)) allocation.allocations.push_back({*root, record.total_tokens});
+        else allocation.unattributed_tokens = record.total_tokens;
+    }
     record.repository_usage = std::move(allocation);
 }
 
@@ -295,7 +311,8 @@ void attribute(addon::Usage_record& record, std::string_view cwd)
 // written and is skipped. False when the log was unreadable or changed while it
 // was read, in which case the caller keeps the log's previous evidence.
 bool read_stable_lines(const fs::path& path, File_record& fingerprint, addon::Invocation_context& context,
-    const std::function<void(std::string_view line)>& consume)
+    const std::function<void(std::string_view line)>& consume,
+    const std::function<void(std::string_view bytes)>& observe_bytes = {})
 {
     std::error_code error;
     const auto before_size = fs::file_size(path, error);
@@ -337,6 +354,7 @@ bool read_stable_lines(const fs::path& path, File_record& fingerprint, addon::In
             const auto received = static_cast<std::size_t>(stream.gcount());
             buffer.resize(kept + received);
             if (received == 0) break;
+            if (observe_bytes) observe_bytes(std::string_view(buffer).substr(kept, received));
         }
     }
     catch (...) {
@@ -390,11 +408,17 @@ public:
         while (!line.empty() && line.front() == '\0') line.remove_prefix(1);
         const auto event = parse(line);
         if (!event || !event->is_object()) throw std::runtime_error("usage_record_invalid");
-        if (text(*event, "type") != "usage.record") return;
-        const auto& native_time = member(*event, "time");
+        consume_event(*event, context);
+    }
+
+    void consume_event(const Json& event, addon::Invocation_context& context)
+    {
+        check_cancel(context);
+        if (text(event, "type") != "usage.record") return;
+        const auto& native_time = member(event, "time");
         const auto milliseconds = count(native_time);
         const auto date = local_date(milliseconds);
-        const auto& usage = member(*event, "usage");
+        const auto& usage = member(event, "usage");
         if (!usage.is_object()) throw std::runtime_error("usage_record_invalid");
         bool recognized = false;
         std::uint64_t event_tokens = 0;
@@ -419,16 +443,21 @@ public:
             }
             else add(m_positions[*instant], event_tokens);
         }
-        const auto model = text(*event, "model");
+        const auto model = text(event, "model");
         if (!m_record.model || m_record.model->empty()) m_record.model = model;
         else if (!model.empty() && *m_record.model != model) m_record.model = "multiple";
         m_record.completed_date = std::max(m_record.completed_date, date);
         ++m_records;
     }
 
-    std::optional<addon::Usage_record> finish(std::string_view cwd)
+    std::optional<addon::Usage_record> finish(std::string_view cwd,
+        const addon::Usage_record* empty_identity = nullptr)
     {
-        if (!m_records) return std::nullopt;
+        if (!m_records) {
+            if (!empty_identity) return std::nullopt;
+            m_record.completed_date = empty_identity->completed_date;
+            m_record.model = empty_identity->model;
+        }
         auto fields = amounts(m_record);
         for (std::size_t index = 0; index < fields.size(); ++index) {
             fields[index]->applicable = true;
@@ -456,6 +485,81 @@ private:
     std::uint64_t m_temporal_unavailable = 0;
     bool m_temporal_capacity = false;
 };
+
+std::optional<Json> fork_session_identity(const fs::path& wire)
+{
+    const auto session = wire.parent_path().parent_path().parent_path();
+    const auto state = optional_document(session / "state.json");
+    const auto id = path_string(session.filename());
+    const auto* created = state.find("createdAt");
+    const auto* parent = state.find("forkedFrom");
+    if (text(state, "id") != id || !created || !created->is_integer() || created->as_integer() < 0 ||
+        (parent && !parent->is_string())) return std::nullopt;
+    const auto parent_id = parent ? parent->as_string() : std::string{};
+    const auto parent_path = addon::path_from_utf8(parent_id);
+    if (!parent_id.empty() && (parent_path.is_absolute() || parent_path.has_parent_path() ||
+            parent_id == "." || parent_id == "..")) return std::nullopt;
+    return object({{"session_id", Json(id)}, {"parent_session_id", Json(parent_id)},
+        {"created_at", *created}, {"agent_id", Json(path_string(wire.parent_path().filename()))}});
+}
+
+bool same_counted_usage(const addon::Usage_record& observed, const addon::Usage_record& accepted)
+{
+    const auto numeric = [](const addon::Usage_record& record) {
+        const auto encoded = addon::encode_usage_record(record, 2);
+        auto result = Json::object();
+        for (const auto* key : {"total_tokens", "coverage_unit", "input", "output", "cache_read", "cache_creation"}) {
+            result.set(key, member(encoded, key));
+        }
+        return addon::serialize_json_canonical(result);
+    };
+    if (numeric(observed) != numeric(accepted)) return false;
+    if (!accepted.temporal) return true;
+    if (!observed.temporal) return false;
+    auto previous = *accepted.temporal;
+    auto current = *observed.temporal;
+    previous.parent = current.parent;
+    previous.retained_from.reset();
+    current.retained_from.reset();
+    return addon::serialize_json_canonical(addon::encode_usage_temporal(previous)) ==
+        addon::serialize_json_canonical(addon::encode_usage_temporal(current));
+}
+
+bool valid_fork_evidence(const Json& evidence, const fs::path& path)
+{
+    auto shape = evidence;
+    shape.erase("unresolved_event_count");
+    shape.erase("creator_session_id");
+    if (!exact_keys(shape, {"identity", "native_prefix_sha256_hex", "event_sha256_hex",
+            "event_count", "fork_event_count", "forked", "accounting"})) return false;
+    const auto& identity = member(evidence, "identity");
+    if (!exact_keys(identity, {"session_id", "parent_session_id", "created_at", "agent_id"}) ||
+        text(identity, "session_id") != path_string(path.parent_path().parent_path().parent_path().filename()) ||
+        text(identity, "agent_id") != path_string(path.parent_path().filename()) ||
+        !member(identity, "parent_session_id").is_string() || !member(identity, "created_at").is_integer() ||
+        member(identity, "created_at").as_integer() < 0 ||
+        !addon::sha256_from_hex(text(evidence, "native_prefix_sha256_hex")) ||
+        !addon::sha256_from_hex(text(evidence, "event_sha256_hex")) ||
+        !member(evidence, "event_count").is_integer() || !member(evidence, "fork_event_count").is_integer() ||
+        !member(evidence, "forked").is_boolean()) return false;
+    const auto events = member(evidence, "event_count").as_integer();
+    const auto boundary = member(evidence, "fork_event_count").as_integer();
+    const auto accounting = text(evidence, "accounting");
+    const auto parent_id = text(identity, "parent_session_id");
+    const auto parent = addon::path_from_utf8(parent_id);
+    const auto* unresolved = evidence.find("unresolved_event_count");
+    const auto* creator = evidence.find("creator_session_id");
+    if (creator && (!creator->is_string() || creator->as_string().empty())) return false;
+    const bool retained = accounting == "retained";
+    if (retained && (!unresolved || !unresolved->is_integer() || unresolved->as_integer() < 0 ||
+        unresolved->as_integer() > events)) return false;
+    if (!retained && unresolved) return false;
+    return (parent_id.empty() || (!parent.is_absolute() && !parent.has_parent_path() &&
+            parent_id != "." && parent_id != "..")) &&
+        events >= 0 && static_cast<std::uint64_t>(events) <= k_max_exact && boundary >= 0 && boundary <= events &&
+        (member(evidence, "forked").as_boolean() || boundary == 0) &&
+        (accounting == "raw" || accounting == "owned" || retained);
+}
 
 void require_io(bool condition)
 {
@@ -628,6 +732,143 @@ private:
     bool m_available = false;
 };
 
+// The sorted observations and their offsets stay on disk. Ancestor lookup
+// therefore does not turn the retained history into an in-memory graph.
+class Row_lookup final
+{
+public:
+    Row_lookup(const fs::path& rows, const fs::path& offsets, addon::Invocation_context& context)
+        : m_rows(rows, std::ios::binary)
+    {
+        require_io(static_cast<bool>(m_rows));
+        std::ofstream output(offsets, std::ios::binary);
+        require_io(static_cast<bool>(output));
+        std::string line;
+        for (;;) {
+            check_cancel(context);
+            const auto position = static_cast<std::uint64_t>(m_rows.tellg());
+            if (!read_line(m_rows, line)) break;
+            output.write(reinterpret_cast<const char*>(&position), sizeof(position));
+            ++m_count;
+        }
+        output.close();
+        require_io(static_cast<bool>(output));
+        m_offsets.open(offsets, std::ios::binary);
+        require_io(static_cast<bool>(m_offsets));
+    }
+
+    std::uint64_t size() const { return m_count; }
+
+    std::pair<std::string, Json> at(std::uint64_t index)
+    {
+        require_io(index < m_count);
+        std::uint64_t position = 0;
+        m_offsets.clear();
+        m_offsets.seekg(static_cast<std::streamoff>(index * sizeof(position)));
+        m_offsets.read(reinterpret_cast<char*>(&position), sizeof(position));
+        require_io(static_cast<bool>(m_offsets));
+        m_rows.clear();
+        m_rows.seekg(static_cast<std::streamoff>(position));
+        std::string line;
+        require_io(read_line(m_rows, line));
+        const auto delimiter = line.find('\t');
+        require_io(delimiter != std::string::npos);
+        auto value = parse(std::string_view(line).substr(delimiter + 1));
+        if (!value) throw std::runtime_error("usage_cache_record_invalid");
+        return {line.substr(0, delimiter), std::move(*value)};
+    }
+
+    std::optional<std::uint64_t> find(std::string_view key)
+    {
+        std::uint64_t begin = 0, end = m_count;
+        while (begin < end) {
+            const auto middle = begin + (end - begin) / 2;
+            const auto row = at(middle);
+            if (row.first == key) return middle;
+            if (row.first < key) begin = middle + 1;
+            else end = middle;
+        }
+        return std::nullopt;
+    }
+
+private:
+    std::ifstream m_rows;
+    std::ifstream m_offsets;
+    std::uint64_t m_count = 0;
+};
+
+class Event_stream final
+{
+public:
+    Event_stream(const fs::path& path, std::uint64_t begin, std::uint64_t end)
+        : m_input(path, std::ios::binary), m_end(end)
+    {
+        require_io(m_input && begin <= end);
+        m_input.seekg(static_cast<std::streamoff>(begin));
+    }
+
+    bool next(std::string& line)
+    {
+        const auto position = static_cast<std::uint64_t>(m_input.tellg());
+        require_io(position <= m_end);
+        if (position == m_end) return false;
+        require_io(read_line(m_input, line) && static_cast<std::uint64_t>(m_input.tellg()) <= m_end);
+        return true;
+    }
+
+private:
+    std::ifstream m_input;
+    std::uint64_t m_end;
+};
+
+class Ownership_origins final
+{
+public:
+    Ownership_origins(const fs::path& work, std::uint64_t files, addon::Invocation_context& context)
+        : m_path(work / "event-origins")
+    {
+        std::ofstream offsets(work / "origin-offsets", std::ios::binary);
+        require_io(static_cast<bool>(offsets));
+        const std::array<std::uint64_t, 2> empty{};
+        for (std::uint64_t index = 0; index < files; ++index) {
+            check_cancel(context);
+            offsets.write(reinterpret_cast<const char*>(empty.data()), sizeof(empty));
+        }
+        offsets.close();
+        require_io(static_cast<bool>(offsets));
+        m_offsets.open(work / "origin-offsets", std::ios::binary | std::ios::in | std::ios::out);
+        m_output.open(m_path, std::ios::binary);
+        require_io(m_offsets && m_output);
+    }
+
+    void begin() { m_begin = static_cast<std::uint64_t>(m_output.tellp()); }
+    void append(const Json& owner) { write_line(m_output, addon::serialize_json(owner)); }
+    void finish(std::uint64_t index)
+    {
+        const std::array<std::uint64_t, 2> range{m_begin, static_cast<std::uint64_t>(m_output.tellp())};
+        m_output.flush();
+        m_offsets.clear();
+        m_offsets.seekp(static_cast<std::streamoff>(index * sizeof(range)));
+        m_offsets.write(reinterpret_cast<const char*>(range.data()), sizeof(range));
+        require_io(m_output && m_offsets);
+    }
+    Event_stream read(std::uint64_t index)
+    {
+        std::array<std::uint64_t, 2> range{};
+        m_offsets.clear();
+        m_offsets.seekg(static_cast<std::streamoff>(index * sizeof(range)));
+        m_offsets.read(reinterpret_cast<char*>(range.data()), sizeof(range));
+        require_io(static_cast<bool>(m_offsets));
+        return Event_stream(m_path, range[0], range[1]);
+    }
+
+private:
+    fs::path m_path;
+    std::fstream m_offsets;
+    std::ofstream m_output;
+    std::uint64_t m_begin = 0;
+};
+
 // Read the first cache object one member at a time. In the document format,
 // files and receipts are arrays whose elements are individually parsed. This
 // also reads the JSONL header without buffering a document-sized first line.
@@ -640,7 +881,8 @@ public:
         require_io(static_cast<bool>(m_input));
     }
     void read(std::string_view owner, const std::function<void(const Json&)>& file,
-        const std::function<void(const Json&)>& receipt)
+        const std::function<void(const Json&)>& receipt,
+        const std::function<void(const Json&)>& event)
     {
         expect('{');
         auto header = Json::object();
@@ -688,6 +930,10 @@ public:
             if (row->find("receipt")) {
                 if (!exact_keys(*row, {"receipt"})) invalid();
                 receipt(member(*row, "receipt"));
+            }
+            else if (row->find("fork_event")) {
+                if (!exact_keys(*row, {"fork_event"})) invalid();
+                event(member(*row, "fork_event"));
             }
             else file(*row);
         }
@@ -756,12 +1002,19 @@ Json encode_file_accounting(std::string_view path, const File_record& file)
 Json encode_file(std::string_view path, const File_record& file, bool temporal = true)
 {
     auto row = encode_file_accounting(path, file);
+    if (file.fork_evidence) {
+        row.set("usage-fork-ownership", object({{"version", Json(1)},
+            {"parent_sha256_hex", Json(addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(row))))},
+            {"evidence", *file.fork_evidence}}));
+    }
+    else if (file.fork_carrier) row.set("usage-fork-ownership", *file.fork_carrier);
     if (!temporal) return row;
     if (file.usage && file.usage->temporal) {
         auto evidence = *file.usage->temporal;
         evidence.retained_from.reset();
         auto carrier = object({{"version", Json(1)},
-            {"parent_sha256_hex", Json(addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(row))))},
+            {"parent_sha256_hex", Json(addon::to_hex(addon::Sha256::digest(
+                addon::serialize_json_canonical(encode_file_accounting(path, file)))))},
             {"evidence", addon::encode_usage_temporal(evidence)}});
         row.set("usage-temporal", std::move(carrier));
     }
@@ -774,6 +1027,7 @@ File_record decode_file(const Json& row)
 {
     auto accounting = row;
     accounting.erase("usage-temporal");
+    accounting.erase("usage-fork-ownership");
     File_record file;
     const auto path = text(row, "path");
     if (!exact_keys(accounting, {"path", "size", "modified_msecs", "recorded_cwd", "usage", "stale_breakdown"}) ||
@@ -790,6 +1044,17 @@ File_record decode_file(const Json& row)
         addon::Contract_failure failure;
         file.usage = addon::decode_usage_record(member(row, "usage"), &failure, 2);
         if (!file.usage) throw std::runtime_error("usage_cache_record_invalid");
+    }
+    if (const auto* carrier = row.find("usage-fork-ownership")) {
+        file.fork_carrier = *carrier;
+        if (exact_keys(*carrier, {"version", "parent_sha256_hex", "evidence"}) &&
+            member(*carrier, "version").is_integer() && member(*carrier, "version").as_integer() == 1 &&
+            text(*carrier, "parent_sha256_hex") ==
+                addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(accounting))) &&
+            valid_fork_evidence(member(*carrier, "evidence"), addon::path_from_utf8(path)))
+        {
+            file.fork_evidence = member(*carrier, "evidence");
+        }
     }
     if (const auto* carrier = row.find("usage-temporal")) {
         file.temporal_carrier = *carrier;
@@ -964,59 +1229,364 @@ void store_cache(const fs::path& destination, const fs::path& temporary)
 }
 
 std::optional<File_record> refresh_file(const fs::path& path, const std::optional<File_record>& previous,
-    std::string_view mode, bool temporal, const Json& workspaces, addon::Invocation_context& context)
+    std::string_view mode, bool temporal, const Json& workspaces, const fs::path& temporary,
+    std::ofstream& events, addon::Invocation_context& context)
 {
     const auto session = path.parent_path().parent_path().parent_path();
+    const auto identity = fork_session_identity(path);
+    // state.json can briefly disappear during Kimi's Windows replacement.
+    // Retention is safe; treating that interval as a new root is not.
+    if (!identity) {
+        if (previous) return previous;
+        throw Usage_ownership_unavailable();
+    }
+    if (previous && previous->fork_evidence &&
+        addon::serialize_json_canonical(member(*previous->fork_evidence, "identity")) !=
+            addon::serialize_json_canonical(*identity)) throw Usage_ownership_unavailable();
     const auto cwd = recorded_cwd(session, workspaces);
-    // Unchanged accounting may predate the optional native temporal evidence.
-    const bool refresh_temporal = mode == "incremental" && temporal && previous && previous->usage &&
-        !previous->temporal_carrier;
-    File_record current;
-    current.cwd = cwd;
-    if (mode == "incremental" && previous && !previous->stale_breakdown && !refresh_temporal) {
+    const bool refresh_temporal = temporal && previous && previous->usage && !previous->temporal_carrier;
+    if (mode == "incremental" && previous && previous->fork_evidence &&
+        !previous->stale_breakdown && !refresh_temporal)
+    {
         std::error_code error;
         const auto size = fs::file_size(path, error);
         if (!error) {
             const auto modified = fs::last_write_time(path, error);
             if (!error && previous->size == size && previous->modified_ms == file_modified_ms(modified)) {
-                current = *previous;
+                auto current = *previous;
                 current.cwd = cwd;
+                current.retained_prefix_matches = true;
+                current.accepted_event_count = count(member(*current.fork_evidence, "event_count"));
                 if (current.usage) attribute(*current.usage, cwd);
                 return current;
             }
         }
     }
-    std::optional<addon::Usage_record> parsed;
+    File_record current;
+    current.cwd = cwd;
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    require_io(static_cast<bool>(output));
+    Wire_usage wire(session), prefix(session);
+    addon::Sha256 native_digest, prefix_digest, event_digest;
+    std::uint64_t bytes = 0, line_end = 0, event_count = 0, boundary = 0;
+    bool forked = false;
+    bool first_record = true;
+    std::string creator_session_id;
     bool stable = false;
     try {
-        Wire_usage wire(session);
-        stable = read_stable_lines(path, current, context, [&](std::string_view line) { wire.consume(line, context); });
-        if (stable) parsed = wire.finish(cwd);
+        stable = read_stable_lines(path, current, context, [&](std::string_view line) {
+            line_end += line.size() + 1;
+            while (!line.empty() && line.front() == '\0') line.remove_prefix(1);
+            const auto event = parse(line);
+            if (!event || !event->is_object()) throw std::runtime_error("usage_record_invalid");
+            const auto type = text(*event, "type");
+            if (first_record && type == "metadata" && member(*event, "protocol_version").is_string() &&
+                member(*event, "created_at").is_number())
+            {
+                creator_session_id = text(*event, "creator_session_id");
+            }
+            first_record = false;
+            if (type == "forked") {
+                if (text(*event, "agentId") != text(*identity, "agent_id")) throw Usage_ownership_unavailable();
+                boundary = event_count;
+                forked = true;
+            }
+            if (type != "usage.record") return;
+            if (event->find("agentId") && text(*event, "agentId") != text(*identity, "agent_id")) {
+                throw Usage_ownership_unavailable();
+            }
+            wire.consume_event(*event, context);
+            if (previous && line_end <= previous->size) {
+                prefix.consume_event(*event, context);
+                ++current.accepted_event_count;
+            }
+            const auto canonical = addon::serialize_json_canonical(*event);
+            write_line(output, canonical);
+            event_digest.update(canonical);
+            event_digest.update("\n");
+            ++event_count;
+        }, [&](std::string_view chunk) {
+            native_digest.update(chunk);
+            if (previous && bytes < previous->size) {
+                prefix_digest.update(chunk.substr(0, static_cast<std::size_t>(
+                    std::min<std::uint64_t>(chunk.size(), previous->size - bytes))));
+            }
+            bytes += chunk.size();
+        });
     }
     catch (...) {
         check_cancel(context);
         if (!previous || (!previous->stale_breakdown && !refresh_temporal) || previous->size != current.size ||
             previous->modified_ms != current.modified_ms) throw;
-        parsed = previous->usage;
-        current.temporal_carrier = previous->temporal_carrier;
-        current.stale_breakdown = previous->stale_breakdown;
-        stable = true;
+        return previous;
     }
-    if (stable) {
-        if (!current.stale_breakdown && mode == "incremental" && previous && !previous->stale_breakdown &&
-            !refresh_temporal &&
-            previous->size == current.size && previous->modified_ms == current.modified_ms)
-        {
-            parsed = previous->usage;
-            current.temporal_carrier = previous->temporal_carrier;
+    output.close();
+    require_io(static_cast<bool>(output));
+    const auto after_identity = fork_session_identity(path);
+    if (!stable || !after_identity || addon::serialize_json_canonical(*after_identity) !=
+        addon::serialize_json_canonical(*identity))
+    {
+        if (previous) return previous;
+        throw Usage_ownership_unavailable();
+    }
+    current.retained_prefix_matches = previous && previous->fork_evidence && bytes >= previous->size &&
+        addon::to_hex(prefix_digest.finish()) == text(*previous->fork_evidence, "native_prefix_sha256_hex");
+    current.usage = wire.finish(cwd, previous && previous->usage ? &*previous->usage : nullptr);
+    if (previous && previous->usage && current.size == previous->size &&
+        current.modified_ms == previous->modified_ms)
+    {
+        auto observed = prefix.finish(previous->cwd);
+        if (observed) {
+            // This is the legacy scanner's numeric correlation, not an event
+            // identity proof. The correction operation decides its authority.
+            current.legacy_prefix_matches = same_counted_usage(*observed, *previous->usage);
         }
-        current.usage = std::move(parsed);
     }
-    else if (previous) current = *previous;
-    else return std::nullopt;
-    current.cwd = cwd;
-    if (current.usage) attribute(*current.usage, cwd);
+    current.fork_evidence = object({{"identity", *identity},
+        {"native_prefix_sha256_hex", Json(addon::to_hex(native_digest.finish()))},
+        {"event_sha256_hex", Json(addon::to_hex(event_digest.finish()))},
+        {"event_count", Json(event_count)}, {"fork_event_count", Json(boundary)},
+        {"forked", Json(forked)}, {"accounting", Json("raw")}});
+    if (!creator_session_id.empty()) current.fork_evidence->set("creator_session_id", Json(creator_session_id));
+    if (previous && ((previous->fork_evidence && text(*previous->fork_evidence, "accounting") == "retained") ||
+        (!previous->fork_evidence && previous->fork_carrier)))
+    {
+        current.fork_evidence->set("accounting", Json("retained"));
+        current.fork_evidence->set("unresolved_event_count", current.retained_prefix_matches && previous->fork_evidence ?
+            member(*previous->fork_evidence, "unresolved_event_count") : Json(event_count));
+    }
+    current.event_begin = static_cast<std::uint64_t>(events.tellp());
+    std::ifstream input(temporary, std::ios::binary);
+    require_io(static_cast<bool>(input));
+    std::string line;
+    while (read_line(input, line)) {
+        check_cancel(context);
+        write_line(events, line);
+    }
+    current.event_end = static_cast<std::uint64_t>(events.tellp());
     return current;
+}
+
+Json observation(std::string_view path, const File_record& file,
+    const std::optional<File_record>& previous = std::nullopt)
+{
+    auto row = object({{"file", encode_file(path, file)},
+        {"event_begin", Json(file.event_begin)}, {"event_end", Json(file.event_end)},
+        {"accepted_event_count", Json(file.accepted_event_count)},
+        {"legacy_prefix_matches", Json(file.legacy_prefix_matches)},
+        {"retained_prefix_matches", Json(file.retained_prefix_matches)},
+        {"previous", previous ? encode_file(path, *previous) : Json{}},
+        {"previous_event_begin", Json(previous ? previous->event_begin : 0)},
+        {"previous_event_end", Json(previous ? previous->event_end : 0)}});
+    if (file.usage && file.usage->temporal && file.usage->temporal->retained_from) {
+        const auto& retained = *file.usage->temporal->retained_from;
+        row.set("retained_from", object({{"snapshot_id", Json(retained.snapshot_id)},
+            {"manifest_sha256_hex", Json(retained.manifest_sha256_hex)}}));
+    }
+    return row;
+}
+
+File_record observed_file(const Json& row)
+{
+    auto file = decode_file(member(row, "file"));
+    file.event_begin = count(member(row, "event_begin"));
+    file.event_end = count(member(row, "event_end"));
+    file.accepted_event_count = count(member(row, "accepted_event_count"));
+    file.legacy_prefix_matches = member(row, "legacy_prefix_matches").as_boolean();
+    file.retained_prefix_matches = member(row, "retained_prefix_matches").as_boolean();
+    if (file.usage && file.usage->temporal && row.find("retained_from")) {
+        const auto& retained = member(row, "retained_from");
+        file.usage->temporal->retained_from = addon::Usage_temporal_retained_from{
+            text(retained, "snapshot_id"), text(retained, "manifest_sha256_hex")};
+    }
+    return file;
+}
+
+// A copied occurrence is suppressed only through its direct parent, whose
+// own chain must close at an original counted in this same candidate. Keeping
+// both status and the traversal stack on disk also bounds a deeply nested fork.
+void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::path& work,
+    Ownership_origins& origins, addon::Invocation_context& context)
+{
+    const auto status_path = work / "fork-status";
+    {
+        std::ofstream output(status_path, std::ios::binary);
+        require_io(static_cast<bool>(output));
+        const std::array<char, 8192> zeros{};
+        for (std::uint64_t remaining = files.size(); remaining;) {
+            check_cancel(context);
+            const auto bytes = std::min<std::uint64_t>(remaining, zeros.size());
+            output.write(zeros.data(), static_cast<std::streamsize>(bytes));
+            remaining -= bytes;
+        }
+        output.close();
+        require_io(static_cast<bool>(output));
+    }
+    std::fstream status(status_path, std::ios::binary | std::ios::in | std::ios::out);
+    std::fstream stack(work / "fork-stack", std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+    require_io(status && stack);
+    const auto get_status = [&](std::uint64_t index) {
+        status.clear();
+        status.seekg(static_cast<std::streamoff>(index));
+        const auto result = status.get();
+        require_io(result != EOF);
+        return result;
+    };
+    const auto set_status = [&](std::uint64_t index, char value) {
+        status.clear();
+        status.seekp(static_cast<std::streamoff>(index));
+        status.put(value);
+        require_io(static_cast<bool>(status));
+    };
+    const auto write_origins = [&](std::uint64_t index, bool proved) {
+        const auto row = files.at(index).second;
+        const auto file = observed_file(row);
+        if (!file.fork_evidence) return;
+        const auto& evidence = *file.fork_evidence;
+        const auto& identity = member(evidence, "identity");
+        const auto path = addon::path_from_utf8(text(member(row, "file"), "path"));
+        const bool retained = text(evidence, "accounting") == "retained";
+        const auto boundary = proved ? count(member(evidence, "fork_event_count")) : 0;
+        const auto unresolved = retained ? count(member(evidence, "unresolved_event_count")) :
+            (proved ? 0 : count(member(evidence, "event_count")));
+        std::optional<Event_stream> parent_events, parent_origins;
+        if (boundary) {
+            const auto parent_path = path.parent_path().parent_path().parent_path().parent_path() /
+                addon::path_from_utf8(text(identity, "parent_session_id")) /
+                "agents" / path.parent_path().filename() / "wire.jsonl";
+            const auto parent_index = files.find(path_key(parent_path));
+            require_io(parent_index.has_value());
+            const auto parent = observed_file(files.at(*parent_index).second);
+            parent_events.emplace(events, parent.event_begin, parent.event_end);
+            parent_origins.emplace(origins.read(*parent_index));
+            if (text(*parent.fork_evidence, "accounting") == "retained") {
+                std::string unused;
+                for (std::uint64_t skipped = 0;
+                    skipped < count(member(*parent.fork_evidence, "unresolved_event_count")); ++skipped)
+                {
+                    check_cancel(context);
+                    require_io(parent_events->next(unused) && parent_origins->next(unused));
+                }
+            }
+        }
+        origins.begin();
+        Event_stream input(events, file.event_begin, file.event_end);
+        std::string copied, original, owner;
+        std::uint64_t occurrence = 0;
+        while (input.next(copied)) {
+            check_cancel(context);
+            if (occurrence < boundary) {
+                do {
+                    check_cancel(context);
+                    require_io(parent_events->next(original) && parent_origins->next(owner));
+                } while (original != copied);
+                const auto parsed = parse(owner);
+                require_io(parsed && parsed->is_string());
+                origins.append(*parsed);
+            }
+            else origins.append(occurrence < unresolved ? Json{} : Json("kimi:" + text(identity, "session_id")));
+            ++occurrence;
+        }
+        origins.finish(index);
+    };
+    for (std::uint64_t first = 0; first < files.size(); ++first) {
+        check_cancel(context);
+        if (get_status(first) >= 2) continue;
+        if (!observed_file(files.at(first).second).fork_evidence) { set_status(first, 3); continue; }
+        std::uint64_t current = first, depth = 0;
+        bool proved = true;
+        for (;;) {
+            check_cancel(context);
+            const auto state = get_status(current);
+            if (state == 2) break;
+            if (state == 1 || state == 3) { proved = false; break; }
+            set_status(current, 1);
+            stack.clear();
+            stack.seekp(static_cast<std::streamoff>(depth++ * sizeof(current)));
+            stack.write(reinterpret_cast<const char*>(&current), sizeof(current));
+            require_io(static_cast<bool>(stack));
+            const auto row = files.at(current).second;
+            const auto file = observed_file(row);
+            if (!file.fork_evidence) { proved = false; break; }
+            const auto& evidence = *file.fork_evidence;
+            if (text(evidence, "accounting") == "retained") { proved = false; break; }
+            const auto& identity = member(evidence, "identity");
+            const auto parent_id = text(identity, "parent_session_id");
+            const bool forked = member(evidence, "forked").as_boolean();
+            if (text(evidence, "creator_session_id") == text(identity, "session_id")) {
+                if (forked) proved = false;
+                break;
+            }
+            if (parent_id.empty()) {
+                if (forked) proved = false;
+                break;
+            }
+            if (!forked) { proved = false; break; }
+            const auto path = addon::path_from_utf8(text(member(row, "file"), "path"));
+            const auto session = path.parent_path().parent_path().parent_path();
+            const auto parent_path = session.parent_path() / addon::path_from_utf8(parent_id) /
+                "agents" / path.parent_path().filename() / "wire.jsonl";
+            const auto parent_index = files.find(path_key(parent_path));
+            if (!parent_index) { proved = false; break; }
+            const auto parent = observed_file(files.at(*parent_index).second);
+            if (!parent.fork_evidence) { proved = false; break; }
+            Event_stream child_events(events, file.event_begin, file.event_end);
+            Event_stream parent_events(events, parent.event_begin, parent.event_end);
+            std::string copied, original;
+            const bool retained_parent = text(*parent.fork_evidence, "accounting") == "retained";
+            if (retained_parent) {
+                const auto unresolved = count(member(*parent.fork_evidence, "unresolved_event_count"));
+                for (std::uint64_t occurrence = 0; occurrence < unresolved; ++occurrence) {
+                    check_cancel(context);
+                    if (!parent_events.next(original)) throw std::runtime_error("usage_cache_record_invalid");
+                }
+            }
+            const auto boundary = count(member(evidence, "fork_event_count"));
+            for (std::uint64_t occurrence = 0; occurrence < boundary; ++occurrence) {
+                check_cancel(context);
+                if (!child_events.next(copied)) throw std::runtime_error("usage_cache_record_invalid");
+                bool found = false;
+                while (parent_events.next(original)) {
+                    check_cancel(context);
+                    if (original == copied) { found = true; break; }
+                }
+                if (!found) { proved = false; break; }
+            }
+            if (retained_parent) write_origins(*parent_index, false);
+            if (!proved || retained_parent) break;
+            current = *parent_index;
+        }
+        while (depth) {
+            check_cancel(context);
+            stack.clear();
+            stack.seekg(static_cast<std::streamoff>(--depth * sizeof(current)));
+            stack.read(reinterpret_cast<char*>(&current), sizeof(current));
+            require_io(static_cast<bool>(stack));
+            write_origins(current, proved);
+            set_status(current, proved ? 2 : 3);
+        }
+    }
+}
+
+void retain_owned_usage(File_record& file, const fs::path& path, const fs::path& events,
+    addon::Invocation_context& context)
+{
+    if (!file.fork_evidence || text(*file.fork_evidence, "accounting") == "owned") return;
+    Wire_usage owned(path.parent_path().parent_path().parent_path());
+    const auto boundary = count(member(*file.fork_evidence, "fork_event_count"));
+    Event_stream input(events, file.event_begin, file.event_end);
+    std::string line;
+    std::uint64_t occurrence = 0;
+    while (input.next(line)) {
+        check_cancel(context);
+        if (occurrence++ < boundary) continue;
+        const auto event = parse(line);
+        if (!event) throw std::runtime_error("usage_cache_record_invalid");
+        owned.consume_event(*event, context);
+    }
+    file.usage = owned.finish(file.cwd, file.usage ? &*file.usage : nullptr);
+    file.temporal_carrier.reset();
+    file.fork_evidence->set("accounting", Json("owned"));
 }
 
 void merge_usage(addon::Usage_record& accumulated, const addon::Usage_record& record,
@@ -1081,9 +1651,340 @@ struct Scan_result
     fs::path records;
 };
 
+std::optional<File_record> previous_file(const Json& row)
+{
+    if (member(row, "previous").is_null()) return std::nullopt;
+    auto previous = decode_file(member(row, "previous"));
+    previous.event_begin = count(member(row, "previous_event_begin"));
+    previous.event_end = count(member(row, "previous_event_end"));
+    return previous;
+}
+
+std::optional<addon::Usage_record> event_usage(const File_record& file, const fs::path& path,
+    const fs::path& events, std::uint64_t first, std::uint64_t last, addon::Invocation_context& context)
+{
+    Wire_usage usage(path.parent_path().parent_path().parent_path());
+    Event_stream input(events, file.event_begin, file.event_end);
+    std::string line;
+    std::uint64_t occurrence = 0;
+    while (occurrence < last && input.next(line)) {
+        check_cancel(context);
+        if (occurrence++ >= first) usage.consume(line, context);
+    }
+    return usage.finish(file.cwd);
+}
+
+void accumulate_usage(std::optional<addon::Usage_record>& target,
+    const std::optional<addon::Usage_record>& incoming, addon::Invocation_context& context,
+    std::uint64_t files = 1)
+{
+    if (!incoming) return;
+    if (!target) target = incoming;
+    else {
+        bool mixed = false;
+        merge_usage(*target, *incoming, mixed, context);
+        if (mixed) {
+            target->coverage_unit = addon::Usage_coverage_unit::SESSIONS;
+            for (auto* field : amounts(*target)) {
+                field->applicable = true;
+                field->value = 0;
+                field->coverage = addon::Usage_field_coverage{0, files, false, addon::Usage_support::UNKNOWN};
+            }
+        }
+    }
+}
+
+struct File_adjustment
+{
+    File_record ordinary;
+    File_record corrected;
+    std::optional<addon::Usage_record> removed;
+    std::optional<addon::Usage_record> growth;
+    bool raw_establishment = false;
+};
+
+std::string record_key(std::string_view id)
+{
+    return addon::to_hex(reinterpret_cast<const std::uint8_t*>(id.data()), id.size());
+}
+
+void validate_predecessor_path(const fs::path& path, const fs::path& storage)
+{
+    const auto relative = path.lexically_relative(storage);
+    if (!path.is_absolute() || path != path.lexically_normal() || relative.empty() ||
+        relative == "." || relative.is_absolute() || !fs::is_regular_file(cache_io_path(path)) ||
+        std::any_of(relative.begin(), relative.end(), [](const auto& part) { return part == ".."; }))
+    {
+        throw Usage_ownership_unavailable();
+    }
+    for (auto current = path; !current.empty(); current = current.parent_path()) {
+        std::error_code error;
+        if (fs::is_symlink(fs::symlink_status(cache_io_path(current), error)) || error) {
+            throw Usage_ownership_unavailable();
+        }
+#ifdef _WIN32
+        const auto attributes = GetFileAttributesW(cache_io_path(current).c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            throw Usage_ownership_unavailable();
+        }
+#endif
+        if (current == current.root_path()) break;
+    }
+}
+
+fs::path read_predecessors(const addon::Usage_owned_event_correction_request& request,
+    const fs::path& storage, const fs::path& work, addon::Invocation_context& context)
+{
+    const auto path = addon::path_from_utf8(request.predecessors.path);
+    validate_predecessor_path(path, storage);
+    Row_sorter rows(work, "host-predecessors", context);
+    addon::Sha256 digest;
+    File_record fingerprint;
+    bool header = false;
+    char last_byte = 0;
+    std::string previous_id;
+    const addon::Usage_owned_event_predecessor_header expected{"logonomic.cli.kimi",
+        request.scan.context.account_context, request.scan.context.profile_storage->root,
+        request.scan.cache_selection->accepted};
+    bool stable = false;
+    try {
+        stable = read_stable_lines(path, fingerprint, context, [&](std::string_view line) {
+            const auto value = parse(line);
+            if (!value) throw Usage_ownership_unavailable();
+            if (!header) {
+                const auto decoded = addon::decode_usage_owned_event_predecessor_header(*value, nullptr);
+                if (!decoded || addon::serialize_json_canonical(addon::encode_usage_owned_event_predecessor_header(*decoded)) !=
+                    addon::serialize_json_canonical(addon::encode_usage_owned_event_predecessor_header(expected)))
+                {
+                    throw Usage_ownership_unavailable();
+                }
+                header = true;
+                return;
+            }
+            const auto predecessor = addon::decode_usage_owned_event_predecessor(*value, nullptr);
+            if (!predecessor || predecessor->record.record_id <= previous_id) throw Usage_ownership_unavailable();
+            previous_id = predecessor->record.record_id;
+            rows.add(record_key(previous_id), *value);
+        }, [&](std::string_view bytes) {
+            digest.update(bytes);
+            if (!bytes.empty()) last_byte = bytes.back();
+        });
+    }
+    catch (const std::exception&) {
+        check_cancel(context);
+        throw Usage_ownership_unavailable();
+    }
+    validate_predecessor_path(path, storage);
+    if (!stable || !header || last_byte != '\n' ||
+        addon::to_hex(digest.finish()) != request.predecessors.sha256_hex) throw Usage_ownership_unavailable();
+    return rows.finish();
+}
+
+File_adjustment prepare_file_adjustment(const Json& row, bool proved, bool accepted_selection,
+    const fs::path& events, addon::Invocation_context& context)
+{
+    const auto path = addon::path_from_utf8(text(member(row, "file"), "path"));
+    const auto previous = previous_file(row);
+    File_adjustment result;
+    result.ordinary = observed_file(row);
+    auto& file = result.ordinary;
+    if (!previous || !previous->usage) {
+        if (!proved && file.usage) throw Usage_ownership_unavailable();
+        retain_owned_usage(file, path, events, context);
+        result.corrected = file;
+        result.growth = file.usage;
+        return result;
+    }
+    const auto previous_mode = previous->fork_evidence ? text(*previous->fork_evidence, "accounting") :
+        (previous->fork_carrier ? "retained" : "raw");
+    const bool bound = file.retained_prefix_matches ||
+        (accepted_selection && !previous->fork_carrier && file.legacy_prefix_matches);
+    const auto total = file.fork_evidence ? count(member(*file.fork_evidence, "event_count")) : 0;
+    if (bound && file.fork_evidence) {
+        result.growth = event_usage(file, path, events, file.accepted_event_count, total, context);
+    }
+    if (!proved || previous_mode == "retained") {
+        file.usage = previous->usage;
+        file.temporal_carrier = previous->temporal_carrier;
+        accumulate_usage(file.usage, result.growth, context);
+        if (file.fork_evidence) {
+            file.fork_evidence->set("accounting", Json("retained"));
+            const auto unresolved = bound ? (previous_mode == "retained" ?
+                count(member(*previous->fork_evidence, "unresolved_event_count")) : file.accepted_event_count) : total;
+            file.fork_evidence->set("unresolved_event_count", Json(unresolved));
+        }
+        result.corrected = file;
+        return result;
+    }
+    if (previous_mode == "owned") {
+        retain_owned_usage(file, path, events, context);
+        result.raw_establishment = !bound;
+        result.corrected = file;
+        return result;
+    }
+    result.corrected = file;
+    if (!bound) {
+        // A rewritten legacy prefix is an ordinary raw observation first.
+        // Acceptance binds that population; it does not claim old-event identity.
+        result.raw_establishment = true;
+        return result;
+    }
+    const auto boundary = count(member(*file.fork_evidence, "fork_event_count"));
+    const auto removed_count = std::min(boundary, file.accepted_event_count);
+    result.removed = event_usage(file, path, events, 0, removed_count, context);
+    if (result.removed) {
+        const auto& allocation = previous->usage->repository_usage;
+        if (!allocation || allocation->allocations.size() > 1 ||
+            (!allocation->allocations.empty() && allocation->unattributed_tokens))
+        {
+            result.removed.reset();
+            return result;
+        }
+        addon::Usage_repository removed_repository;
+        if (result.removed->total_tokens) {
+            if (allocation->allocations.empty()) removed_repository.unattributed_tokens = result.removed->total_tokens;
+            else removed_repository.allocations.push_back({allocation->allocations.front().repository_path,
+                result.removed->total_tokens});
+        }
+        result.removed->repository_usage = std::move(removed_repository);
+        retain_owned_usage(result.corrected, path, events, context);
+    }
+    return result;
+}
+
+fs::path prepare_corrected_sessions(Row_lookup& observed, Ownership_origins& origins,
+    const addon::Usage_owned_event_correction_request& request, const fs::path& storage,
+    const fs::path& work, const fs::path& events, const fs::path& records,
+    addon::Invocation_context& context)
+{
+    Row_lookup predecessors(read_predecessors(request, storage, work, context), work / "predecessor-offsets", context);
+    Row_sorter membership(work, "session-files", context), planned(work, "planned-files", context);
+    for (std::uint64_t index = 0; index < observed.size(); ++index) {
+        check_cancel(context);
+        const auto row = observed.at(index);
+        const auto file = observed_file(row.second);
+        if (file.usage) membership.add(record_key(file.usage->record_id), Json(index));
+        else planned.add(row.first, row.second);
+    }
+    Row_lookup members(membership.finish(), work / "member-offsets", context);
+    std::ifstream status(work / "fork-status", std::ios::binary);
+    std::ofstream output(records, std::ios::binary);
+    require_io(status && output);
+    const auto proved = [&](std::uint64_t index) {
+        status.clear();
+        status.seekg(static_cast<std::streamoff>(index));
+        const auto value = status.get();
+        require_io(value == 2 || value == 3);
+        return value == 2;
+    };
+    for (std::uint64_t first = 0; first < members.size();) {
+        check_cancel(context);
+        const auto key = members.at(first).first;
+        std::uint64_t last = first;
+        while (last < members.size() && members.at(last).first == key) ++last;
+        const auto predecessor_index = predecessors.find(key);
+        const auto predecessor = predecessor_index ?
+            addon::decode_usage_owned_event_predecessor(predecessors.at(*predecessor_index).second, nullptr) : std::nullopt;
+        std::optional<addon::Usage_record> accepted, removed, growth, ordinary;
+        std::set<std::string> original_ids;
+        std::size_t owner_bytes = 0;
+        std::uint64_t accepted_files = 0, ordinary_files = 0;
+        bool establishment = false;
+        for (auto position = first; position < last; ++position) {
+            check_cancel(context);
+            const auto index = count(members.at(position).second);
+            const auto row = observed.at(index).second;
+            const auto previous = previous_file(row);
+            auto plan = prepare_file_adjustment(row, proved(index), request.scan.cache_selection->accepted.has_value(), events, context);
+            if (!predecessor && !proved(index)) throw Usage_ownership_unavailable();
+            if (previous && previous->usage) accumulate_usage(accepted, previous->usage, context, ++accepted_files);
+            accumulate_usage(removed, plan.removed, context);
+            accumulate_usage(growth, plan.growth, context);
+            if (plan.ordinary.usage) accumulate_usage(ordinary, plan.ordinary.usage, context, ++ordinary_files);
+            establishment = establishment || plan.raw_establishment;
+            if (plan.removed) {
+                auto owners = origins.read(index);
+                std::string line;
+                for (std::uint64_t occurrence = 0; occurrence < plan.removed->input.coverage->total_records; ++occurrence) {
+                    check_cancel(context);
+                    require_io(owners.next(line));
+                    const auto owner = parse(line);
+                    if (!owner || !owner->is_string() || owner->as_string() == plan.removed->record_id) {
+                        throw Usage_ownership_unavailable();
+                    }
+                    if (original_ids.insert(owner->as_string()).second) owner_bytes += line.size() + 1;
+                    if (owner_bytes > addon::limits::k_max_exchange_payload_bytes) throw Usage_ownership_unavailable();
+                }
+            }
+        }
+        // An accepted host row without selected per-file accounting first uses
+        // ordinary raw admission to establish the observed counted population.
+        const bool establish_population = predecessor && !accepted;
+        establishment = establishment || establish_population;
+        bool correct = false;
+        std::optional<addon::Usage_record> candidate;
+        if (predecessor && !establishment) {
+            if (removed) {
+                candidate = adjust_owned_usage(*predecessor, accepted, removed, growth,
+                    std::vector<std::string>(original_ids.begin(), original_ids.end()));
+                if (candidate &&
+                    (candidate->source_path              != predecessor->record.source_path   ||
+                     candidate->model                    != predecessor->record.model         ||
+                     candidate->counter_field            != predecessor->record.counter_field ||
+                     candidate->source_counter_semantics != predecessor->record.source_counter_semantics))
+                {
+                    // Ordinary admission first binds evolving descriptive metadata;
+                    // removal authority remains tied to the accepted provenance.
+                    candidate.reset();
+                }
+                correct = candidate.has_value();
+            }
+            if (!candidate && growth) {
+                candidate = adjust_owned_usage(*predecessor, accepted, std::nullopt, growth, {});
+                if (!candidate) throw Usage_ownership_unavailable();
+            }
+            if (!candidate) candidate = retain_usage_predecessor(*predecessor);
+        }
+        else if (!establish_population) candidate = ordinary;
+        std::optional<addon::Usage_record> established, fresh;
+        std::uint64_t established_files = 0, fresh_files = 0;
+        for (auto position = first; position < last; ++position) {
+            check_cancel(context);
+            const auto index = count(members.at(position).second);
+            const auto row = observed.at(index);
+            auto plan = prepare_file_adjustment(row.second, proved(index),
+                request.scan.cache_selection->accepted.has_value(), events, context);
+            auto file = correct ? std::move(plan.corrected) : std::move(plan.ordinary);
+            if (establish_population) {
+                file = observed_file(row.second);
+                if (!proved(index) || !file.fork_evidence) throw Usage_ownership_unavailable();
+                file.fork_evidence->set("accounting", Json("raw"));
+                accumulate_usage(established, file.usage, context, ++established_files);
+            }
+            else if (!predecessor) {
+                retain_owned_usage(file, addon::path_from_utf8(text(member(row.second, "file"), "path")), events, context);
+                accumulate_usage(fresh, file.usage, context, ++fresh_files);
+            }
+            const auto path = text(member(row.second, "file"), "path");
+            planned.add(row.first, observation(path, file));
+        }
+        if (establish_population) candidate = std::move(established);
+        else if (!predecessor) candidate = std::move(fresh);
+        if (!candidate) throw Usage_ownership_unavailable();
+        const auto encoded = addon::serialize_json(spool_record(*candidate, true));
+        if (!parse(encoded)) throw Usage_ownership_unavailable();
+        write_line(output, encoded);
+        first = last;
+    }
+    output.close();
+    require_io(static_cast<bool>(output));
+    return planned.finish();
+}
+
 Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
     std::string_view mode, const std::optional<addon::Usage_native_file_cache>& seed,
-    addon::Invocation_context& context, const addon::Usage_cache_selection* selection)
+    addon::Invocation_context& context, const addon::Usage_cache_selection* selection,
+    const addon::Usage_owned_event_correction_request* correction = nullptr)
 {
     if (!fs::is_directory(profile)) throw std::runtime_error("usage_profile_unavailable");
     const auto sessions_directory = profile / "sessions";
@@ -1101,21 +2002,59 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
     const auto& work = workspace->path();
     Row_sorter cached(work, "cache", context), imported(work, "seed", context), live(work, "live", context);
     Row_sorter receipts(work, "receipts", context), sessions(work, "sessions", context);
+    Row_sorter observations(work, "observations", context);
+    const auto events_path = work / "events.jsonl";
+    std::ofstream events(events_path, std::ios::binary);
+    require_io(static_cast<bool>(events));
     bool seed_imported = false, cache_empty = true;
     check_cancel(context);
     context.report_progress(0, std::nullopt, "Reading usage cache");
     if (mode != "reset" && fs::exists(input_file)) {
         if (fs::is_symlink(fs::symlink_status(input_file))) throw std::runtime_error("usage_cache_unreadable");
+        std::optional<File_record> pending;
+        std::string pending_path;
+        std::uint64_t event_count = 0;
+        addon::Sha256 event_digest;
+        const auto finish_pending = [&] {
+            if (!pending) return;
+            pending->event_end = static_cast<std::uint64_t>(events.tellp());
+            if (pending->fork_evidence &&
+                (count(member(*pending->fork_evidence, "event_count")) != event_count ||
+                    text(*pending->fork_evidence, "event_sha256_hex") != addon::to_hex(event_digest.finish())))
+            {
+                throw Usage_ownership_unavailable();
+            }
+            if (pending->fork_evidence) {
+                pending->accepted_event_count = event_count;
+                pending->retained_prefix_matches = true;
+            }
+            cached.add(path_key(addon::path_from_utf8(pending_path)), observation(pending_path, *pending));
+            pending.reset();
+        };
         Cache_reader(input_file, context).read(owner, [&](const Json& row) {
             check_cancel(context);
-            decode_file(row);
-            cached.add(path_key(addon::path_from_utf8(text(row, "path"))), row);
+            finish_pending();
+            pending = decode_file(row);
+            pending_path = text(row, "path");
+            pending->event_begin = static_cast<std::uint64_t>(events.tellp());
+            event_count = 0;
+            event_digest = addon::Sha256{};
             cache_empty = false;
         }, [&](const Json& receipt) {
             if (!receipt.is_string() || !addon::sha256_from_hex(receipt.as_string())) throw std::runtime_error("usage_cache_invalid");
             receipts.add(receipt.as_string(), receipt);
             if (seed && receipt.as_string() == seed->sha256_hex) seed_imported = true;
+        }, [&](const Json& event) {
+            if (!pending || !pending->fork_carrier || !event.is_object() || text(event, "type") != "usage.record") {
+                throw std::runtime_error("usage_cache_invalid");
+            }
+            const auto canonical = addon::serialize_json_canonical(event);
+            write_line(events, canonical);
+            event_digest.update(canonical);
+            event_digest.update("\n");
+            ++event_count;
         });
+        finish_pending();
     }
     if (mode != "reset" && seed) {
         import_native_cache(imported, *seed, storage, owner, seed_imported, cache_empty, context);
@@ -1183,8 +2122,8 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         // observation may replace it. Duplicate cache rows remain invalid.
         if (cached_rows.available() && cached_rows.key() == key) {
             const auto row = cached_rows.value();
-            path = text(row, "path");
-            file = decode_file(row);
+            path = text(member(row, "file"), "path");
+            file = observed_file(row);
             if (file->usage && file->usage->temporal && selection && selection->accepted) {
                 file->usage->temporal->retained_from = addon::Usage_temporal_retained_from{
                     selection->accepted->snapshot_id, selection->accepted->manifest_sha256_hex};
@@ -1192,6 +2131,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             cached_rows.next();
             if (cached_rows.available() && cached_rows.key() == key) throw std::runtime_error("usage_cache_duplicate");
         }
+        const auto previous = file;
         if (live_rows.available() && live_rows.key() == key) {
             path = text(live_rows.value(), "path");
             live_rows.next();
@@ -1202,23 +2142,58 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
                 live_rows.next();
                 ++processed;
             }
-            file = refresh_file(addon::path_from_utf8(path), file, mode, selection != nullptr, workspaces, context);
+            file = refresh_file(addon::path_from_utf8(path), file, mode, selection != nullptr, workspaces,
+                work / "live-events.jsonl", events, context);
             context.report_progress(processed, total, {});
         }
         if (!file) continue;
-        if (file->usage) attribute(*file->usage, file->cwd);
-        write_line(cache_output, addon::serialize_json(encode_file(path, *file, selection != nullptr)));
-        if (file->usage) {
+        observations.add(key, observation(path, *file, previous));
+    }
+    events.close();
+    require_io(static_cast<bool>(events));
+    Row_lookup observed(observations.finish(), work / "observation-offsets", context);
+    Ownership_origins origins(work, observed.size(), context);
+    validate_fork_chains(observed, events_path, work, origins, context);
+    const auto records = work / "records.jsonl";
+    std::unique_ptr<Row_lookup> corrected_files;
+    if (correction) {
+        corrected_files = std::make_unique<Row_lookup>(prepare_corrected_sessions(observed, origins,
+            *correction, storage, work, events_path, records, context), work / "planned-offsets", context);
+    }
+    auto& final_files = corrected_files ? *corrected_files : observed;
+    std::ifstream chain_status(work / "fork-status", std::ios::binary);
+    require_io(static_cast<bool>(chain_status));
+    for (std::uint64_t index = 0; index < final_files.size(); ++index) {
+        check_cancel(context);
+        const auto status = chain_status.get();
+        require_io(status == 2 || status == 3);
+        const auto row = final_files.at(index).second;
+        const auto path = text(member(row, "file"), "path");
+        auto file = observed_file(row);
+        if (!correction) file = prepare_file_adjustment(row, status == 2, false, events_path, context).ordinary;
+        write_line(cache_output, addon::serialize_json(encode_file(path, file, selection != nullptr)));
+        Event_stream retained(events_path, file.event_begin, file.event_end);
+        std::string event;
+        while (retained.next(event)) {
+            check_cancel(context);
+            if (event.size() + 15 > addon::Json_parse_limits{}.max_bytes) throw Usage_ownership_unavailable();
+            write_line(cache_output, "{\"fork_event\":" + event + '}');
+        }
+        if (file.usage && !correction) {
             // Hex-encoded UTF-8 preserves the record-ID ordering without
             // allowing an ID to introduce the spool's tab delimiter.
-            const auto& id = file->usage->record_id;
+            const auto& id = file.usage->record_id;
             const auto sort_key = addon::to_hex(reinterpret_cast<const std::uint8_t*>(id.data()), id.size());
-            sessions.add(sort_key, spool_record(*file->usage, selection != nullptr));
+            sessions.add(sort_key, spool_record(*file.usage, selection != nullptr));
         }
     }
     cache_output.close();
     require_io(static_cast<bool>(cache_output));
-    const auto records = work / "records.jsonl";
+    if (correction) {
+        check_cancel(context);
+        store_cache(destination, staged_cache);
+        return {std::move(workspace), records};
+    }
     std::ofstream output(records, std::ios::binary);
     require_io(static_cast<bool>(output));
     Row_stream session_rows(sessions.finish());
@@ -1282,8 +2257,12 @@ void handle_usage(addon::Invocation_context& context)
 {
     if (context.request().operation != "scan") { context.reject_unknown_operation(); return; }
     addon::Contract_failure failure;
-    const auto version = context.request().capability.version;
-    const auto input = addon::decode_usage_scan_request(context.request().payload, &failure, version);
+    const bool owned_operation = context.request().capability.capability_id == addon::k_usage_owned_event_correction_capability_id;
+    const auto version = owned_operation ? std::uint16_t{3} : context.request().capability.version;
+    const auto correction = owned_operation ?
+        addon::decode_usage_owned_event_correction_request(context.request().payload, &failure) : std::nullopt;
+    const auto input = owned_operation ? (correction ? std::optional<addon::Usage_scan_request>(correction->scan) : std::nullopt) :
+        addon::decode_usage_scan_request(context.request().payload, &failure, version);
     if (!input) { context.fail(addon::Result_status::FAILED, failure.reason_code); return; }
     if (!input->context.profile_storage) throw std::runtime_error("usage_storage_unavailable");
     const auto profile = profile_for_context(input->context);
@@ -1294,8 +2273,15 @@ void handle_usage(addon::Invocation_context& context)
         auto identity = *input;
         identity.snapshot_id.reset();
         identity.cursor.reset();
-        owner = addon::to_hex(addon::Sha256::digest(
-            addon::serialize_json_canonical(addon::encode_usage_scan_request(identity, 3))));
+        auto binding = addon::encode_usage_scan_request(identity, 3);
+        if (correction) {
+            auto request = *correction;
+            request.scan = identity;
+            binding = object({{"capability", Json(addon::k_usage_owned_event_correction_capability_id)},
+                {"operation", Json(context.request().operation)},
+                {"request", addon::encode_usage_owned_event_correction_request(request)}});
+        }
+        owner = addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(binding)));
         const auto& selection = *input->cache_selection;
         if (!addon::validate_usage_cache_root(selection.candidate_root, path_string(storage), &failure)) {
             throw std::runtime_error(failure.reason_code);
@@ -1345,7 +2331,8 @@ void handle_usage(addon::Invocation_context& context)
                     *selection.accepted, path_string(storage), input->context.account_context,
                     [&context] { return context.cancel_requested(); }, &failure);
                 if (!manifest) throw std::runtime_error(failure.reason_code);
-                if (manifest->format != "kimi-wire-cache@1" || manifest->files.size() != 1 ||
+                if ((manifest->format != "kimi-wire-cache@1" && manifest->format != "kimi-wire-cache@2") ||
+                    manifest->files.size() != 1 ||
                     manifest->files.front().path != "files.json")
                 {
                     throw std::runtime_error("usage_cache_format_unsupported");
@@ -1353,7 +2340,7 @@ void handle_usage(addon::Invocation_context& context)
             }
         }
         auto scan = scan_to_disk(profile, storage, input->mode, input->native_file_cache, context,
-            input->cache_selection ? &*input->cache_selection : nullptr);
+            input->cache_selection ? &*input->cache_selection : nullptr, correction ? &*correction : nullptr);
         snapshot.workspace = std::move(scan.workspace);
         snapshot.records = std::move(scan.records);
         snapshot.bytes = fs::file_size(snapshot.records);
@@ -1365,7 +2352,7 @@ void handle_usage(addon::Invocation_context& context)
         if (version == 3) {
             snapshot.cache_candidate = addon::seal_usage_cache_candidate(
                 input->cache_selection->candidate_root, path_string(storage), input->context.account_context,
-                snapshot_id, "kimi-wire-cache@1", [&context] { return context.cancel_requested(); }, &failure);
+                snapshot_id, "kimi-wire-cache@2", [&context] { return context.cancel_requested(); }, &failure);
             if (!snapshot.cache_candidate) throw std::runtime_error(failure.reason_code);
         }
         s_snapshots.emplace(snapshot_id, std::move(snapshot));
@@ -1414,18 +2401,32 @@ void handle_usage(addon::Invocation_context& context)
         const auto value = parse(line);
         auto record = value ? spool_record(*value) : std::nullopt;
         if (!record) throw std::runtime_error("usage_result_unrepresentable");
+        const auto* envelope = record->capabilities.find(addon::k_usage_owned_event_correction_capability_id);
+        const bool retaining = correction && envelope && text(*envelope, "disposition") == "retain";
+        const bool correcting = correction && envelope && text(*envelope, "disposition") == "correct";
+        const bool opaque_temporal = !record->temporal && record->capabilities.find(addon::k_usage_temporal_capability_id);
+        if (!correction) record->capabilities.erase(addon::k_usage_owned_event_correction_capability_id);
         // A surviving wire log can be only a subset of a session's events.
-        if (version == 3) {
+        if (version == 3 && !retaining) {
             record->aggregate_evidence = "partial";
-            auto evidence = record->temporal.value_or(unavailable_temporal(*record, "missing-evidence"));
-            evidence.parent = {record->record_id, record->total_tokens, snapshot_id, snapshot.scope.source_account_key};
-            publish_temporal(*record, std::move(evidence));
+            if (!opaque_temporal) {
+                auto evidence = record->temporal.value_or(unavailable_temporal(*record, "missing-evidence"));
+                evidence.parent = {record->record_id, record->total_tokens, snapshot_id, snapshot.scope.source_account_key};
+                if (correcting) {
+                    record->temporal = std::move(evidence);
+                    const auto encoded = addon::encode_usage_record(*record, 3);
+                    if (!addon::decode_usage_record(encoded, nullptr, 3) ||
+                        !addon::parse_json(addon::serialize_json(encoded), {}, nullptr)) throw Usage_ownership_unavailable();
+                }
+                else publish_temporal(*record, std::move(evidence));
+            }
         }
-        else record->temporal.reset();
+        else if (version != 3) record->temporal.reset();
         const auto next = static_cast<std::uint64_t>(records.tellg());
         page.next_cursor = std::to_string(next);
         if (!append(*record)) {
             if (!page.records.empty()) break;
+            if (correcting || retaining) throw Usage_ownership_unavailable();
             if (record->temporal) {
                 auto evidence = *record->temporal;
                 evidence.portions.clear();

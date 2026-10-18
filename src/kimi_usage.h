@@ -5,10 +5,17 @@
 #include <logonomic_cli_addon/usage_session.h>
 
 #include <filesystem>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
 namespace kimi {
+
+class Usage_ownership_unavailable final : public std::runtime_error
+{
+public:
+    Usage_ownership_unavailable() : std::runtime_error("usage_ownership_unavailable") {}
+};
 
 // In-process collector used by package tests. The adapter streams disk-backed
 // snapshots instead of retaining this vector across the history.

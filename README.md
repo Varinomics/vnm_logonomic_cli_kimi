@@ -43,8 +43,10 @@ records the upstream source, inherited fill variants and viewport normalization.
 Usage scans read each Agent wire log one line at a time, so only a single line
 is bounded, by the SDK parser's document limit. An incremental scan reuses a
 log's cached usage while its size and modification time are unchanged; equal
-values are taken to mean unchanged content, the check the pre-cutover scanner
-used, because wire logs are append-only and repair rereads every log.
+values retain the existing fingerprint contract. Repair rereads surviving logs.
+Native rewrites must reproduce an accepted byte prefix before that prefix can
+authorize a numeric correction; a changed legacy file without retained prefix
+proof first establishes its current raw accounting through ordinary acceptance.
 
 On `usage-scan@3`, `usage-temporal@1` preserves positive increments from native
 integer epoch-millisecond timestamps before Agent files are reduced to a
@@ -55,7 +57,31 @@ distribute earlier usage. Optional proof is bounded independently of accounting
 history and stored in a versioned per-file carrier whose digest binds the
 original accounting row. Missing, unknown or damaged carriers leave cached
 accounting usable, including history whose original logs have been deleted.
-The ordinary `usage-scan@2` output and mutable cache retain their existing format.
+The ordinary `usage-scan@2` wire grammar is unchanged.
+
+Fork accounting follows native session ancestry and ordered usage occurrences
+through full and turn-specific copies. Only a proved inherited prefix is
+excluded; original reverted spend, unrelated identical occurrences, and the
+fork's own later usage remain counted. The cache retains the event sequence and
+its integrity binding so an accepted ancestor can still prove ownership after
+its native files disappear. A fork with no own spend remains an explicit zero
+record.
+
+`usage-owned-event-correction@1` repairs previously accepted copied usage against
+the host's exact predecessor and selected cache. It removes only proved copies
+whose repository and temporal components can be mapped, then admits ordinary
+growth. Each accepted file keeps its raw, owned, or unresolved accounting mode
+on later scans; rejected and cancelled candidates cannot change that mode.
+An unchanged legacy fingerprint additionally requires exact reproduced numeric,
+category, coverage, and recognized temporal accounting before correction.
+
+Missing or ambiguous ancestry cannot establish ownership. Existing unresolved
+rows retain accepted accounting and can admit proved later append growth; a
+fresh unresolved billable row makes the scan unavailable. Legacy markerless
+agents in forked sessions remain subject to that limit. An optional first native
+metadata `creator_session_id` matching the verified containing session can prove
+a newly created wire; this package does not install a native producer that emits
+that witness.
 
 Credentials and session history stay in the selected Kimi profile. Hooks invoke
 the package helper through the host-provided helpers directory.
