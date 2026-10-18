@@ -147,6 +147,11 @@ add_executable(kimi_contract_tests tests/kimi_contract_tests.cpp)
 target_link_libraries(kimi_contract_tests PRIVATE kimi_provider)
 kimi_target(kimi_contract_tests)
 add_test(NAME kimi_contract_tests COMMAND kimi_contract_tests)
+add_executable(kimi_wire_cancellation_tests tests/kimi_wire_cancellation_tests.cpp)
+target_link_libraries(kimi_wire_cancellation_tests PRIVATE kimi_provider)
+kimi_target(kimi_wire_cancellation_tests)
+add_test(NAME kimi_wire_cancellation_tests COMMAND kimi_wire_cancellation_tests)
+set_tests_properties(kimi_wire_cancellation_tests PROPERTIES TIMEOUT 30)
 add_executable(kimi_quota_direct_tests tests/kimi_quota_direct_tests.cpp)
 target_link_libraries(kimi_quota_direct_tests PRIVATE kimi_provider)
 kimi_target(kimi_quota_direct_tests)
@@ -193,7 +198,8 @@ if(WIN32)
     # These executables run from the build tree, outside the assembled package.
     # Clean copied-package qualification supplies its own runtime environment.
     set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests
-        kimi_usage_tests ${KIMI_USAGE_CACHE_PHASE_TESTS} kimi_acp_causal_tests kimi_quota_direct_tests PROPERTIES
+        kimi_usage_tests ${KIMI_USAGE_CACHE_PHASE_TESTS} kimi_acp_causal_tests kimi_quota_direct_tests
+        kimi_wire_cancellation_tests PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
 

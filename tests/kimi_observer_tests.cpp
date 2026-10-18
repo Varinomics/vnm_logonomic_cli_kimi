@@ -261,6 +261,46 @@ void native_wire_reconciliation_preserves_records_and_final_drain()
         "terminal retirement releases observation ownership");
 }
 
+void native_cancellation_is_published_before_session_end()
+{
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    const auto path = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+    fs::create_directories(path.parent_path());
+    write_bytes(path,
+        R"({"type":"context.append_loop_event","event":{"type":"tool.call","name":"Agent","toolCallId":"background-call","args":{"run_in_background":true}}})" "\n"
+        R"({"type":"subagent.spawned","subagentId":"worker","parentToolCallId":"background-call","runInBackground":true,"taskId":"background-task"})" "\n"
+        R"({"type":"subagent.started","subagentId":"worker"})" "\n"
+        R"({"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"background-call","result":{"output":"task_id: background-task\nstatus: running\n\n"}}})" "\n");
+    const auto service = std::make_shared<observation::Service>();
+    observation::Configuration configuration;
+    configuration.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, configuration);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve native cancellation owner");
+    observer.classify(start_request(workspace, nonce));
+    Observe_window window(observer, workspace, nonce);
+    require(wait_until([&] {
+        const auto page = poll(observer, nonce);
+        return page && page->observations.size() == 1;
+    }), "native background Agent start must reach the observation queue");
+
+    // The native producer makes cancellation durable while the parent session
+    // continues. Publication must therefore happen before SessionEnd drains it.
+    write_bytes(path, R"({"type":"subagent.cancelled","subagentId":"worker"})" "\n", true);
+    require(wait_until([&] {
+        const auto page = poll(observer, nonce);
+        return page && page->observations.size() == 2;
+    }), "native cancellation must reach the observation queue without SessionEnd");
+    const auto page = poll(observer, nonce);
+    require(page && page->observations.back().agent_id == "background-call" &&
+        page->observations.back().provider_event_name == "subagent.cancelled" &&
+        page->observations.back().subagent_transition == addon::Subagent_transition::STOPPED,
+        "native wire cancellation must stop its correlated public agent");
+    require(retire(observer, nonce), "release native cancellation ownership");
+    window.stop();
+}
+
 void missing_ancestors_and_parent_replacement_reconcile_without_polling()
 {
     namespace observation = vnm::filesystem_observation;
@@ -608,6 +648,7 @@ int main(int argc, char** argv)
         final_page_requires_exact_acknowledgment();
         in_flight_watch_stops_on_retirement();
         native_wire_reconciliation_preserves_records_and_final_drain();
+        native_cancellation_is_published_before_session_end();
         missing_ancestors_and_parent_replacement_reconcile_without_polling();
         final_append_during_acquisition_keeps_its_own_capture();
         session_end_retains_failed_drain_and_resolves_new_wire();

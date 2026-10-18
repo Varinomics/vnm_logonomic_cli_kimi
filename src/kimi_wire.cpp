@@ -156,14 +156,19 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
     }
     if (type == "context.append_message") {
         const auto& origin = member(member(record, "message"), "origin");
+        const auto kind = text(origin, "kind");
         const auto status = text(origin, "status");
-        if (text(origin, "kind") != "background_task" ||
-            (status != "completed" && status != "failed" && status != "cancelled")) return {};
+        if ((kind != "background_task" && kind != "task") ||
+            (status != "completed" && status != "failed" && status != "cancelled" &&
+             status != "killed" && status != "timed_out" && status != "lost"))
+        {
+            return {};
+        }
         const auto task = m_background.find(text(origin, "taskId"));
         if (task == m_background.end()) return {};
         const auto id = task->second;
         m_background.erase(task);
-        return stop_call(id) ? std::vector{observation("background_task." + status, id, false, true)} : std::vector<addon::Lifecycle_observation>{};
+        return stop_call(id) ? std::vector{observation(kind + "." + status, id, false, true)} : std::vector<addon::Lifecycle_observation>{};
     }
     const auto agent = text(record, "subagentId");
     if (!valid_id(agent)) return {};
@@ -251,7 +256,11 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         m_running.insert(run.public_id);
         return {observation(type, run.public_id, true, false)};
     }
-    if (type != "subagent.suspended" && type != "subagent.completed" && type != "subagent.failed") return {};
+    if (type != "subagent.suspended" && type != "subagent.completed" &&
+        type != "subagent.failed" && type != "subagent.cancelled")
+    {
+        return {};
+    }
     const auto found = m_lineages.find(agent);
     if (found == m_lineages.end()) return {};
     const auto index = selected(found->second);
