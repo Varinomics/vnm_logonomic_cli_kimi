@@ -344,7 +344,7 @@ std::string initial_acp_state(const addon::Delegated_prepare_request& request)
 
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
-    const auto parsed = parse(inspection.protocol_state);
+    const auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
     if (!parsed || !exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
             "result_base64", "task_tools", "launcher_mode", "servers", "status_command", "request_id", "status_base64"}) ||
         !member(*parsed, "stage").is_string() || !bounded_string(member(*parsed, "session_id"), 512, true) ||

@@ -193,6 +193,12 @@ foreach(phase IN ITEMS cache temporal refresh capacity owned)
     list(APPEND KIMI_USAGE_CACHE_PHASE_TESTS ${test_name})
 endforeach()
 
+add_executable(kimi_continuation_tests tests/kimi_continuation_tests.cpp)
+target_link_libraries(kimi_continuation_tests PRIVATE kimi_provider)
+kimi_target(kimi_continuation_tests)
+add_test(NAME kimi_continuation_tests COMMAND kimi_continuation_tests)
+set_tests_properties(kimi_continuation_tests PROPERTIES TIMEOUT 120 LABELS "addon;protocol;continuation")
+
 add_executable(kimi_acp_causal_tests tests/kimi_acp_causal_tests.cpp)
 target_link_libraries(kimi_acp_causal_tests PRIVATE kimi_provider)
 kimi_target(kimi_acp_causal_tests)
@@ -203,6 +209,7 @@ if(WIN32)
     # Clean copied-package qualification supplies its own runtime environment.
     set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests
         kimi_usage_tests kimi_usage_correction_tests ${KIMI_USAGE_CACHE_PHASE_TESTS} kimi_acp_causal_tests kimi_quota_direct_tests
+        kimi_continuation_tests
         kimi_wire_cancellation_tests PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()
