@@ -28,7 +28,6 @@ using logonomic::cli_addon::native_image;
 using logonomic::cli_addon::probe;
 
 std::string path_string(const std::filesystem::path& path);
-std::vector<std::string> literal_argv(std::string_view script);
 bool is_kimi_program(std::string_view value);
 bool is_kimi_invocation(const std::vector<std::string>& argv);
 bool recognize_launcher(std::string_view script);

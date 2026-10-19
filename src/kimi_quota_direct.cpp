@@ -10,6 +10,8 @@
 #include <cmath>
 #include <stdexcept>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace kimi {
 namespace {
 
@@ -189,9 +191,9 @@ std::optional<Quota_route> direct_quota_route(std::string_view config, const Env
 
 std::optional<std::string> current_quota_access_token(const Json& record, double now, double remaining_seconds)
 {
-    const auto& token    = member(record, "access_token");
-    const auto& expiry   = member(record, "expires_at");
-    const auto& lifetime = member(record, "expires_in");
+    const auto& token    = json_util::member(record, "access_token");
+    const auto& expiry   = json_util::member(record, "expires_at");
+    const auto& lifetime = json_util::member(record, "expires_in");
     if (!token.is_string() || token.as_string().empty() || !expiry.is_number() || !lifetime.is_number() ||
         !std::isfinite(expiry.as_number()) || !std::isfinite(lifetime.as_number()) ||
         !std::all_of(token.as_string().begin(), token.as_string().end(),
@@ -218,24 +220,24 @@ std::optional<Json> normalize_managed_quota(const Json& response)
     // parseManagedUsagePayload also maps absent/non-record usages to empty.
     auto usages = Json::object();
     for (const auto& [source, target] : {std::pair{"limit_5h", "limit5h"}, {"limit_7d", "limit7d"}}) {
-        const auto* row = member(response, "usages").find(source);
+        const auto* row = json_util::member(response, "usages").find(source);
         if (!row) {
             continue;
         }
-        const auto used = ratio(member(*row, "used_ratio"));
+        const auto used = ratio(json_util::member(*row, "used_ratio"));
         if (!used || *used < 0) {
             return std::nullopt;
         }
-        auto window = object({{"usedRatio", Json(*used)}});
-        const auto& reset = member(*row, "reset_time");
+        auto window = json_util::object({{"usedRatio", Json(*used)}});
+        const auto& reset = json_util::member(*row, "reset_time");
         if (reset.is_string() && !reset.as_string().empty()) {
             window.set("resetAt", reset);
         }
         usages.set(target, std::move(window));
     }
     try {
-        return normalize_quota(object({{"code", Json(0)}, {"data", object({
-            {"kind", Json("ok")}, {"quota", object({{"usages", std::move(usages)}})}})}}));
+        return normalize_quota(json_util::object({{"code", Json(0)}, {"data", json_util::object({
+            {"kind", Json("ok")}, {"quota", json_util::object({{"usages", std::move(usages)}})}})}}));
     }
     catch (const std::runtime_error&) {
         return std::nullopt;

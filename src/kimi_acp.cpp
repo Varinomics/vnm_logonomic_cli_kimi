@@ -1,6 +1,7 @@
 #include "kimi_acp.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
+#include <logonomic_cli_addon/launcher_utilities.h>
 
 #include <algorithm>
 #include <chrono>
@@ -12,6 +13,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace json_util = logonomic::cli_addon::json;
 
 namespace kimi {
 namespace {
@@ -33,15 +36,15 @@ enum class Task_server_status { ADMITTED, PENDING, UNAVAILABLE };
 
 std::string rpc(int id, const char* method, Json params)
 {
-    return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", Json(id)},
+    return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", Json(id)},
         {"method", Json(method)}, {"params", std::move(params)}})) + '\n';
 }
 
 std::string prompt_request(int id, const Json& session, std::string prompt)
 {
     auto content = Json::array();
-    content.push_back(object({{"type", Json("text")}, {"text", Json(std::move(prompt))}}));
-    return rpc(id, "session/prompt", object({{"sessionId", session}, {"prompt", std::move(content)}}));
+    content.push_back(json_util::object({{"type", Json("text")}, {"text", Json(std::move(prompt))}}));
+    return rpc(id, "session/prompt", json_util::object({{"sessionId", session}, {"prompt", std::move(content)}}));
 }
 
 std::string task_server_name(const addon::Delegated_prepare_request& request, const addon::Delegated_task_server& server)
@@ -66,7 +69,7 @@ Task_server_status task_server_status(std::string_view report, const Json& serve
     }
     bool pending = false;
     for (const auto& server : servers.as_array()) {
-        const auto prefix = "- " + text(server, "name") + " (";
+        const auto prefix = "- " + json_util::text(server, "name") + " (";
         const std::string_view* line = nullptr;
         for (const auto& candidate : lines) {
             if (!candidate.starts_with(prefix)) continue;
@@ -74,7 +77,7 @@ Task_server_status task_server_status(std::string_view report, const Json& serve
             line = &candidate;
         }
         const auto head = prefix + "stdio): ";
-        const auto actions = static_cast<std::uint64_t>(member(server, "actions").as_number());
+        const auto actions = static_cast<std::uint64_t>(json_util::member(server, "actions").as_number());
         if (line && *line == head + "connected, " + std::to_string(actions) + " tools") continue;
         if (line && *line == head + "pending, 0 tools") {
             pending = true;
@@ -95,11 +98,11 @@ addon::Structured_inspect_result failure(const char* reason)
 
 bool mode_matches(const Json& value, std::string_view mode)
 {
-    const auto& options = member(value, "configOptions");
+    const auto& options = json_util::member(value, "configOptions");
     if (!options.is_array()) return false;
     for (const auto& option : options.as_array()) {
         if (!option.is_object()) return false;
-        if (text(option, "id") == "mode" && text(option, "currentValue") == mode) return true;
+        if (json_util::text(option, "id") == "mode" && json_util::text(option, "currentValue") == mode) return true;
     }
     return false;
 }
@@ -108,25 +111,25 @@ bool mode_matches(const Json& value, std::string_view mode)
 // approval or an option that also changes the launcher's permission mode.
 std::string permission_reply(const Json& request, const Json& state)
 {
-    const auto& params = member(request, "params");
-    const auto& id = member(request, "id");
-    const auto& options = member(params, "options");
-    if (!exact_keys(request, {"jsonrpc", "id", "method", "params"}) || text(request, "jsonrpc") != "2.0" ||
-        !(id.is_integer() || bounded_string(id, 512)) || text(params, "sessionId") != text(state, "session_id") ||
-        !bounded_string(member(member(params, "toolCall"), "toolCallId"), 512) || !options.is_array()) return {};
-    const auto name = text(member(params, "toolCall"), "title");
-    const auto& tools = member(state, "task_tools").as_array();
+    const auto& params = json_util::member(request, "params");
+    const auto& id = json_util::member(request, "id");
+    const auto& options = json_util::member(params, "options");
+    if (!json_util::exact_keys(request, {"jsonrpc", "id", "method", "params"}) || json_util::text(request, "jsonrpc") != "2.0" ||
+        !(id.is_integer() || json_util::bounded_string(id, 512)) || json_util::text(params, "sessionId") != json_util::text(state, "session_id") ||
+        !json_util::bounded_string(json_util::member(json_util::member(params, "toolCall"), "toolCallId"), 512) || !options.is_array()) return {};
+    const auto name = json_util::text(json_util::member(params, "toolCall"), "title");
+    const auto& tools = json_util::member(state, "task_tools").as_array();
     const bool allowed = std::any_of(tools.begin(), tools.end(), [&](const Json& tool) { return tool.as_string() == name; });
     const std::string chosen = allowed ? "approve_once" : "reject";
     int matches = 0;
     for (const auto& option : options.as_array()) {
-        if (text(option, "optionId") != chosen) continue;
-        if (text(option, "kind") != (allowed ? "allow_once" : "reject_once")) return {};
+        if (json_util::text(option, "optionId") != chosen) continue;
+        if (json_util::text(option, "kind") != (allowed ? "allow_once" : "reject_once")) return {};
         ++matches;
     }
     if (matches != 1) return {};
-    return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", id},
-        {"result", object({{"outcome", object({{"outcome", Json("selected")}, {"optionId", Json(chosen)}})}})}})) + '\n';
+    return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", id},
+        {"result", json_util::object({{"outcome", json_util::object({{"outcome", Json("selected")}, {"optionId", Json(chosen)}})}})}})) + '\n';
 }
 
 bool nonnegative_integer(const Json& value)
@@ -137,54 +140,54 @@ bool nonnegative_integer(const Json& value)
 
 bool valid_text(const Json& value)
 {
-    const auto& content = member(value, "content");
-    return exact_keys(value, {"sessionUpdate", "content"}) &&
-        exact_keys(content, {"type", "text"}) && text(content, "type") == "text" &&
-        member(content, "text").is_string();
+    const auto& content = json_util::member(value, "content");
+    return json_util::exact_keys(value, {"sessionUpdate", "content"}) &&
+        json_util::exact_keys(content, {"type", "text"}) && json_util::text(content, "type") == "text" &&
+        json_util::member(content, "text").is_string();
 }
 
 bool valid_commands(const Json& value)
 {
-    const auto& commands = member(value, "availableCommands");
-    if (!exact_keys(value, {"sessionUpdate", "availableCommands"}) || !commands.is_array() ||
+    const auto& commands = json_util::member(value, "availableCommands");
+    if (!json_util::exact_keys(value, {"sessionUpdate", "availableCommands"}) || !commands.is_array() ||
         commands.as_array().size() > 1024) return false;
     for (const auto& command : commands.as_array()) {
-        if (!only_keys(command, {"name", "description", "input"}) ||
-            !bounded_string(member(command, "name"), 512) ||
-            !bounded_string(member(command, "description"), 4096) ||
-            (command.find("input") && !member(command, "input").is_object())) return false;
+        if (!json_util::only_keys(command, {"name", "description", "input"}) ||
+            !json_util::bounded_string(json_util::member(command, "name"), 512) ||
+            !json_util::bounded_string(json_util::member(command, "description"), 4096) ||
+            (command.find("input") && !json_util::member(command, "input").is_object())) return false;
     }
     return true;
 }
 
 bool valid_tool(const Json& value)
 {
-    if (!only_keys(value, {"sessionUpdate", "toolCallId", "title", "kind", "status",
+    if (!json_util::only_keys(value, {"sessionUpdate", "toolCallId", "title", "kind", "status",
             "content", "locations", "rawInput", "rawOutput"}) ||
-        !bounded_string(member(value, "toolCallId"), 512)) return false;
-    if (text(value, "sessionUpdate") == "tool_call" &&
-        (!bounded_string(member(value, "title"), 4096) ||
-         !bounded_string(member(value, "status"), 64))) return false;
+        !json_util::bounded_string(json_util::member(value, "toolCallId"), 512)) return false;
+    if (json_util::text(value, "sessionUpdate") == "tool_call" &&
+        (!json_util::bounded_string(json_util::member(value, "title"), 4096) ||
+         !json_util::bounded_string(json_util::member(value, "status"), 64))) return false;
     for (const auto key : {"kind", "status"}) {
-        if (value.find(key) && !bounded_string(member(value, key), 64)) return false;
+        if (value.find(key) && !json_util::bounded_string(json_util::member(value, key), 64)) return false;
     }
-    if (value.find("title") && !bounded_string(member(value, "title"), 4096, true)) return false;
+    if (value.find("title") && !json_util::bounded_string(json_util::member(value, "title"), 4096, true)) return false;
     for (const auto key : {"content", "locations"}) {
-        if (value.find(key) && !member(value, key).is_array()) return false;
+        if (value.find(key) && !json_util::member(value, key).is_array()) return false;
     }
     return true;
 }
 
 bool valid_plan(const Json& value)
 {
-    const auto& entries = member(value, "entries");
-    if (!exact_keys(value, {"sessionUpdate", "entries"}) || !entries.is_array() ||
+    const auto& entries = json_util::member(value, "entries");
+    if (!json_util::exact_keys(value, {"sessionUpdate", "entries"}) || !entries.is_array() ||
         entries.as_array().empty() || entries.as_array().size() > 1024) return false;
     for (const auto& entry : entries.as_array()) {
-        const auto priority = text(entry, "priority");
-        const auto status   = text(entry, "status");
-        if (!exact_keys(entry, {"content", "priority", "status"}) ||
-            !bounded_string(member(entry, "content"), 16 * 1024) ||
+        const auto priority = json_util::text(entry, "priority");
+        const auto status   = json_util::text(entry, "status");
+        if (!json_util::exact_keys(entry, {"content", "priority", "status"}) ||
+            !json_util::bounded_string(json_util::member(entry, "content"), 16 * 1024) ||
             (priority != "low" && priority != "medium" && priority != "high") ||
             (status != "pending" && status != "in_progress" && status != "completed")) return false;
     }
@@ -194,57 +197,57 @@ bool valid_plan(const Json& value)
 bool notification(const Json& value, std::string_view stage, std::string_view session, bool status_outstanding,
     std::string& output, std::string& status, bool& status_command, std::string_view mode)
 {
-    const auto& params = member(value, "params");
-    if (!exact_keys(value, {"jsonrpc", "method", "params"}) || text(value, "jsonrpc") != "2.0" ||
-        text(value, "method") != "session/update" || !exact_keys(params, {"sessionId", "update"}) ||
-        session.empty() || text(params, "sessionId") != session) return false;
-    const auto& update = member(params, "update");
-    const auto type = text(update, "sessionUpdate");
+    const auto& params = json_util::member(value, "params");
+    if (!json_util::exact_keys(value, {"jsonrpc", "method", "params"}) || json_util::text(value, "jsonrpc") != "2.0" ||
+        json_util::text(value, "method") != "session/update" || !json_util::exact_keys(params, {"sessionId", "update"}) ||
+        session.empty() || json_util::text(params, "sessionId") != session) return false;
+    const auto& update = json_util::member(params, "update");
+    const auto type = json_util::text(update, "sessionUpdate");
     if (type == "available_commands_update") {
         if (stage == "await_initialize" || stage == "await_new" || !valid_commands(update)) return false;
-        const auto& commands = member(update, "availableCommands").as_array();
+        const auto& commands = json_util::member(update, "availableCommands").as_array();
         status_command = std::any_of(commands.begin(), commands.end(),
-            [](const Json& command) { return text(command, "name") == k_status_command; });
+            [](const Json& command) { return json_util::text(command, "name") == k_status_command; });
         return true;
     }
     if (type == "agent_message_chunk" && stage == "await_admission") {
         if (!status_outstanding || !valid_text(update)) return false;
-        status += text(member(update, "content"), "text");
+        status += json_util::text(json_util::member(update, "content"), "text");
         return status.size() <= k_status_limit;
     }
     if (type == "current_mode_update") {
-        return stage == "await_mode" && exact_keys(update, {"sessionUpdate", "currentModeId"}) &&
-            text(update, "currentModeId") == mode;
+        return stage == "await_mode" && json_util::exact_keys(update, {"sessionUpdate", "currentModeId"}) &&
+            json_util::text(update, "currentModeId") == mode;
     }
     if (type == "config_option_update") {
-        return stage == "await_mode" && exact_keys(update, {"sessionUpdate", "configOptions"}) && mode_matches(update, mode);
+        return stage == "await_mode" && json_util::exact_keys(update, {"sessionUpdate", "configOptions"}) && mode_matches(update, mode);
     }
     if (type == "agent_message_chunk" || type == "agent_thought_chunk") {
         if (stage != "await_prompt" || !valid_text(update)) return false;
-        if (type == "agent_message_chunk") output += text(member(update, "content"), "text");
+        if (type == "agent_message_chunk") output += json_util::text(json_util::member(update, "content"), "text");
         return output.size() <= k_result_limit;
     }
     if (type == "tool_call" || type == "tool_call_update") return stage == "await_prompt" && valid_tool(update);
     if (type == "plan") return stage == "await_prompt" && valid_plan(update);
     if (type == "usage_update") {
         return (stage == "await_prompt" || stage == "await_close") &&
-            exact_keys(update, {"sessionUpdate", "used", "size"}) &&
-            nonnegative_integer(member(update, "used")) && nonnegative_integer(member(update, "size")) &&
-            member(update, "size").as_number() > 0;
+            json_util::exact_keys(update, {"sessionUpdate", "used", "size"}) &&
+            nonnegative_integer(json_util::member(update, "used")) && nonnegative_integer(json_util::member(update, "size")) &&
+            json_util::member(update, "size").as_number() > 0;
     }
     if (type == "session_info_update") {
         return (stage == "await_prompt" || stage == "await_close") &&
-            exact_keys(update, {"sessionUpdate", "title"}) &&
-            (member(update, "title").is_null() || bounded_string(member(update, "title"), 4096, true));
+            json_util::exact_keys(update, {"sessionUpdate", "title"}) &&
+            (json_util::member(update, "title").is_null() || json_util::bounded_string(json_util::member(update, "title"), 4096, true));
     }
     return false;
 }
 
 bool response(const Json& value, int expected)
 {
-    return exact_keys(value, {"jsonrpc", "id", "result"}) && text(value, "jsonrpc") == "2.0" &&
-        member(value, "id").is_number() && member(value, "id").as_number() == expected &&
-        member(value, "result").is_object();
+    return json_util::exact_keys(value, {"jsonrpc", "id", "result"}) && json_util::text(value, "jsonrpc") == "2.0" &&
+        json_util::member(value, "id").is_number() && json_util::member(value, "id").as_number() == expected &&
+        json_util::member(value, "result").is_object();
 }
 
 std::string sanitized_name_part(std::string_view part)
@@ -313,11 +316,11 @@ std::string initial_acp_input(const addon::Delegated_prepare_request& request)
         {
             arguments.push_back(Json(argument));
         }
-        servers.push_back(object({{"name", Json(task_server_name(request, server))},
+        servers.push_back(json_util::object({{"name", Json(task_server_name(request, server))},
             {"command", Json(connection.relay_program)}, {"args", std::move(arguments)}, {"env", Json::array()}}));
     }
-    return rpc(1, "initialize", object({{"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()}})) +
-        rpc(2, "session/new", object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}}));
+    return rpc(1, "initialize", json_util::object({{"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()}})) +
+        rpc(2, "session/new", json_util::object({{"cwd", Json(request.context.working_directory)}, {"mcpServers", std::move(servers)}}));
 }
 
 std::string initial_acp_state(const addon::Delegated_prepare_request& request)
@@ -326,16 +329,16 @@ std::string initial_acp_state(const addon::Delegated_prepare_request& request)
     auto tools = Json::array();
     // Kimi's ACP entry ignores top-level mode flags. Mirror their CLI meaning
     // only when the launcher explicitly supplies one (plan takes precedence).
-    const auto args = literal_argv(request.context.launcher.script_body);
+    const auto args = addon::literal_argv(request.context.launcher.script_body);
     const auto has = [&](std::string_view flag) { return std::find(args.begin(), args.end(), flag) != args.end(); };
     const std::string mode = has("--plan") ? "plan" : has("--auto") ? "yolo" :
         (has("--yolo") || has("-y")) ? "auto" : "";
     for (const auto& server : request.control.servers) {
         for (const auto& action : server.actions) tools.push_back(Json(mcp_tool_name(task_server_name(request, server), action)));
-        servers.push_back(object({{"name", Json(task_server_name(request, server))},
+        servers.push_back(json_util::object({{"name", Json(task_server_name(request, server))},
             {"actions", Json(static_cast<double>(server.actions.size()))}}));
     }
-    return addon::serialize_json(object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
+    return addon::serialize_json(json_util::object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
         {"deferred_input_base64", Json("")},
         {"prompt_base64", Json(addon::encode_base64(request.prompt))}, {"session_id", Json("")}, {"result_base64", Json("")},
         {"task_tools", std::move(tools)}, {"launcher_mode", Json(mode)}, {"servers", std::move(servers)}, {"status_command", Json(false)}, {"request_id", Json(0)},
@@ -345,38 +348,38 @@ std::string initial_acp_state(const addon::Delegated_prepare_request& request)
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     const auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
-    if (!parsed || !exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
+    if (!parsed || !json_util::exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
             "result_base64", "task_tools", "launcher_mode", "servers", "status_command", "request_id", "status_base64"}) ||
-        !member(*parsed, "stage").is_string() || !bounded_string(member(*parsed, "session_id"), 512, true) ||
-        !member(*parsed, "servers").is_array() || !member(*parsed, "status_command").is_boolean() ||
-        !nonnegative_integer(member(*parsed, "request_id")) || member(*parsed, "request_id").as_number() > k_max_request_id)
+        !json_util::member(*parsed, "stage").is_string() || !json_util::bounded_string(json_util::member(*parsed, "session_id"), 512, true) ||
+        !json_util::member(*parsed, "servers").is_array() || !json_util::member(*parsed, "status_command").is_boolean() ||
+        !nonnegative_integer(json_util::member(*parsed, "request_id")) || json_util::member(*parsed, "request_id").as_number() > k_max_request_id)
     {
         return failure("malformed_acp_state");
     }
-    if (!member(*parsed, "task_tools").is_array()) return failure("malformed_acp_state");
-    for (const auto& tool : member(*parsed, "task_tools").as_array()) {
-        if (!bounded_string(tool, 64)) return failure("malformed_acp_state");
+    if (!json_util::member(*parsed, "task_tools").is_array()) return failure("malformed_acp_state");
+    for (const auto& tool : json_util::member(*parsed, "task_tools").as_array()) {
+        if (!json_util::bounded_string(tool, 64)) return failure("malformed_acp_state");
     }
-    if (!member(*parsed, "launcher_mode").is_string()) return failure("malformed_acp_state");
+    if (!json_util::member(*parsed, "launcher_mode").is_string()) return failure("malformed_acp_state");
     auto state = *parsed;
     for (const auto key : {"pending_base64", "deferred_input_base64", "prompt_base64", "result_base64", "status_base64"}) {
-        if (!member(state, key).is_string()) return failure("malformed_acp_state");
+        if (!json_util::member(state, key).is_string()) return failure("malformed_acp_state");
     }
-    for (const auto& server : member(state, "servers").as_array()) {
-        if (!exact_keys(server, {"name", "actions"}) || !bounded_string(member(server, "name"), 512) ||
-            !nonnegative_integer(member(server, "actions"))) return failure("malformed_acp_state");
+    for (const auto& server : json_util::member(state, "servers").as_array()) {
+        if (!json_util::exact_keys(server, {"name", "actions"}) || !json_util::bounded_string(json_util::member(server, "name"), 512) ||
+            !nonnegative_integer(json_util::member(server, "actions"))) return failure("malformed_acp_state");
     }
-    auto pending = addon::decode_base64(text(state, "pending_base64"));
-    auto deferred_input = addon::decode_base64(text(state, "deferred_input_base64"));
-    auto prompt  = addon::decode_base64(text(state, "prompt_base64"));
-    auto output  = addon::decode_base64(text(state, "result_base64"));
-    auto status  = addon::decode_base64(text(state, "status_base64"));
+    auto pending = addon::decode_base64(json_util::text(state, "pending_base64"));
+    auto deferred_input = addon::decode_base64(json_util::text(state, "deferred_input_base64"));
+    auto prompt  = addon::decode_base64(json_util::text(state, "prompt_base64"));
+    auto output  = addon::decode_base64(json_util::text(state, "result_base64"));
+    auto status  = addon::decode_base64(json_util::text(state, "status_base64"));
     if (!pending || !deferred_input || !prompt || !output || !status || output->size() > k_result_limit ||
         status->size() > k_status_limit) return failure("malformed_acp_state");
-    bool status_command = member(state, "status_command").as_boolean();
-    auto request_id = static_cast<int>(member(state, "request_id").as_number());
+    bool status_command = json_util::member(state, "status_command").as_boolean();
+    auto request_id = static_cast<int>(json_util::member(state, "request_id").as_number());
     const auto status_request = [&state, &request_id]() {
-        return prompt_request(request_id, member(state, "session_id"), "/" + std::string(k_status_command));
+        return prompt_request(request_id, json_util::member(state, "session_id"), "/" + std::string(k_status_command));
     };
     *pending += inspection.stdout_bytes;
     // A reply proposed while a native record is incomplete has not been
@@ -387,20 +390,20 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         const auto end = pending->find('\n');
         if (end == std::string::npos) break;
         if (end == 0 || end > k_record_limit) return failure("invalid_acp_record");
-        const auto value = parse(std::string_view(*pending).substr(0, end));
+        const auto value = json_util::parse(std::string_view(*pending).substr(0, end));
         pending->erase(0, end + 1);
         if (!value || !value->is_object()) return failure("invalid_acp_record");
-        const auto stage = text(state, "stage");
+        const auto stage = json_util::text(state, "stage");
         if (value->find("method")) {
             if (value->find("id")) {
-                if (!input.empty() || stage != "await_prompt" || text(*value, "method") != "session/request_permission")
+                if (!input.empty() || stage != "await_prompt" || json_util::text(*value, "method") != "session/request_permission")
                     return failure("unsupported_acp_reverse_request");
                 const auto reply = permission_reply(*value, state);
                 if (reply.empty()) return failure("task_permission_response_unavailable");
                 replies += reply;
                 continue;
             }
-            const auto type = text(member(member(*value, "params"), "update"), "sessionUpdate");
+            const auto type = json_util::text(json_util::member(json_util::member(*value, "params"), "update"), "sessionUpdate");
             if (!input.empty()) {
                 const bool housekeeping = type == "available_commands_update" ||
                     type == "current_mode_update" || type == "config_option_update";
@@ -410,8 +413,8 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                     return failure("out_of_order_acp_notification");
                 }
             }
-            if (!notification(*value, stage, text(state, "session_id"), stage == "await_admission" && request_id != 0,
-                    *output, *status, status_command, text(state, "launcher_mode")))
+            if (!notification(*value, stage, json_util::text(state, "session_id"), stage == "await_admission" && request_id != 0,
+                    *output, *status, status_command, json_util::text(state, "launcher_mode")))
             {
                 return failure("unauthenticated_acp_notification");
             }
@@ -426,26 +429,26 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             continue;
         }
         if (!input.empty()) return failure("out_of_order_acp_response");
-        const auto& result = member(*value, "result");
+        const auto& result = json_util::member(*value, "result");
         if (stage == "await_initialize") {
-            if (!response(*value, 1) || !member(result, "protocolVersion").is_number() ||
-                member(result, "protocolVersion").as_number() != 1) return failure("invalid_acp_initialize");
+            if (!response(*value, 1) || !json_util::member(result, "protocolVersion").is_number() ||
+                json_util::member(result, "protocolVersion").as_number() != 1) return failure("invalid_acp_initialize");
             state.set("stage", Json("await_new"));
         }
         else
         if (stage == "await_new") {
-            if (!response(*value, 2) || !bounded_string(member(result, "sessionId"), 512)) return failure("invalid_acp_session");
-            state.set("session_id", member(result, "sessionId"));
-            const auto mode = text(state, "launcher_mode");
+            if (!response(*value, 2) || !json_util::bounded_string(json_util::member(result, "sessionId"), 512)) return failure("invalid_acp_session");
+            state.set("session_id", json_util::member(result, "sessionId"));
+            const auto mode = json_util::text(state, "launcher_mode");
             state.set("stage", Json(mode.empty() ? "await_admission" : "await_mode"));
             if (!mode.empty()) {
-                input = rpc(3, "session/set_config_option", object({{"sessionId", member(state, "session_id")},
+                input = rpc(3, "session/set_config_option", json_util::object({{"sessionId", json_util::member(state, "session_id")},
                     {"configId", Json("mode")}, {"value", Json(mode)}}));
             }
         }
         else
         if (stage == "await_mode") {
-            if (!response(*value, 3) || !mode_matches(result, text(state, "launcher_mode")) || prompt->empty() || !addon::is_valid_utf8(*prompt)) {
+            if (!response(*value, 3) || !mode_matches(result, json_util::text(state, "launcher_mode")) || prompt->empty() || !addon::is_valid_utf8(*prompt)) {
                 return failure("invalid_acp_mode");
             }
             state.set("stage", Json("await_admission"));
@@ -457,10 +460,10 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         }
         else
         if (stage == "await_admission") {
-            if (request_id == 0 || !response(*value, request_id) || text(result, "stopReason") != "end_turn") {
+            if (request_id == 0 || !response(*value, request_id) || json_util::text(result, "stopReason") != "end_turn") {
                 return failure("invalid_acp_task_server_status");
             }
-            const auto admission = task_server_status(*status, member(state, "servers"));
+            const auto admission = task_server_status(*status, json_util::member(state, "servers"));
             status->clear();
             if (admission == Task_server_status::UNAVAILABLE) return failure("required_control_unavailable");
             ++request_id;
@@ -473,17 +476,17 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             else {
                 state.set("stage", Json("await_prompt"));
                 state.set("prompt_base64", Json(""));
-                input = prompt_request(request_id, member(state, "session_id"), std::move(*prompt));
+                input = prompt_request(request_id, json_util::member(state, "session_id"), std::move(*prompt));
             }
         }
         else
         if (stage == "await_prompt") {
-            if (!response(*value, request_id) || text(result, "stopReason") != "end_turn" || output->empty()) {
+            if (!response(*value, request_id) || json_util::text(result, "stopReason") != "end_turn" || output->empty()) {
                 return failure("invalid_acp_completion");
             }
             state.set("stage", Json("await_close"));
             ++request_id;
-            input = rpc(request_id, "session/close", object({{"sessionId", member(state, "session_id")}}));
+            input = rpc(request_id, "session/close", json_util::object({{"sessionId", json_util::member(state, "session_id")}}));
         }
         else
         if (stage == "await_close") {

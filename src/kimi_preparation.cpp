@@ -8,10 +8,13 @@
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
+#include <logonomic_cli_addon/launcher_utilities.h>
 
 #include <filesystem>
 #include <regex>
 #include <stdexcept>
+
+namespace json_util = logonomic::cli_addon::json;
 
 namespace kimi {
 namespace {
@@ -103,7 +106,7 @@ void prepare_delegated(addon::Invocation_context& context)
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
     result.process.executable = k_bridge;
-    result.process.argv = literal_argv(request->context.launcher.script_body);
+    result.process.argv = addon::literal_argv(request->context.launcher.script_body);
     result.process.argv.front() = *program;
     result.process.argv.push_back("acp");
     result.process.environment = std::move(environment);
@@ -127,9 +130,9 @@ void prepare_resume(addon::Invocation_context& context)
     addon::Contract_failure error;
     const auto request = addon::decode_resume_prepare_request(context.request().payload, &error, 2);
     if (!request) { context.fail(addon::Result_status::FAILED, error.reason_code, error.detail); return; }
-    const auto session = text(request->resume_record, "provider_session_id");
+    const auto session = json_util::text(request->resume_record, "provider_session_id");
     static const std::regex identity("[A-Za-z0-9][A-Za-z0-9_-]{0,255}");
-    if (!exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, identity)) {
+    if (!json_util::exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, identity)) {
         context.fail(addon::Result_status::FAILED, "invalid_resume_record");
         return;
     }
@@ -148,7 +151,7 @@ void prepare_resume(addon::Invocation_context& context)
         context.fail(addon::Result_status::UNAVAILABLE, "session_start_hook_unavailable");
         return;
     }
-    auto argv = literal_argv(request->context.launcher.script_body);
+    auto argv = addon::literal_argv(request->context.launcher.script_body);
     argv.front() = *program;
     argv.insert(argv.end(), {"--session", session});
     addon::Resume_prepare_result result;

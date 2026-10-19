@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
@@ -74,10 +76,10 @@ void write(const fs::path& path, std::string_view bytes)
 
 void native_session(const fs::path& session, std::string_view parent = {}, std::string_view cwd = {})
 {
-    auto state = kimi::object({{"id", addon::Json_value(kimi::path_string(session.filename()))},
+    auto state = json_util::object({{"id", addon::Json_value(kimi::path_string(session.filename()))},
         {"version", addon::Json_value(2)}, {"createdAt", addon::Json_value(std::int64_t{1789199999000})},
         {"updatedAt", addon::Json_value(std::int64_t{1789200000000})}, {"archived", addon::Json_value(false)},
-        {"agents", kimi::object({{"main", kimi::object({{"type", addon::Json_value("main")}})}})},
+        {"agents", json_util::object({{"main", json_util::object({{"type", addon::Json_value("main")}})}})},
         {"custom", addon::Json_value::object()}});
     if (!parent.empty()) state.set("forkedFrom", addon::Json_value(parent));
     if (!cwd.empty()) state.set("cwd", addon::Json_value(cwd));
@@ -99,7 +101,7 @@ void accounts_contract()
 #else
     request.launch_environment.platform_id = "linux-x86_64";
 #endif
-    request.launch_environment.effective_environment = kimi::object({
+    request.launch_environment.effective_environment = json_util::object({
         {"KIMI_CODE_HOME", addon::Json_value(kimi::path_string(selected))}});
     request.normalization_directory = kimi::path_string(workspace.path);
     Context context;
@@ -305,12 +307,12 @@ void raw_fork_mode_contract()
         std::ifstream input(cache, std::ios::binary);
         std::string line;
         while (std::getline(input, line)) {
-            auto row = kimi::parse(line);
+            auto row = json_util::parse(line);
             require(row.has_value(), "scanner cache fixture parses");
             if (row->find("fork_event")) continue;
             row->erase("usage-fork-ownership");
-            if (kimi::text(*row, "path") == kimi::path_string(wire)) {
-                auto record = addon::decode_usage_record(kimi::member(*row, "usage"), nullptr, 2);
+            if (json_util::text(*row, "path") == kimi::path_string(wire)) {
+                auto record = addon::decode_usage_record(json_util::member(*row, "usage"), nullptr, 2);
                 require(record.has_value(), "legacy raw fixture has a child record");
                 record->total_tokens = 130;
                 record->output.value = 130;
@@ -382,19 +384,19 @@ void scan_contract()
     require(records.size() == 1 && records.front().total_tokens == 22, "all agent logs contribute to the same session");
     const auto legacy_session = profile / "sessions" / "Workspace-B" / "Session-B";
     const auto legacy_wire = legacy_session / "agents" / "Agent-A" / "wire.jsonl";
-    const auto identity = kimi::object({{"version", addon::Json_value(1)},
+    const auto identity = json_util::object({{"version", addon::Json_value(1)},
         {"record_id", addon::Json_value("kimi:Session-B")},
         {"session_key", addon::Json_value("kimi:Session-B")},
         {"legacy_record_id", addon::Json_value("kimi:Session-B:old-agent")},
         {"legacy_session_key", addon::Json_value("kimi:Session-B:old-agent")}});
-    const auto record = kimi::object({{"session_id", addon::Json_value("6b696d693a53657373696f6e2d42")},
-        {"capabilities", kimi::object({{"usage-record-identity", identity}})},
+    const auto record = json_util::object({{"session_id", addon::Json_value("6b696d693a53657373696f6e2d42")},
+        {"capabilities", json_util::object({{"usage-record-identity", identity}})},
         {"completed_date", addon::Json_value("2026-09-12")}, {"total_tokens", addon::Json_value(11)},
         {"source_path", addon::Json_value(kimi::path_string(legacy_session))},
         {"model", addon::Json_value("old")}, {"counter_field", addon::Json_value("usage")},
         {"counter_semantics", addon::Json_value("per_event_sum")}, {"recorded_cwd", addon::Json_value("")}});
     auto rows = addon::Json_value::array(); rows.push_back(record);
-    const auto seed_row = kimi::object({{"path", addon::Json_value(kimi::path_string(legacy_wire))},
+    const auto seed_row = json_util::object({{"path", addon::Json_value(kimi::path_string(legacy_wire))},
         {"size", addon::Json_value(99)}, {"modified_msecs", addon::Json_value(123)}, {"records", rows}});
     const auto bytes = addon::serialize_json(seed_row) + "\n";
     const auto seed_path = storage / "native-seed.jsonl";
@@ -425,7 +427,7 @@ std::int64_t cached_modified_ms(const fs::path& cache)
     auto files = addon::Json_value::array();
     std::string line;
     while (std::getline(stream, line)) {
-        const auto document = kimi::parse(line);
+        const auto document = json_util::parse(line);
         require(document.has_value(), "usage cache records must remain valid JSON");
         if (const auto* rows = document->find("files")) {
             require(rows->is_array(), "single-document cache must contain a file array");
@@ -437,7 +439,7 @@ std::int64_t cached_modified_ms(const fs::path& cache)
         }
     }
     require(stream.eof() && files.as_array().size() == 1, "fixture must cache exactly one wire file");
-    const auto& modified = kimi::member(files.as_array().front(), "modified_msecs");
+    const auto& modified = json_util::member(files.as_array().front(), "modified_msecs");
     require(modified.is_integer(), "cached modification time must be integer Unix milliseconds");
     return modified.as_integer();
 }
@@ -656,7 +658,7 @@ void line_cache_contract()
     // 1024 seed receipts, the most that format admitted.
     auto rows = addon::Json_value::array();
     for (const auto& line : lines_of(cache)) {
-        const auto value = kimi::parse(line);
+        const auto value = json_util::parse(line);
         require(value && value->is_object(), "cache line parses");
         if (value->find("path")) {
             auto legacy = *value;
@@ -668,7 +670,7 @@ void line_cache_contract()
     for (unsigned index = 0; index < 1024; ++index) {
         receipts.push_back(addon::Json_value(addon::to_hex(addon::Sha256::digest("receipt-" + std::to_string(index)))));
     }
-    write(cache, addon::serialize_json(kimi::object({{"version", addon::Json_value(1)},
+    write(cache, addon::serialize_json(json_util::object({{"version", addon::Json_value(1)},
         {"profile", addon::Json_value(kimi::account_key(profile))}, {"files", rows}, {"receipts", receipts}})));
     require(total("incremental", std::nullopt) == 63, "a single-document cache upgrades with exact totals");
     require(lines_of(cache).size() == 1 + 1024 + 6, "the upgraded cache keeps every receipt, log and occurrence");
@@ -698,7 +700,7 @@ void file_count_contract()
             const auto path = profile / "sessions" / "workspace" / "session" / "agents" /
                 ("agent-" + std::to_string(index)) / "wire.jsonl";
             if (index != 0) stream << ',';
-            stream << addon::serialize_json(kimi::object({
+            stream << addon::serialize_json(json_util::object({
                 {"path", addon::Json_value(kimi::path_string(path))}, {"size", addon::Json_value(0)},
                 {"modified_msecs", addon::Json_value(0)}, {"recorded_cwd", addon::Json_value("")},
                 {"stale_breakdown", addon::Json_value(false)}, {"usage", addon::Json_value{}}}));
@@ -757,7 +759,7 @@ void native_aliases_contract()
     const auto canonical = profile / "sessions" / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
     const auto alias     = profile / "sessions" / "." / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
     const auto seed_row = [](const fs::path& path) {
-        return addon::serialize_json(kimi::object({
+        return addon::serialize_json(json_util::object({
             {"path", addon::Json_value(kimi::path_string(path))}, {"size", addon::Json_value(0)},
             {"modified_msecs", addon::Json_value(0)}, {"records", addon::Json_value::array()}})) + "\n";
     };
@@ -772,22 +774,22 @@ void native_aliases_contract()
     const auto verify_cache = [&] {
         std::size_t files = 0, receipts = 0;
         for (const auto& line : lines_of(cache)) {
-            const auto value = kimi::parse(line);
+            const auto value = json_util::parse(line);
             require(value && value->is_object(), "native alias cache records remain valid JSON");
             if (const auto* rows = value->find("files")) {
                 require(rows->is_array() && rows->as_array().size() == 1,
                     "native aliases retain exactly one file in a document cache");
                 files += rows->as_array().size();
-                require(kimi::text(rows->as_array().front(), "path") == kimi::path_string(alias),
+                require(json_util::text(rows->as_array().front(), "path") == kimi::path_string(alias),
                     "native aliases retain the first lexical raw path");
-                const auto& imported = kimi::member(*value, "receipts");
+                const auto& imported = json_util::member(*value, "receipts");
                 require(imported.is_array(), "document cache retains import receipts");
                 receipts += imported.as_array().size();
             }
             else
             if (value->find("path")) {
                 ++files;
-                require(kimi::text(*value, "path") == kimi::path_string(alias),
+                require(json_util::text(*value, "path") == kimi::path_string(alias),
                     "native aliases retain the first lexical raw path");
             }
             else

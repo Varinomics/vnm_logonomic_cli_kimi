@@ -7,7 +7,6 @@
 #endif
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -16,6 +15,8 @@
 #include <regex>
 #include <system_error>
 #include <utility>
+namespace json_util = logonomic::cli_addon::json;
+
 namespace kimi {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
@@ -23,28 +24,6 @@ std::string path_string(const fs::path& path)
 {
     const auto text = path.u8string();
     return {reinterpret_cast<const char*>(text.data()), text.size()};
-}
-
-std::vector<std::string> literal_argv(std::string_view script)
-{
-    std::vector<std::string> result;
-    std::string current;
-    bool quoted = false;
-    int quotes = 0;
-    for (const char character : script) {
-        if (character == '"') {
-            if (++quotes == 3) { current += '"'; quotes = 0; }
-            continue;
-        }
-        if (quotes == 1) quoted = !quoted;
-        quotes = 0;
-        if (!quoted && std::isspace(static_cast<unsigned char>(character))) {
-            if (!current.empty()) { result.push_back(current); current.clear(); }
-        }
-        else current += character;
-    }
-    if (!current.empty()) result.push_back(current);
-    return result;
 }
 
 bool is_kimi_program(std::string_view value)
@@ -76,7 +55,7 @@ bool is_kimi_invocation(const std::vector<std::string>& argv)
         else return false;
         if (!command) continue;
         if (index + 2 != argv.size() || argv.back().find_first_of(";&|<>$`%\r\n") != std::string::npos) return false;
-        const auto nested = literal_argv(argv.back());
+        const auto nested = addon::literal_argv(argv.back());
         return !nested.empty() && is_kimi_program(nested.front());
     }
     return false;
@@ -141,67 +120,6 @@ bool package_flag(std::string_view value)
         value == "--silent" || value == "--no-install" || value == "--bun";
 }
 
-bool environment_name(std::string_view name)
-{
-    if (name.empty() || (name.front() != '_' &&
-        !std::isalpha(static_cast<unsigned char>(name.front())))) return false;
-    return std::all_of(name.begin(), name.end(), [](unsigned char character) {
-        return character == '_' || (character >= 'A' && character <= 'Z') ||
-            (character >= 'a' && character <= 'z') ||
-            (character >= '0' && character <= '9');
-    });
-}
-
-std::optional<std::pair<std::string, std::string>> assignment(std::string_view text)
-{
-    const std::string value = unquote(text);
-    const auto separator = value.find('=');
-    if (separator == std::string::npos) return std::nullopt;
-    const std::string name = trim(value.substr(0, separator));
-    if (!environment_name(name) || value.find('\0') != std::string::npos) return std::nullopt;
-    return std::pair{name, unquote(value.substr(separator + 1))};
-}
-
-std::vector<std::string> tokens(std::string_view text)
-{
-    static const std::regex pattern(R"re("(?:\\.|[^"])*"|'[^']*'|\S+)re");
-    const std::string input(text);
-    std::vector<std::string> result;
-    for (std::sregex_iterator match(input.begin(), input.end(), pattern), end;
-         match != end; ++match)
-    {
-        result.push_back(match->str());
-    }
-    return result;
-}
-
-std::vector<std::string> segments(std::string_view line)
-{
-    std::vector<std::string> result;
-    std::string current;
-    char quote = 0;
-    for (std::size_t index = 0; index < line.size(); ++index) {
-        const char character = line[index];
-        if (character == '\\' && quote == '"' && index + 1 < line.size()) {
-            current += character;
-            current += line[++index];
-            continue;
-        }
-        if (character == quote) quote = 0;
-        else
-            if (!quote && (character == '\'' || character == '"')) quote = character;
-        else
-            if (!quote && (character == ';' || character == '&' || character == '|')) {
-            if (!trim(current).empty()) result.push_back(trim(current));
-            current.clear();
-            continue;
-        }
-        current += character;
-    }
-    if (!trim(current).empty()) result.push_back(trim(current));
-    return result;
-}
-
 std::optional<Launcher_command> recognize(std::string_view script, int depth)
 {
     if (depth == 0) return std::nullopt;
@@ -211,14 +129,17 @@ std::optional<Launcher_command> recognize(std::string_view script, int depth)
         line = trim(line);
         if (line.empty() || line.starts_with('#') || line.starts_with("//") ||
             lower(line).starts_with("rem ")) continue;
-        for (std::string segment : segments(line)) {
+        for (std::string segment : addon::launcher_segments(line, addon::Launcher_whitespace::UTF8)) {
             const std::string normalized = lower(segment);
             std::optional<std::pair<std::string, std::string>> standalone;
-            if (normalized.starts_with("set ")) standalone = assignment(segment.substr(4));
+            if (normalized.starts_with("set ")) standalone = addon::environment_assignment(
+                segment.substr(4), addon::Launcher_whitespace::UTF8);
             else
-            if (normalized.starts_with("export ")) standalone = assignment(segment.substr(7));
+            if (normalized.starts_with("export ")) standalone = addon::environment_assignment(
+                segment.substr(7), addon::Launcher_whitespace::UTF8);
             else
-            if (normalized.starts_with("$env:")) standalone = assignment(segment.substr(5));
+            if (normalized.starts_with("$env:")) standalone = addon::environment_assignment(
+                segment.substr(5), addon::Launcher_whitespace::UTF8);
             if (standalone) {
                 inherited.push_back(*standalone);
                 continue;
@@ -232,10 +153,10 @@ std::optional<Launcher_command> recognize(std::string_view script, int depth)
                 environment.emplace_back(match[1].str(), unquote(match[2].str()));
                 segment.erase(0, match.length());
             }
-            const auto words = tokens(segment);
+            const auto words = addon::launcher_tokens(segment);
             std::size_t index = 0;
             while (index < words.size()) {
-                const auto value = assignment(words[index]);
+                const auto value = addon::environment_assignment(words[index], addon::Launcher_whitespace::UTF8);
                 const auto prefix = lower(unquote(words[index]));
                 if (value) environment.push_back(*value);
                 else
@@ -316,7 +237,7 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
     const std::vector<std::string>& supplied, const Environment& environment, std::string_view working_directory,
     bool resume, addon::Invocation_context& context)
 {
-    const auto args = literal_argv(launcher.script_body);
+    const auto args = addon::literal_argv(launcher.script_body);
     if (args.empty() || !is_kimi_program(args.front())) return std::nullopt;
     if (launcher.runner_key == "direct") {
         if (args != supplied) return std::nullopt;
@@ -378,7 +299,7 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
         return result;
     };
     const auto before = fingerprint();
-    auto cache_context = object({{"identity", Json(before)}, {"working_directory", Json(working_directory)}, {"resume", Json(resume)}});
+    auto cache_context = json_util::object({{"identity", Json(before)}, {"working_directory", Json(working_directory)}, {"resume", Json(resume)}});
     auto cache_environment = Json::object();
     for (const auto& [name, value] : environment) cache_environment.set(name, Json(value));
     cache_context.set("environment", std::move(cache_environment));

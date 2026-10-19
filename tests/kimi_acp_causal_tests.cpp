@@ -1,5 +1,6 @@
 #include "kimi_acp.h"
 #include "kimi_json.h"
+#include <logonomic_cli_addon/json_utilities.h>
 #include <logonomic_cli_addon/session_contracts.h>
 #include <cstdlib>
 #include <exception>
@@ -8,6 +9,7 @@
 #include <string_view>
 #include <utility>
 namespace addon = logonomic::cli_addon;
+namespace json_util = logonomic::cli_addon::json;
 namespace provider = kimi;
 namespace {
 int assertions=0, failures=0;
@@ -69,22 +71,22 @@ void launcher_permissions()
     request.control.task_id = "2427cd8d-5ee6-4618-bbb3-cd5c8e68a682";
     request.control.private_artifact_root = "C:/task";
     request.control.servers.push_back({"delegation", "relay", {"submit"}, {}});
-    auto state = *provider::parse(provider::initial_acp_state(request));
+    auto state = *json_util::parse(provider::initial_acp_state(request));
     state.set("stage", Json("await_prompt"));
     state.set("session_id", Json("s"));
     state.set("prompt_base64", Json(""));
     const auto pending = addon::serialize_json(state);
     const auto permission = [](std::string name, std::string session = "s", bool once = true) {
-        auto call = provider::object({{"toolCallId", Json("call-1")}});
+        auto call = json_util::object({{"toolCallId", Json("call-1")}});
         call.set("title", Json(name));
         auto options = Json::array();
-        options.push_back(provider::object({{"optionId", Json("always")}, {"kind", Json("allow_always")}}));
-        options.push_back(provider::object({{"optionId", Json("proceed_once_and_switch_to_default")},
+        options.push_back(json_util::object({{"optionId", Json("always")}, {"kind", Json("allow_always")}}));
+        options.push_back(json_util::object({{"optionId", Json("proceed_once_and_switch_to_default")},
             {"kind", Json("allow_once")}}));
-        if (once) options.push_back(provider::object({{"optionId", Json("approve_once")}, {"kind", Json("allow_once")}}));
-        options.push_back(provider::object({{"optionId", Json("reject")}, {"kind", Json("reject_once")}}));
-        return addon::serialize_json(provider::object({{"jsonrpc", Json("2.0")}, {"id", Json(17)},
-            {"method", Json("session/request_permission")}, {"params", provider::object({
+        if (once) options.push_back(json_util::object({{"optionId", Json("approve_once")}, {"kind", Json("allow_once")}}));
+        options.push_back(json_util::object({{"optionId", Json("reject")}, {"kind", Json("reject_once")}}));
+        return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", Json(17)},
+            {"method", Json("session/request_permission")}, {"params", json_util::object({
                 {"sessionId", Json(session)}, {"toolCall", std::move(call)}, {"options", std::move(options)}})}})) + '\n';
     };
     const std::string own = "mcp__logonomic-task-2427cd8d-5ee6-4618-bbb3-cd5c8e68a68_78e47f18";

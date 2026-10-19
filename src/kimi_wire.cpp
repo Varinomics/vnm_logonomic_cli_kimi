@@ -6,6 +6,8 @@
 #include <sstream>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace kimi {
 namespace addon = logonomic::cli_addon;
 namespace {
@@ -26,7 +28,7 @@ bool valid_id(const std::string& value)
 
 bool boolean(const Json& value, std::string_view key, bool fallback = false)
 {
-    const auto& field = member(value, key);
+    const auto& field = json_util::member(value, key);
     return field.is_boolean() ? field.as_boolean() : fallback;
 }
 
@@ -103,13 +105,13 @@ addon::Lifecycle_observation Wire_decoder::observation(
 std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& record)
 {
     if (!m_failure.empty()) return {};
-    auto type = text(record, "type");
+    auto type = json_util::text(record, "type");
     if (type == "context.append_loop_event") {
-        const auto& event = member(record, "event");
-        const auto id = text(event, "toolCallId");
+        const auto& event = json_util::member(record, "event");
+        const auto id = json_util::text(event, "toolCallId");
         if (!valid_id(id)) return {};
-        const auto event_type = text(event, "type");
-        if (event_type == "tool.call" && text(event, "name") == "Agent") {
+        const auto event_type = json_util::text(event, "type");
+        if (event_type == "tool.call" && json_util::text(event, "name") == "Agent") {
             if (m_calls.contains(id) || m_retired.contains(id)) return {};
             if (m_calls.size() >= 128 || m_running.size() >= 128) {
                 m_failure = "direct_agent_active_capacity_exhausted";
@@ -120,10 +122,10 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
                 return {};
             }
             Call call;
-            auto name = trim(text(member(event, "display"), "agent_name"));
-            if (name.empty()) name = trim(text(member(event, "args"), "subagent_type"));
+            auto name = trim(json_util::text(json_util::member(event, "display"), "agent_name"));
+            if (name.empty()) name = trim(json_util::text(json_util::member(event, "args"), "subagent_type"));
             if (!name.empty() && utf16_units(name) <= 256) call.label = name;
-            call.background = boolean(member(event, "args"), "run_in_background");
+            call.background = boolean(json_util::member(event, "args"), "run_in_background");
             call.active = true;
             if (!call.label.empty()) m_labels[id] = call.label;
             m_calls.emplace(id, std::move(call));
@@ -139,7 +141,7 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         if (call->second.result_observed) return {};
         call->second.result_observed = true;
         if (call->second.background) {
-            std::istringstream output(text(member(event, "result"), "output"));
+            std::istringstream output(json_util::text(json_util::member(event, "result"), "output"));
             std::string task, status;
             for (std::string line; std::getline(output, line);) {
                 line = trim(line);
@@ -155,25 +157,25 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         return stop_call(id) ? std::vector{observation("Agent.tool.result", id, false, true)} : std::vector<addon::Lifecycle_observation>{};
     }
     if (type == "context.append_message") {
-        const auto& origin = member(member(record, "message"), "origin");
-        const auto kind = text(origin, "kind");
-        const auto status = text(origin, "status");
+        const auto& origin = json_util::member(json_util::member(record, "message"), "origin");
+        const auto kind = json_util::text(origin, "kind");
+        const auto status = json_util::text(origin, "status");
         if ((kind != "background_task" && kind != "task") ||
             (status != "completed" && status != "failed" && status != "cancelled" &&
              status != "killed" && status != "timed_out" && status != "lost"))
         {
             return {};
         }
-        const auto task = m_background.find(text(origin, "taskId"));
+        const auto task = m_background.find(json_util::text(origin, "taskId"));
         if (task == m_background.end()) return {};
         const auto id = task->second;
         m_background.erase(task);
         return stop_call(id) ? std::vector{observation(kind + "." + status, id, false, true)} : std::vector<addon::Lifecycle_observation>{};
     }
-    const auto agent = text(record, "subagentId");
+    const auto agent = json_util::text(record, "subagentId");
     if (!valid_id(agent)) return {};
     if (type == "subagent.spawned") {
-        const auto parent = text(record, "parentToolCallId");
+        const auto parent = json_util::text(record, "parentToolCallId");
         if (parent.size() > 256) return {};
         const auto call = m_calls.find(parent);
         const auto retired = m_retired.find(parent);
@@ -212,7 +214,7 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         if (run.public_id.empty()) run.public_id = public_id;
         else
         if (run.public_id != public_id) return {};
-        auto name = trim(text(record, "subagentName"));
+        auto name = trim(json_util::text(record, "subagentName"));
         if (name.empty() && correlation) name = correlation->label;
         if (!name.empty() && utf16_units(name) <= 256) {
             if (run.label.empty()) run.label = name;
@@ -223,7 +225,7 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
             run.active   = correlation->active;
             run.terminal = correlation->terminal;
             correlation->background = boolean(record, "runInBackground", correlation->background);
-            const auto task = text(record, "taskId");
+            const auto task = json_util::text(record, "taskId");
             if (correlation->background && !correlation->terminal && valid_id(task)) m_background[task] = public_id;
         }
         return {};

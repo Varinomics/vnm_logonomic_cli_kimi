@@ -5,12 +5,15 @@
 
 #include <logonomic_cli_addon/quota.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/launcher_utilities.h>
 
 #include <chrono>
 #include <cmath>
 #include <optional>
 #include <stdexcept>
 #include <string>
+
+namespace json_util = logonomic::cli_addon::json;
 
 namespace kimi {
 namespace {
@@ -29,10 +32,10 @@ std::int64_t integer(const Json& value, std::int64_t minimum = 0)
 Json normalized_window(double used_percent, const char* label, std::int64_t minutes, const Json& reset)
 {
     if (!std::isfinite(used_percent)) throw std::runtime_error("invalid_quota_usage");
-    auto result = object({{"used_percent", Json(used_percent)},
+    auto result = json_util::object({{"used_percent", Json(used_percent)},
         {"window_minutes", Json(minutes)}, {"window_label", Json(label)}});
     if (!reset.is_null()) {
-        if (!bounded_string(reset, 64)) throw std::runtime_error("invalid_quota_reset");
+        if (!json_util::bounded_string(reset, 64)) throw std::runtime_error("invalid_quota_reset");
         result.set("reset_at", reset);
     }
     return result;
@@ -40,28 +43,28 @@ Json normalized_window(double used_percent, const char* label, std::int64_t minu
 
 Json window(const Json& row, const char* label, std::int64_t expected_minutes)
 {
-    const auto& used = member(row, "used");
-    const auto& limit = member(row, "limit");
+    const auto& used = json_util::member(row, "used");
+    const auto& limit = json_util::member(row, "limit");
     if (!used.is_number() || !limit.is_number() || used.as_number() < 0 || limit.as_number() <= 0) {
         throw std::runtime_error("invalid_quota_usage");
     }
-    const auto& period = member(row, "window");
-    const auto duration = integer(member(period, "duration"), 1);
-    const auto unit = text(period, "unit");
+    const auto& period = json_util::member(row, "window");
+    const auto duration = integer(json_util::member(period, "duration"), 1);
+    const auto unit = json_util::text(period, "unit");
     const std::int64_t multiplier = unit == "minute" ? 1 : unit == "hour" ? 60 : unit == "day" ? 1440 : unit == "week" ? 10080 : 0;
     if (multiplier == 0 || duration > 9007199254740991ll / multiplier || duration * multiplier != expected_minutes) {
         throw std::runtime_error("invalid_quota_window");
     }
     return normalized_window(
-        100.0 * used.as_number() / limit.as_number(), label, expected_minutes, member(row, "reset_at"));
+        100.0 * used.as_number() / limit.as_number(), label, expected_minutes, json_util::member(row, "reset_at"));
 }
 
 // Kimi Code 2.0.2 reports a window as the used fraction of its allowance.
 Json ratio_window(const Json& usage, const char* label, std::int64_t minutes)
 {
-    const auto& ratio = member(usage, "usedRatio");
+    const auto& ratio = json_util::member(usage, "usedRatio");
     if (!ratio.is_number() || ratio.as_number() < 0) throw std::runtime_error("invalid_quota_usage");
-    return normalized_window(100.0 * ratio.as_number(), label, minutes, member(usage, "resetAt"));
+    return normalized_window(100.0 * ratio.as_number(), label, minutes, json_util::member(usage, "resetAt"));
 }
 
 std::optional<std::uint64_t> reset_time(const Json& value)
@@ -113,15 +116,15 @@ std::optional<std::uint64_t> reset_time(const Json& value)
 
 addon::Quota_window observation_window(const Json& value)
 {
-    const auto& percent = member(value, "used_percent");
-    if (!percent.is_number() || percent.as_number() < 0 || !bounded_string(member(value, "window_label"), 128)) {
+    const auto& percent = json_util::member(value, "used_percent");
+    if (!percent.is_number() || percent.as_number() < 0 || !json_util::bounded_string(json_util::member(value, "window_label"), 128)) {
         throw std::runtime_error("invalid_quota_window");
     }
     addon::Quota_window result;
     result.used_percent = percent.as_number();
-    result.window_minutes = static_cast<std::uint64_t>(integer(member(value, "window_minutes"), 1));
-    result.label = text(value, "window_label");
-    result.resets_at_ms = reset_time(member(value, "reset_at"));
+    result.window_minutes = static_cast<std::uint64_t>(integer(json_util::member(value, "window_minutes"), 1));
+    result.label = json_util::text(value, "window_label");
+    result.resets_at_ms = reset_time(json_util::member(value, "reset_at"));
     return result;
 }
 
@@ -129,20 +132,20 @@ addon::Quota_window observation_window(const Json& value)
 
 Json normalize_quota(const Json& response)
 {
-    if (integer(member(response, "code")) != 0 || !member(response, "data").is_object()) throw std::runtime_error("quota_request_rejected");
-    const auto& data = member(response, "data");
-    if (text(data, "kind") == "error") {
-        if (text(data, "message") == "No token for \"kimi-code\". Run /login to authenticate.") {
-            return object({{"status", Json("not_logged_in")}});
+    if (integer(json_util::member(response, "code")) != 0 || !json_util::member(response, "data").is_object()) throw std::runtime_error("quota_request_rejected");
+    const auto& data = json_util::member(response, "data");
+    if (json_util::text(data, "kind") == "error") {
+        if (json_util::text(data, "message") == "No token for \"kimi-code\". Run /login to authenticate.") {
+            return json_util::object({{"status", Json("not_logged_in")}});
         }
         throw std::runtime_error("quota_unavailable");
     }
-    if (text(data, "kind") != "ok") throw std::runtime_error("invalid_quota_response");
-    auto result = object({{"status", Json("ok")}});
+    if (json_util::text(data, "kind") != "ok") throw std::runtime_error("invalid_quota_response");
+    auto result = json_util::object({{"status", Json("ok")}});
     // The server API reports only the quota windows the account has.
     // Read this shape alone; summary and limits belong to the earlier reply.
     if (data.find("quota")) {
-        const auto& usages = member(member(data, "quota"), "usages");
+        const auto& usages = json_util::member(json_util::member(data, "quota"), "usages");
         if (!usages.is_object()) throw std::runtime_error("invalid_quota_usages");
         if (const auto* usage = usages.find("limit5h")) {
             result.set("primary", ratio_window(*usage, "5-hour", 300));
@@ -155,17 +158,17 @@ Json normalize_quota(const Json& response)
         }
         return result;
     }
-    if (!member(data, "summary").is_null()) result.set("secondary", window(member(data, "summary"), "Weekly", 10080));
-    const auto& limits = member(data, "limits");
+    if (!json_util::member(data, "summary").is_null()) result.set("secondary", window(json_util::member(data, "summary"), "Weekly", 10080));
+    const auto& limits = json_util::member(data, "limits");
     if (!limits.is_null()) {
         if (!limits.is_array()) throw std::runtime_error("invalid_quota_limits");
         for (const auto& row : limits.as_array()) {
             if (!row.is_object()) throw std::runtime_error("invalid_quota_limit");
-            const auto& period = member(row, "window");
+            const auto& period = json_util::member(row, "window");
             if (period.is_null()) continue;
-            const auto duration = integer(member(period, "duration"), 1);
-            if (!bounded_string(member(period, "unit"), 128)) throw std::runtime_error("invalid_quota_window");
-            if (duration != 5 || text(period, "unit") != "hour") continue;
+            const auto duration = integer(json_util::member(period, "duration"), 1);
+            if (!json_util::bounded_string(json_util::member(period, "unit"), 128)) throw std::runtime_error("invalid_quota_window");
+            if (duration != 5 || json_util::text(period, "unit") != "hour") continue;
             if (result.find("primary")) throw std::runtime_error("duplicate_quota_window");
             result.set("primary", window(row, "5-hour", 300));
         }
@@ -221,11 +224,11 @@ Json quota_probe_failure(std::string_view reason)
     };
     for (const auto& failure : failures) {
         if (reason == failure.reason) {
-            return object({{"status", Json("error")}, {"reason_code", Json(std::string(failure.reason))},
+            return json_util::object({{"status", Json("error")}, {"reason_code", Json(std::string(failure.reason))},
                 {"detail", Json(failure.detail)}});
         }
     }
-    return object({{"status", Json("error")}, {"reason_code", Json("quota_probe_failed")},
+    return json_util::object({{"status", Json("error")}, {"reason_code", Json("quota_probe_failed")},
         {"detail", Json("The Kimi quota check failed unexpectedly.")}});
 }
 
@@ -235,7 +238,7 @@ void handle_quota(addon::Invocation_context& context)
     if (context.request().operation == "prepare") {
         const auto request = addon::decode_probe_prepare_request(context.request().payload, &error, 2);
         if (!request) { context.fail(addon::Result_status::FAILED, error.reason_code, error.detail); return; }
-        const auto args = literal_argv(request->context.launcher.script_body);
+        const auto args = addon::literal_argv(request->context.launcher.script_body);
         if (args.empty() || !is_kimi_program(args.front())) {
             context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable");
             return;
@@ -276,12 +279,12 @@ void handle_quota(addon::Invocation_context& context)
         context.fail(addon::Result_status::FAILED, request->inspection.timed_out ? "quota_timeout" : "quota_probe_failed");
         return;
     }
-    const auto payload = parse(request->inspection.stdout_bytes);
+    const auto payload = json_util::parse(request->inspection.stdout_bytes);
     if (!payload || !payload->is_object()) { context.fail(addon::Result_status::FAILED, "invalid_quota_response"); return; }
-    const auto status = text(*payload, "status");
+    const auto status = json_util::text(*payload, "status");
     if (status == "error") {
-        const auto failure = quota_probe_failure(text(*payload, "reason_code"));
-        context.fail(addon::Result_status::FAILED, text(failure, "reason_code"), text(failure, "detail"));
+        const auto failure = quota_probe_failure(json_util::text(*payload, "reason_code"));
+        context.fail(addon::Result_status::FAILED, json_util::text(failure, "reason_code"), json_util::text(failure, "detail"));
         return;
     }
     if (status != "ok" && status != "not_logged_in" && status != "unavailable") {
@@ -299,8 +302,8 @@ void handle_quota(addon::Invocation_context& context)
     if (status != "ok" && (payload->find("primary") || payload->find("secondary"))) {
         throw std::runtime_error("invalid_quota_response");
     }
-    if (payload->find("primary")) observation.primary = observation_window(member(*payload, "primary"));
-    if (payload->find("secondary")) observation.secondary = observation_window(member(*payload, "secondary"));
+    if (payload->find("primary")) observation.primary = observation_window(json_util::member(*payload, "primary"));
+    if (payload->find("secondary")) observation.secondary = observation_window(json_util::member(*payload, "secondary"));
     if (status == "ok" && !observation.primary && !observation.secondary) throw std::runtime_error("quota_window_unavailable");
     addon::Quota_inspect_result result;
     result.complete = true;

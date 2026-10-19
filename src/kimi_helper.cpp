@@ -15,6 +15,8 @@
 #include <string>
 #include <thread>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -24,7 +26,7 @@ bool asks_changed_files(const Json& body)
 {
     std::string prompt;
     for (const auto key : {"prompt", "user_prompt", "message"}) {
-        if (kimi::member(body, key).is_string()) { prompt = kimi::lower(kimi::text(body, key)); break; }
+        if (json_util::member(body, key).is_string()) { prompt = kimi::lower(json_util::text(body, key)); break; }
     }
     bool presentation = false, changes = false;
     for (const auto verb : {"show", "open", "view", "display", "bring up", "pull up"}) {
@@ -60,16 +62,16 @@ int main()
     input_limits.max_string_bytes = 4 * 1024 * 1024;
     const auto payload = addon::parse_json(input, input_limits, nullptr);
     if (!payload || !payload->is_object()) return 0;
-    auto name = kimi::text(*payload, "hook_event_name");
-    if (name.empty()) name = kimi::text(*payload, "event");
+    auto name = json_util::text(*payload, "hook_event_name");
+    if (name.empty()) name = json_util::text(*payload, "event");
     if (name != "SessionStart" && name != "SessionEnd" && name != "UserPromptSubmit") return 0;
     const int budget_ms = name == "SessionStart" ? 16000 : name == "SessionEnd" ? 11000 : 21000;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
     addon::Helper_client client(*environment, [&] { return std::chrono::steady_clock::now() >= deadline; });
     const auto id = addon::random_nonce_hex();
     const auto nonce = addon::random_nonce_hex();
-    auto body = kimi::object({{"session_id", Json(kimi::text(*payload, "session_id"))},
-        {"source", Json(kimi::text(*payload, "source"))}});
+    auto body = json_util::object({{"session_id", Json(json_util::text(*payload, "session_id"))},
+        {"source", Json(json_util::text(*payload, "source"))}});
     std::filesystem::path guidance;
     try {
         kimi::Environment runtime;
@@ -79,7 +81,7 @@ int main()
         const auto home = kimi::code_home(runtime, kimi::path_string(std::filesystem::current_path()));
         body.set("kimi_code_home", Json(home));
         guidance = kimi::session_guidance_path(addon::path_from_utf8(home), environment->generation_nonce,
-            kimi::text(*payload, "session_id"));
+            json_util::text(*payload, "session_id"));
     }
     catch (const std::exception&) { return 1; }
     auto result = client.deliver_provider_event(name, body, id, nonce);
