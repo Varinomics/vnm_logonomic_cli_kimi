@@ -75,8 +75,8 @@ void write(const fs::path& path, std::string_view bytes)
 void native_session(const fs::path& session, std::string_view parent = {}, std::string_view cwd = {})
 {
     auto state = kimi::object({{"id", addon::Json_value(kimi::path_string(session.filename()))},
-        {"version", addon::Json_value(2)}, {"createdAt", addon::Json_value(1789199999000ll)},
-        {"updatedAt", addon::Json_value(1789200000000ll)}, {"archived", addon::Json_value(false)},
+        {"version", addon::Json_value(2)}, {"createdAt", addon::Json_value(std::int64_t{1789199999000})},
+        {"updatedAt", addon::Json_value(std::int64_t{1789200000000})}, {"archived", addon::Json_value(false)},
         {"agents", kimi::object({{"main", kimi::object({{"type", addon::Json_value("main")}})}})},
         {"custom", addon::Json_value::object()}});
     if (!parent.empty()) state.set("forkedFrom", addon::Json_value(parent));

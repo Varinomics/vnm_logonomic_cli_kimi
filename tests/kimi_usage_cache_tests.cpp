@@ -103,8 +103,8 @@ void native_session(const fs::path& session, const fs::path& cwd = {})
     auto state = addon::Json_value::object();
     state.set("id", addon::Json_value(addon::path_to_utf8(session.filename())));
     state.set("version", addon::Json_value(2));
-    state.set("createdAt", addon::Json_value(1789199999000ll));
-    state.set("updatedAt", addon::Json_value(1789200000000ll));
+    state.set("createdAt", addon::Json_value(std::int64_t{1789199999000}));
+    state.set("updatedAt", addon::Json_value(std::int64_t{1789200000000}));
     state.set("archived", addon::Json_value(false));
     state.set("agents", addon::Json_value::object());
     state.set("custom", addon::Json_value::object());
@@ -1221,7 +1221,7 @@ void owned_event_contract(const fs::path& package, const fs::path& fixture)
     native_session(unknown_descendant, repository);
     auto descendant_state = addon::Json_value::object();
     descendant_state.set("id", addon::Json_value("unknown-descendant"));
-    descendant_state.set("createdAt", addon::Json_value(1789200000000ll));
+    descendant_state.set("createdAt", addon::Json_value(std::int64_t{1789200000000}));
     descendant_state.set("forkedFrom", addon::Json_value("parent"));
     write(unknown_descendant / "state.json", addon::serialize_json(descendant_state));
     write(wire_path(unknown_descendant), inherited + marker + usage(20, 1789200002000ull));
@@ -1304,7 +1304,7 @@ void owned_event_contract(const fs::path& package, const fs::path& fixture)
     native_session(orphan, repository);
     auto orphan_state = addon::Json_value::object();
     orphan_state.set("id", addon::Json_value("fresh-orphan"));
-    orphan_state.set("createdAt", addon::Json_value(1789200000000ll));
+    orphan_state.set("createdAt", addon::Json_value(std::int64_t{1789200000000}));
     orphan_state.set("forkedFrom", addon::Json_value("missing"));
     write(orphan / "state.json", addon::serialize_json(orphan_state));
     write(wire_path(orphan), usage(30, 1789200000000ull) + marker);
