@@ -22,6 +22,8 @@
 #include <string>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace kimi {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
@@ -433,9 +435,9 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     addon::Classify_event_result result;
     const auto& event = request.event;
     if (event.name != "SessionStart" && event.name != "SessionEnd") return result;
-    const auto session = text(event.body, "session_id");
-    const auto source = text(event.body, "source");
-    if (!bounded_string(member(event.body, "session_id"), 256) || source.size() > 128 ||
+    const auto session = json_util::text(event.body, "session_id");
+    const auto source = json_util::text(event.body, "source");
+    if (!json_util::bounded_string(json_util::member(event.body, "session_id"), 256) || source.size() > 128 ||
         source.find('\0') != std::string::npos || session.find_first_of("/\\") != std::string::npos || session == "." || session == "..") {
         throw std::runtime_error("invalid_kimi_session");
     }
@@ -445,7 +447,7 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     observation.session_source = source;
     std::lock_guard lock(m_state->mutex);
     if (event.name == "SessionStart") {
-        const auto home = text(event.body, "kimi_code_home");
+        const auto home = json_util::text(event.body, "kimi_code_home");
         if (home.empty() || !addon::path_from_utf8(home).is_absolute()) throw std::runtime_error("invalid_kimi_home");
         auto found = m_state->sessions.find(request.transition_nonce);
         if (found == m_state->sessions.end()) throw std::runtime_error("correlation_not_reserved");
@@ -461,7 +463,7 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
         result.classification = addon::Classification::TRANSITION;
         result.transition = source == "resume" ? addon::Transition_kind::RESUME : addon::Transition_kind::START;
         observation.session_transition = addon::Session_transition::STARTED;
-        observation.resume_record = object({{"provider_session_id", Json(session)}});
+        observation.resume_record = json_util::object({{"provider_session_id", Json(session)}});
     }
     else {
         const auto key = request.ledger.current_transition ? request.ledger.current_transition->nonce : std::string{};

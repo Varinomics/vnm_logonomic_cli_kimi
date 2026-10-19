@@ -16,6 +16,8 @@
 #include <regex>
 #include <system_error>
 #include <utility>
+namespace json_util = logonomic::cli_addon::json;
+
 namespace kimi {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
@@ -378,7 +380,7 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
         return result;
     };
     const auto before = fingerprint();
-    auto cache_context = object({{"identity", Json(before)}, {"working_directory", Json(working_directory)}, {"resume", Json(resume)}});
+    auto cache_context = json_util::object({{"identity", Json(before)}, {"working_directory", Json(working_directory)}, {"resume", Json(resume)}});
     auto cache_environment = Json::object();
     for (const auto& [name, value] : environment) cache_environment.set(name, Json(value));
     cache_context.set("environment", std::move(cache_environment));

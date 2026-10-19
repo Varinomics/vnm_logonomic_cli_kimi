@@ -42,13 +42,13 @@ extern char** environ;
 #include <thread>
 #include <vector>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 using kimi::Json;
-using kimi::member;
-using kimi::text;
 using Clock = std::chrono::steady_clock;
 
 struct Scrub_string
@@ -242,16 +242,16 @@ std::optional<unsigned short> owned_port(const fs::path& directory, std::uint64_
     for (const auto& name : registry_names(directory)) {
         if (preexisting.contains(name)) continue;
         std::optional<Json> document;
-        try { document = kimi::parse(read_file(directory / addon::path_from_utf8(name), 16384)); }
+        try { document = json_util::parse(read_file(directory / addon::path_from_utf8(name), 16384)); }
         catch (const std::exception&) { continue; }
-        if (!document || !valid_integer(member(*document, "pid"), 1, 9007199254740991ull) ||
-            static_cast<std::uint64_t>(member(*document, "pid").as_integer()) != pid) continue;
-        const auto id = text(*document, "server_id");
-        if (id.empty() || id.size() > 128 || name != id + ".json" || text(*document, "host") != "127.0.0.1" ||
-            !valid_integer(member(*document, "port"), 0, 65535) ||
-            !valid_integer(member(*document, "started_at"), 1, 9007199254740991ull) ||
-            !valid_integer(member(*document, "heartbeat_at"), 1, 9007199254740991ull)) throw std::runtime_error("invalid_owned_server");
-        const auto port = member(*document, "port").as_integer();
+        if (!document || !valid_integer(json_util::member(*document, "pid"), 1, 9007199254740991ull) ||
+            static_cast<std::uint64_t>(json_util::member(*document, "pid").as_integer()) != pid) continue;
+        const auto id = json_util::text(*document, "server_id");
+        if (id.empty() || id.size() > 128 || name != id + ".json" || json_util::text(*document, "host") != "127.0.0.1" ||
+            !valid_integer(json_util::member(*document, "port"), 0, 65535) ||
+            !valid_integer(json_util::member(*document, "started_at"), 1, 9007199254740991ull) ||
+            !valid_integer(json_util::member(*document, "heartbeat_at"), 1, 9007199254740991ull)) throw std::runtime_error("invalid_owned_server");
+        const auto port = json_util::member(*document, "port").as_integer();
         if (port == 0) continue;
         if (found) throw std::runtime_error("ambiguous_owned_server");
         found = static_cast<unsigned short>(port);
@@ -448,7 +448,7 @@ std::optional<Json> direct_quota(const fs::path& directory, Clock::time_point de
         }
         auto bytes = read_file(directory / "credentials" / (route->credential_name + ".json"), 4 * 1024 * 1024);
         Scrub_string scrub_bytes{bytes};
-        const auto record = kimi::parse(bytes);
+        const auto record = json_util::parse(bytes);
         if (!record) {
             return std::nullopt;
         }
@@ -463,7 +463,7 @@ std::optional<Json> direct_quota(const fs::path& directory, Clock::time_point de
         if (!raw) {
             return std::nullopt;
         }
-        const auto response = kimi::parse(*raw);
+        const auto response = json_util::parse(*raw);
         return response ? kimi::normalize_managed_quota(*response) : std::nullopt;
     }
     catch (const std::runtime_error&) {
@@ -504,7 +504,7 @@ Json run(const std::string& program, const std::string& home)
     if (token.empty() || token.find_first_of("\r\n") != std::string::npos) throw std::runtime_error("invalid_quota_token");
     try {
         const auto raw = http(*port, token, false, operation_deadline);
-        const auto response = kimi::parse(raw);
+        const auto response = json_util::parse(raw);
         if (!response) throw std::runtime_error("invalid_quota_response");
         auto result = kimi::normalize_quota(*response);
         try { http(*port, token, true, operation_deadline); } catch (const std::exception&) {}

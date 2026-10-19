@@ -34,6 +34,8 @@
 #include <stdexcept>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace kimi {
 namespace {
 
@@ -372,14 +374,14 @@ Json optional_document(const fs::path& path)
     std::ifstream stream(path, std::ios::binary);
     if (!stream) return Json::object();
     std::string bytes((std::istreambuf_iterator<char>(stream)), {});
-    const auto result = parse(bytes);
+    const auto result = json_util::parse(bytes);
     return result && result->is_object() ? *result : Json::object();
 }
 
 std::string recorded_cwd(const fs::path& session, const Json& workspaces)
 {
-    const auto state = text(optional_document(session / "state.json"), "cwd");
-    const auto mapped = text(member(member(workspaces, "workspaces"), path_string(session.parent_path().filename())), "root");
+    const auto state = json_util::text(optional_document(session / "state.json"), "cwd");
+    const auto mapped = json_util::text(json_util::member(json_util::member(workspaces, "workspaces"), path_string(session.parent_path().filename())), "root");
     if (!state.empty() && !mapped.empty() && path_key(addon::path_from_utf8(state)) != path_key(addon::path_from_utf8(mapped))) return {};
     return state.empty() ? mapped : state;
 }
@@ -406,7 +408,7 @@ public:
     {
         check_cancel(context);
         while (!line.empty() && line.front() == '\0') line.remove_prefix(1);
-        const auto event = parse(line);
+        const auto event = json_util::parse(line);
         if (!event || !event->is_object()) throw std::runtime_error("usage_record_invalid");
         consume_event(*event, context);
     }
@@ -414,11 +416,11 @@ public:
     void consume_event(const Json& event, addon::Invocation_context& context)
     {
         check_cancel(context);
-        if (text(event, "type") != "usage.record") return;
-        const auto& native_time = member(event, "time");
+        if (json_util::text(event, "type") != "usage.record") return;
+        const auto& native_time = json_util::member(event, "time");
         const auto milliseconds = count(native_time);
         const auto date = local_date(milliseconds);
-        const auto& usage = member(event, "usage");
+        const auto& usage = json_util::member(event, "usage");
         if (!usage.is_object()) throw std::runtime_error("usage_record_invalid");
         bool recognized = false;
         std::uint64_t event_tokens = 0;
@@ -443,7 +445,7 @@ public:
             }
             else add(m_positions[*instant], event_tokens);
         }
-        const auto model = text(event, "model");
+        const auto model = json_util::text(event, "model");
         if (!m_record.model || m_record.model->empty()) m_record.model = model;
         else if (!model.empty() && *m_record.model != model) m_record.model = "multiple";
         m_record.completed_date = std::max(m_record.completed_date, date);
@@ -493,13 +495,13 @@ std::optional<Json> fork_session_identity(const fs::path& wire)
     const auto id = path_string(session.filename());
     const auto* created = state.find("createdAt");
     const auto* parent = state.find("forkedFrom");
-    if (text(state, "id") != id || !created || !created->is_integer() || created->as_integer() < 0 ||
+    if (json_util::text(state, "id") != id || !created || !created->is_integer() || created->as_integer() < 0 ||
         (parent && !parent->is_string())) return std::nullopt;
     const auto parent_id = parent ? parent->as_string() : std::string{};
     const auto parent_path = addon::path_from_utf8(parent_id);
     if (!parent_id.empty() && (parent_path.is_absolute() || parent_path.has_parent_path() ||
             parent_id == "." || parent_id == "..")) return std::nullopt;
-    return object({{"session_id", Json(id)}, {"parent_session_id", Json(parent_id)},
+    return json_util::object({{"session_id", Json(id)}, {"parent_session_id", Json(parent_id)},
         {"created_at", *created}, {"agent_id", Json(path_string(wire.parent_path().filename()))}});
 }
 
@@ -509,7 +511,7 @@ bool same_counted_usage(const addon::Usage_record& observed, const addon::Usage_
         const auto encoded = addon::encode_usage_record(record, 2);
         auto result = Json::object();
         for (const auto* key : {"total_tokens", "coverage_unit", "input", "output", "cache_read", "cache_creation"}) {
-            result.set(key, member(encoded, key));
+            result.set(key, json_util::member(encoded, key));
         }
         return addon::serialize_json_canonical(result);
     };
@@ -530,22 +532,22 @@ bool valid_fork_evidence(const Json& evidence, const fs::path& path)
     auto shape = evidence;
     shape.erase("unresolved_event_count");
     shape.erase("creator_session_id");
-    if (!exact_keys(shape, {"identity", "native_prefix_sha256_hex", "event_sha256_hex",
+    if (!json_util::exact_keys(shape, {"identity", "native_prefix_sha256_hex", "event_sha256_hex",
             "event_count", "fork_event_count", "forked", "accounting"})) return false;
-    const auto& identity = member(evidence, "identity");
-    if (!exact_keys(identity, {"session_id", "parent_session_id", "created_at", "agent_id"}) ||
-        text(identity, "session_id") != path_string(path.parent_path().parent_path().parent_path().filename()) ||
-        text(identity, "agent_id") != path_string(path.parent_path().filename()) ||
-        !member(identity, "parent_session_id").is_string() || !member(identity, "created_at").is_integer() ||
-        member(identity, "created_at").as_integer() < 0 ||
-        !addon::sha256_from_hex(text(evidence, "native_prefix_sha256_hex")) ||
-        !addon::sha256_from_hex(text(evidence, "event_sha256_hex")) ||
-        !member(evidence, "event_count").is_integer() || !member(evidence, "fork_event_count").is_integer() ||
-        !member(evidence, "forked").is_boolean()) return false;
-    const auto events = member(evidence, "event_count").as_integer();
-    const auto boundary = member(evidence, "fork_event_count").as_integer();
-    const auto accounting = text(evidence, "accounting");
-    const auto parent_id = text(identity, "parent_session_id");
+    const auto& identity = json_util::member(evidence, "identity");
+    if (!json_util::exact_keys(identity, {"session_id", "parent_session_id", "created_at", "agent_id"}) ||
+        json_util::text(identity, "session_id") != path_string(path.parent_path().parent_path().parent_path().filename()) ||
+        json_util::text(identity, "agent_id") != path_string(path.parent_path().filename()) ||
+        !json_util::member(identity, "parent_session_id").is_string() || !json_util::member(identity, "created_at").is_integer() ||
+        json_util::member(identity, "created_at").as_integer() < 0 ||
+        !addon::sha256_from_hex(json_util::text(evidence, "native_prefix_sha256_hex")) ||
+        !addon::sha256_from_hex(json_util::text(evidence, "event_sha256_hex")) ||
+        !json_util::member(evidence, "event_count").is_integer() || !json_util::member(evidence, "fork_event_count").is_integer() ||
+        !json_util::member(evidence, "forked").is_boolean()) return false;
+    const auto events = json_util::member(evidence, "event_count").as_integer();
+    const auto boundary = json_util::member(evidence, "fork_event_count").as_integer();
+    const auto accounting = json_util::text(evidence, "accounting");
+    const auto parent_id = json_util::text(identity, "parent_session_id");
     const auto parent = addon::path_from_utf8(parent_id);
     const auto* unresolved = evidence.find("unresolved_event_count");
     const auto* creator = evidence.find("creator_session_id");
@@ -557,7 +559,7 @@ bool valid_fork_evidence(const Json& evidence, const fs::path& path)
     return (parent_id.empty() || (!parent.is_absolute() && !parent.has_parent_path() &&
             parent_id != "." && parent_id != "..")) &&
         events >= 0 && static_cast<std::uint64_t>(events) <= k_max_exact && boundary >= 0 && boundary <= events &&
-        (member(evidence, "forked").as_boolean() || boundary == 0) &&
+        (json_util::member(evidence, "forked").as_boolean() || boundary == 0) &&
         (accounting == "raw" || accounting == "owned" || retained);
 }
 
@@ -713,7 +715,7 @@ public:
     const std::string& key() const { return m_key; }
     Json value() const
     {
-        const auto value = parse(std::string_view(m_line).substr(m_key.size() + 1));
+        const auto value = json_util::parse(std::string_view(m_line).substr(m_key.size() + 1));
         if (!value) throw std::runtime_error("usage_cache_record_invalid");
         return *value;
     }
@@ -773,7 +775,7 @@ public:
         require_io(read_line(m_rows, line));
         const auto delimiter = line.find('\t');
         require_io(delimiter != std::string::npos);
-        auto value = parse(std::string_view(line).substr(delimiter + 1));
+        auto value = json_util::parse(std::string_view(line).substr(delimiter + 1));
         if (!value) throw std::runtime_error("usage_cache_record_invalid");
         return {line.substr(0, delimiter), std::move(*value)};
     }
@@ -912,12 +914,12 @@ public:
             expect(',');
         }
         expect('}');
-        if (count(member(header, "version")) != 1 || text(header, "profile") != owner) invalid();
+        if (count(json_util::member(header, "version")) != 1 || json_util::text(header, "profile") != owner) invalid();
         if (have_files || have_receipts) {
-            if (!have_files || !have_receipts || !exact_keys(header, {"version", "profile"}) || peek() != EOF) invalid();
+            if (!have_files || !have_receipts || !json_util::exact_keys(header, {"version", "profile"}) || peek() != EOF) invalid();
             return;
         }
-        if (!exact_keys(header, {"version", "profile", "format"}) || text(header, "format") != "jsonl") invalid();
+        if (!json_util::exact_keys(header, {"version", "profile", "format"}) || json_util::text(header, "format") != "jsonl") invalid();
         // Header and each following row are separate complete JSON documents.
         std::string line;
         auto delimiter = m_input.get();
@@ -925,15 +927,15 @@ public:
         require_io(delimiter == '\n');
         while (read_line(m_input, line)) {
             check_cancel(m_context);
-            const auto row = parse(line);
+            const auto row = json_util::parse(line);
             if (!row || !row->is_object()) invalid();
             if (row->find("receipt")) {
-                if (!exact_keys(*row, {"receipt"})) invalid();
-                receipt(member(*row, "receipt"));
+                if (!json_util::exact_keys(*row, {"receipt"})) invalid();
+                receipt(json_util::member(*row, "receipt"));
             }
             else if (row->find("fork_event")) {
-                if (!exact_keys(*row, {"fork_event"})) invalid();
-                event(member(*row, "fork_event"));
+                if (!json_util::exact_keys(*row, {"fork_event"})) invalid();
+                event(json_util::member(*row, "fork_event"));
             }
             else file(*row);
         }
@@ -982,7 +984,7 @@ private:
             else if (byte == '}' || byte == ']') --depth;
             if (!quoted && depth == 0 && (byte == '"' || byte == '}' || byte == ']')) break;
         }
-        const auto parsed = parse(bytes);
+        const auto parsed = json_util::parse(bytes);
         if (!parsed) invalid();
         return *parsed;
     }
@@ -993,7 +995,7 @@ private:
 
 Json encode_file_accounting(std::string_view path, const File_record& file)
 {
-    return object({{"path", Json(path)}, {"size", Json(file.size)},
+    return json_util::object({{"path", Json(path)}, {"size", Json(file.size)},
         {"modified_msecs", Json(file.modified_ms)}, {"recorded_cwd", Json(file.cwd)},
         {"stale_breakdown", Json(file.stale_breakdown)},
         {"usage", file.usage ? addon::encode_usage_record(*file.usage, 2) : Json{}}});
@@ -1003,7 +1005,7 @@ Json encode_file(std::string_view path, const File_record& file, bool temporal =
 {
     auto row = encode_file_accounting(path, file);
     if (file.fork_evidence) {
-        row.set("usage-fork-ownership", object({{"version", Json(1)},
+        row.set("usage-fork-ownership", json_util::object({{"version", Json(1)},
             {"parent_sha256_hex", Json(addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(row))))},
             {"evidence", *file.fork_evidence}}));
     }
@@ -1012,7 +1014,7 @@ Json encode_file(std::string_view path, const File_record& file, bool temporal =
     if (file.usage && file.usage->temporal) {
         auto evidence = *file.usage->temporal;
         evidence.retained_from.reset();
-        auto carrier = object({{"version", Json(1)},
+        auto carrier = json_util::object({{"version", Json(1)},
             {"parent_sha256_hex", Json(addon::to_hex(addon::Sha256::digest(
                 addon::serialize_json_canonical(encode_file_accounting(path, file)))))},
             {"evidence", addon::encode_usage_temporal(evidence)}});
@@ -1029,42 +1031,42 @@ File_record decode_file(const Json& row)
     accounting.erase("usage-temporal");
     accounting.erase("usage-fork-ownership");
     File_record file;
-    const auto path = text(row, "path");
-    if (!exact_keys(accounting, {"path", "size", "modified_msecs", "recorded_cwd", "usage", "stale_breakdown"}) ||
-        !addon::path_from_utf8(path).is_absolute() || !member(row, "modified_msecs").is_integer() ||
-        !member(row, "stale_breakdown").is_boolean())
+    const auto path = json_util::text(row, "path");
+    if (!json_util::exact_keys(accounting, {"path", "size", "modified_msecs", "recorded_cwd", "usage", "stale_breakdown"}) ||
+        !addon::path_from_utf8(path).is_absolute() || !json_util::member(row, "modified_msecs").is_integer() ||
+        !json_util::member(row, "stale_breakdown").is_boolean())
     {
         throw std::runtime_error("usage_cache_invalid");
     }
-    file.stale_breakdown = member(row, "stale_breakdown").as_boolean();
-    file.size = count(member(row, "size"));
-    file.modified_ms = member(row, "modified_msecs").as_integer();
-    file.cwd = text(row, "recorded_cwd");
-    if (!member(row, "usage").is_null()) {
+    file.stale_breakdown = json_util::member(row, "stale_breakdown").as_boolean();
+    file.size = count(json_util::member(row, "size"));
+    file.modified_ms = json_util::member(row, "modified_msecs").as_integer();
+    file.cwd = json_util::text(row, "recorded_cwd");
+    if (!json_util::member(row, "usage").is_null()) {
         addon::Contract_failure failure;
-        file.usage = addon::decode_usage_record(member(row, "usage"), &failure, 2);
+        file.usage = addon::decode_usage_record(json_util::member(row, "usage"), &failure, 2);
         if (!file.usage) throw std::runtime_error("usage_cache_record_invalid");
     }
     if (const auto* carrier = row.find("usage-fork-ownership")) {
         file.fork_carrier = *carrier;
-        if (exact_keys(*carrier, {"version", "parent_sha256_hex", "evidence"}) &&
-            member(*carrier, "version").is_integer() && member(*carrier, "version").as_integer() == 1 &&
-            text(*carrier, "parent_sha256_hex") ==
+        if (json_util::exact_keys(*carrier, {"version", "parent_sha256_hex", "evidence"}) &&
+            json_util::member(*carrier, "version").is_integer() && json_util::member(*carrier, "version").as_integer() == 1 &&
+            json_util::text(*carrier, "parent_sha256_hex") ==
                 addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(accounting))) &&
-            valid_fork_evidence(member(*carrier, "evidence"), addon::path_from_utf8(path)))
+            valid_fork_evidence(json_util::member(*carrier, "evidence"), addon::path_from_utf8(path)))
         {
-            file.fork_evidence = member(*carrier, "evidence");
+            file.fork_evidence = json_util::member(*carrier, "evidence");
         }
     }
     if (const auto* carrier = row.find("usage-temporal")) {
         file.temporal_carrier = *carrier;
-        if (file.usage && exact_keys(*carrier, {"version", "parent_sha256_hex", "evidence"}) &&
-            member(*carrier, "version").is_integer() && member(*carrier, "version").as_integer() == 1 &&
-            text(*carrier, "parent_sha256_hex") ==
+        if (file.usage && json_util::exact_keys(*carrier, {"version", "parent_sha256_hex", "evidence"}) &&
+            json_util::member(*carrier, "version").is_integer() && json_util::member(*carrier, "version").as_integer() == 1 &&
+            json_util::text(*carrier, "parent_sha256_hex") ==
                 addon::to_hex(addon::Sha256::digest(addon::serialize_json_canonical(accounting))) &&
             addon::serialize_json(*carrier).size() <= addon::k_max_usage_temporal_bytes)
         {
-            auto evidence = addon::decode_usage_temporal(member(*carrier, "evidence"), nullptr);
+            auto evidence = addon::decode_usage_temporal(json_util::member(*carrier, "evidence"), nullptr);
             if (evidence && evidence->parent.record_id == file.usage->record_id &&
                 evidence->parent.total_tokens == file.usage->total_tokens &&
                 evidence->parent.snapshot_id == "provider-file" && !evidence->parent.source_account_key &&
@@ -1088,46 +1090,46 @@ File_record decode_file(const Json& row)
 File_record native_file_record(const Json& row)
 {
     File_record file;
-    file.size = count(member(row, "size"));
-    if (!member(row, "modified_msecs").is_integer()) throw std::runtime_error("usage_native_cache_invalid");
-    file.modified_ms = member(row, "modified_msecs").as_integer();
-    const auto& records = member(row, "records");
+    file.size = count(json_util::member(row, "size"));
+    if (!json_util::member(row, "modified_msecs").is_integer()) throw std::runtime_error("usage_native_cache_invalid");
+    file.modified_ms = json_util::member(row, "modified_msecs").as_integer();
+    const auto& records = json_util::member(row, "records");
     if (!records.is_array() || records.as_array().size() > 1) throw std::runtime_error("usage_native_cache_invalid");
-    const auto& marker = member(member(row, "capabilities"), "token_breakdown_cache");
-    file.stale_breakdown = !member(marker, "version").is_integer() ||
-        member(marker, "version").as_integer() != 2 ||
-        !member(marker, "parser_revision").is_integer() || member(marker, "parser_revision").as_integer() != 2;
+    const auto& marker = json_util::member(json_util::member(row, "capabilities"), "token_breakdown_cache");
+    file.stale_breakdown = !json_util::member(marker, "version").is_integer() ||
+        json_util::member(marker, "version").as_integer() != 2 ||
+        !json_util::member(marker, "parser_revision").is_integer() || json_util::member(marker, "parser_revision").as_integer() != 2;
     if (records.as_array().empty()) return file;
     const auto& source = records.as_array().front();
     addon::Usage_record record;
-    auto native_session = text(source, "session_id");
-    if (const auto* identity = member(source, "capabilities").find("usage-record-identity")) {
+    auto native_session = json_util::text(source, "session_id");
+    if (const auto* identity = json_util::member(source, "capabilities").find("usage-record-identity")) {
         // The host rewrites the outer session_id to the mapped record's hex
         // identity. Its preserved native key still names the owning directory.
-        if (!identity->is_object() || !member(*identity, "version").is_integer() ||
-            member(*identity, "version").as_integer() != 1 ||
-            !bounded_string(member(*identity, "legacy_session_key"), 4096))
+        if (!identity->is_object() || !json_util::member(*identity, "version").is_integer() ||
+            json_util::member(*identity, "version").as_integer() != 1 ||
+            !json_util::bounded_string(json_util::member(*identity, "legacy_session_key"), 4096))
         {
             throw std::runtime_error("usage_native_session_invalid");
         }
-        native_session = text(*identity, "legacy_session_key");
+        native_session = json_util::text(*identity, "legacy_session_key");
     }
     record.record_id = canonical_usage_session_id(native_session);
     if (record.record_id.empty()) throw std::runtime_error("usage_native_session_invalid");
     record.session_key = record.record_id;
-    record.completed_date = text(source, "completed_date");
-    record.total_tokens = count(member(source, "total_tokens"));
-    record.source_path = text(source, "source_path");
-    record.model = text(source, "model");
-    record.counter_field = text(source, "counter_field");
-    record.source_counter_semantics = text(source, "counter_semantics");
-    file.cwd = text(source, "recorded_cwd");
+    record.completed_date = json_util::text(source, "completed_date");
+    record.total_tokens = count(json_util::member(source, "total_tokens"));
+    record.source_path = json_util::text(source, "source_path");
+    record.model = json_util::text(source, "model");
+    record.counter_field = json_util::text(source, "counter_field");
+    record.source_counter_semantics = json_util::text(source, "counter_semantics");
+    file.cwd = json_util::text(source, "recorded_cwd");
     auto fields = amounts(record);
-    const auto& breakdown = member(member(source, "capabilities"), "token_breakdown");
+    const auto& breakdown = json_util::member(json_util::member(source, "capabilities"), "token_breakdown");
     constexpr std::array<std::string_view, 4> names{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"};
-    const bool current = !file.stale_breakdown && member(breakdown, "version").is_integer() &&
-        member(breakdown, "version").as_integer() == 2;
-    record.coverage_unit = current && text(breakdown, "coverage_unit") == "records"
+    const bool current = !file.stale_breakdown && json_util::member(breakdown, "version").is_integer() &&
+        json_util::member(breakdown, "version").as_integer() == 2;
+    record.coverage_unit = current && json_util::text(breakdown, "coverage_unit") == "records"
         ? addon::Usage_coverage_unit::RECORDS : addon::Usage_coverage_unit::SESSIONS;
     for (std::size_t index = 0; index < fields.size(); ++index) {
         auto& destination = *fields[index];
@@ -1135,15 +1137,15 @@ File_record native_file_record(const Json& row)
         destination.value = 0;
         destination.coverage = addon::Usage_field_coverage{0, 1, false, addon::Usage_support::UNKNOWN};
         if (!current) continue;
-        const auto& value = member(breakdown, names[index]);
+        const auto& value = json_util::member(breakdown, names[index]);
         auto& coverage = *destination.coverage;
-        coverage.covered_records = count(member(value, "covered_records"));
-        coverage.total_records = count(member(value, "total_records"));
+        coverage.covered_records = count(json_util::member(value, "covered_records"));
+        coverage.total_records = count(json_util::member(value, "total_records"));
         if (const auto* overflow = value.find("overflow")) {
             if (!overflow->is_boolean()) throw std::runtime_error("usage_native_breakdown_invalid");
             coverage.overflow = overflow->as_boolean();
         }
-        const auto support = text(value, "support");
+        const auto support = json_util::text(value, "support");
         if (support == "supported") coverage.support = addon::Usage_support::SUPPORTED;
         else if (support == "unsupported") {
             coverage.support = addon::Usage_support::UNSUPPORTED;
@@ -1181,9 +1183,9 @@ void import_native_cache(Row_sorter& files, const addon::Usage_native_file_cache
         digest.update(line);
         digest.update("\n");
         if (imported) continue;
-        const auto row = parse(line);
+        const auto row = json_util::parse(line);
         if (!row || !row->is_object()) throw std::runtime_error("usage_native_cache_invalid");
-        const auto path_text = text(*row, "path");
+        const auto path_text = json_util::text(*row, "path");
         const auto original = addon::path_from_utf8(path_text);
         if (!original.is_absolute() || original.filename() != "wire.jsonl" ||
             original.parent_path().parent_path().filename() != "agents") throw std::runtime_error("usage_native_file_invalid");
@@ -1241,7 +1243,7 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
         throw Usage_ownership_unavailable();
     }
     if (previous && previous->fork_evidence &&
-        addon::serialize_json_canonical(member(*previous->fork_evidence, "identity")) !=
+        addon::serialize_json_canonical(json_util::member(*previous->fork_evidence, "identity")) !=
             addon::serialize_json_canonical(*identity)) throw Usage_ownership_unavailable();
     const auto cwd = recorded_cwd(session, workspaces);
     const bool refresh_temporal = temporal && previous && previous->usage && !previous->temporal_carrier;
@@ -1256,7 +1258,7 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
                 auto current = *previous;
                 current.cwd = cwd;
                 current.retained_prefix_matches = true;
-                current.accepted_event_count = count(member(*current.fork_evidence, "event_count"));
+                current.accepted_event_count = count(json_util::member(*current.fork_evidence, "event_count"));
                 if (current.usage) attribute(*current.usage, cwd);
                 return current;
             }
@@ -1277,22 +1279,22 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
         stable = read_stable_lines(path, current, context, [&](std::string_view line) {
             line_end += line.size() + 1;
             while (!line.empty() && line.front() == '\0') line.remove_prefix(1);
-            const auto event = parse(line);
+            const auto event = json_util::parse(line);
             if (!event || !event->is_object()) throw std::runtime_error("usage_record_invalid");
-            const auto type = text(*event, "type");
-            if (first_record && type == "metadata" && member(*event, "protocol_version").is_string() &&
-                member(*event, "created_at").is_number())
+            const auto type = json_util::text(*event, "type");
+            if (first_record && type == "metadata" && json_util::member(*event, "protocol_version").is_string() &&
+                json_util::member(*event, "created_at").is_number())
             {
-                creator_session_id = text(*event, "creator_session_id");
+                creator_session_id = json_util::text(*event, "creator_session_id");
             }
             first_record = false;
             if (type == "forked") {
-                if (text(*event, "agentId") != text(*identity, "agent_id")) throw Usage_ownership_unavailable();
+                if (json_util::text(*event, "agentId") != json_util::text(*identity, "agent_id")) throw Usage_ownership_unavailable();
                 boundary = event_count;
                 forked = true;
             }
             if (type != "usage.record") return;
-            if (event->find("agentId") && text(*event, "agentId") != text(*identity, "agent_id")) {
+            if (event->find("agentId") && json_util::text(*event, "agentId") != json_util::text(*identity, "agent_id")) {
                 throw Usage_ownership_unavailable();
             }
             wire.consume_event(*event, context);
@@ -1330,7 +1332,7 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
         throw Usage_ownership_unavailable();
     }
     current.retained_prefix_matches = previous && previous->fork_evidence && bytes >= previous->size &&
-        addon::to_hex(prefix_digest.finish()) == text(*previous->fork_evidence, "native_prefix_sha256_hex");
+        addon::to_hex(prefix_digest.finish()) == json_util::text(*previous->fork_evidence, "native_prefix_sha256_hex");
     current.usage = wire.finish(cwd, previous && previous->usage ? &*previous->usage : nullptr);
     if (previous && previous->usage && current.size == previous->size &&
         current.modified_ms == previous->modified_ms)
@@ -1342,18 +1344,18 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
             current.legacy_prefix_matches = same_counted_usage(*observed, *previous->usage);
         }
     }
-    current.fork_evidence = object({{"identity", *identity},
+    current.fork_evidence = json_util::object({{"identity", *identity},
         {"native_prefix_sha256_hex", Json(addon::to_hex(native_digest.finish()))},
         {"event_sha256_hex", Json(addon::to_hex(event_digest.finish()))},
         {"event_count", Json(event_count)}, {"fork_event_count", Json(boundary)},
         {"forked", Json(forked)}, {"accounting", Json("raw")}});
     if (!creator_session_id.empty()) current.fork_evidence->set("creator_session_id", Json(creator_session_id));
-    if (previous && ((previous->fork_evidence && text(*previous->fork_evidence, "accounting") == "retained") ||
+    if (previous && ((previous->fork_evidence && json_util::text(*previous->fork_evidence, "accounting") == "retained") ||
         (!previous->fork_evidence && previous->fork_carrier)))
     {
         current.fork_evidence->set("accounting", Json("retained"));
         current.fork_evidence->set("unresolved_event_count", current.retained_prefix_matches && previous->fork_evidence ?
-            member(*previous->fork_evidence, "unresolved_event_count") : Json(event_count));
+            json_util::member(*previous->fork_evidence, "unresolved_event_count") : Json(event_count));
     }
     current.event_begin = static_cast<std::uint64_t>(events.tellp());
     std::ifstream input(temporary, std::ios::binary);
@@ -1370,7 +1372,7 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
 Json observation(std::string_view path, const File_record& file,
     const std::optional<File_record>& previous = std::nullopt)
 {
-    auto row = object({{"file", encode_file(path, file)},
+    auto row = json_util::object({{"file", encode_file(path, file)},
         {"event_begin", Json(file.event_begin)}, {"event_end", Json(file.event_end)},
         {"accepted_event_count", Json(file.accepted_event_count)},
         {"legacy_prefix_matches", Json(file.legacy_prefix_matches)},
@@ -1380,7 +1382,7 @@ Json observation(std::string_view path, const File_record& file,
         {"previous_event_end", Json(previous ? previous->event_end : 0)}});
     if (file.usage && file.usage->temporal && file.usage->temporal->retained_from) {
         const auto& retained = *file.usage->temporal->retained_from;
-        row.set("retained_from", object({{"snapshot_id", Json(retained.snapshot_id)},
+        row.set("retained_from", json_util::object({{"snapshot_id", Json(retained.snapshot_id)},
             {"manifest_sha256_hex", Json(retained.manifest_sha256_hex)}}));
     }
     return row;
@@ -1388,16 +1390,16 @@ Json observation(std::string_view path, const File_record& file,
 
 File_record observed_file(const Json& row)
 {
-    auto file = decode_file(member(row, "file"));
-    file.event_begin = count(member(row, "event_begin"));
-    file.event_end = count(member(row, "event_end"));
-    file.accepted_event_count = count(member(row, "accepted_event_count"));
-    file.legacy_prefix_matches = member(row, "legacy_prefix_matches").as_boolean();
-    file.retained_prefix_matches = member(row, "retained_prefix_matches").as_boolean();
+    auto file = decode_file(json_util::member(row, "file"));
+    file.event_begin = count(json_util::member(row, "event_begin"));
+    file.event_end = count(json_util::member(row, "event_end"));
+    file.accepted_event_count = count(json_util::member(row, "accepted_event_count"));
+    file.legacy_prefix_matches = json_util::member(row, "legacy_prefix_matches").as_boolean();
+    file.retained_prefix_matches = json_util::member(row, "retained_prefix_matches").as_boolean();
     if (file.usage && file.usage->temporal && row.find("retained_from")) {
-        const auto& retained = member(row, "retained_from");
+        const auto& retained = json_util::member(row, "retained_from");
         file.usage->temporal->retained_from = addon::Usage_temporal_retained_from{
-            text(retained, "snapshot_id"), text(retained, "manifest_sha256_hex")};
+            json_util::text(retained, "snapshot_id"), json_util::text(retained, "manifest_sha256_hex")};
     }
     return file;
 }
@@ -1443,26 +1445,26 @@ void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::p
         const auto file = observed_file(row);
         if (!file.fork_evidence) return;
         const auto& evidence = *file.fork_evidence;
-        const auto& identity = member(evidence, "identity");
-        const auto path = addon::path_from_utf8(text(member(row, "file"), "path"));
-        const bool retained = text(evidence, "accounting") == "retained";
-        const auto boundary = proved ? count(member(evidence, "fork_event_count")) : 0;
-        const auto unresolved = retained ? count(member(evidence, "unresolved_event_count")) :
-            (proved ? 0 : count(member(evidence, "event_count")));
+        const auto& identity = json_util::member(evidence, "identity");
+        const auto path = addon::path_from_utf8(json_util::text(json_util::member(row, "file"), "path"));
+        const bool retained = json_util::text(evidence, "accounting") == "retained";
+        const auto boundary = proved ? count(json_util::member(evidence, "fork_event_count")) : 0;
+        const auto unresolved = retained ? count(json_util::member(evidence, "unresolved_event_count")) :
+            (proved ? 0 : count(json_util::member(evidence, "event_count")));
         std::optional<Event_stream> parent_events, parent_origins;
         if (boundary) {
             const auto parent_path = path.parent_path().parent_path().parent_path().parent_path() /
-                addon::path_from_utf8(text(identity, "parent_session_id")) /
+                addon::path_from_utf8(json_util::text(identity, "parent_session_id")) /
                 "agents" / path.parent_path().filename() / "wire.jsonl";
             const auto parent_index = files.find(path_key(parent_path));
             require_io(parent_index.has_value());
             const auto parent = observed_file(files.at(*parent_index).second);
             parent_events.emplace(events, parent.event_begin, parent.event_end);
             parent_origins.emplace(origins.read(*parent_index));
-            if (text(*parent.fork_evidence, "accounting") == "retained") {
+            if (json_util::text(*parent.fork_evidence, "accounting") == "retained") {
                 std::string unused;
                 for (std::uint64_t skipped = 0;
-                    skipped < count(member(*parent.fork_evidence, "unresolved_event_count")); ++skipped)
+                    skipped < count(json_util::member(*parent.fork_evidence, "unresolved_event_count")); ++skipped)
                 {
                     check_cancel(context);
                     require_io(parent_events->next(unused) && parent_origins->next(unused));
@@ -1480,11 +1482,11 @@ void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::p
                     check_cancel(context);
                     require_io(parent_events->next(original) && parent_origins->next(owner));
                 } while (original != copied);
-                const auto parsed = parse(owner);
+                const auto parsed = json_util::parse(owner);
                 require_io(parsed && parsed->is_string());
                 origins.append(*parsed);
             }
-            else origins.append(occurrence < unresolved ? Json{} : Json("kimi:" + text(identity, "session_id")));
+            else origins.append(occurrence < unresolved ? Json{} : Json("kimi:" + json_util::text(identity, "session_id")));
             ++occurrence;
         }
         origins.finish(index);
@@ -1509,11 +1511,11 @@ void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::p
             const auto file = observed_file(row);
             if (!file.fork_evidence) { proved = false; break; }
             const auto& evidence = *file.fork_evidence;
-            if (text(evidence, "accounting") == "retained") { proved = false; break; }
-            const auto& identity = member(evidence, "identity");
-            const auto parent_id = text(identity, "parent_session_id");
-            const bool forked = member(evidence, "forked").as_boolean();
-            if (text(evidence, "creator_session_id") == text(identity, "session_id")) {
+            if (json_util::text(evidence, "accounting") == "retained") { proved = false; break; }
+            const auto& identity = json_util::member(evidence, "identity");
+            const auto parent_id = json_util::text(identity, "parent_session_id");
+            const bool forked = json_util::member(evidence, "forked").as_boolean();
+            if (json_util::text(evidence, "creator_session_id") == json_util::text(identity, "session_id")) {
                 if (forked) proved = false;
                 break;
             }
@@ -1522,7 +1524,7 @@ void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::p
                 break;
             }
             if (!forked) { proved = false; break; }
-            const auto path = addon::path_from_utf8(text(member(row, "file"), "path"));
+            const auto path = addon::path_from_utf8(json_util::text(json_util::member(row, "file"), "path"));
             const auto session = path.parent_path().parent_path().parent_path();
             const auto parent_path = session.parent_path() / addon::path_from_utf8(parent_id) /
                 "agents" / path.parent_path().filename() / "wire.jsonl";
@@ -1533,15 +1535,15 @@ void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::p
             Event_stream child_events(events, file.event_begin, file.event_end);
             Event_stream parent_events(events, parent.event_begin, parent.event_end);
             std::string copied, original;
-            const bool retained_parent = text(*parent.fork_evidence, "accounting") == "retained";
+            const bool retained_parent = json_util::text(*parent.fork_evidence, "accounting") == "retained";
             if (retained_parent) {
-                const auto unresolved = count(member(*parent.fork_evidence, "unresolved_event_count"));
+                const auto unresolved = count(json_util::member(*parent.fork_evidence, "unresolved_event_count"));
                 for (std::uint64_t occurrence = 0; occurrence < unresolved; ++occurrence) {
                     check_cancel(context);
                     if (!parent_events.next(original)) throw std::runtime_error("usage_cache_record_invalid");
                 }
             }
-            const auto boundary = count(member(evidence, "fork_event_count"));
+            const auto boundary = count(json_util::member(evidence, "fork_event_count"));
             for (std::uint64_t occurrence = 0; occurrence < boundary; ++occurrence) {
                 check_cancel(context);
                 if (!child_events.next(copied)) throw std::runtime_error("usage_cache_record_invalid");
@@ -1571,16 +1573,16 @@ void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::p
 void retain_owned_usage(File_record& file, const fs::path& path, const fs::path& events,
     addon::Invocation_context& context)
 {
-    if (!file.fork_evidence || text(*file.fork_evidence, "accounting") == "owned") return;
+    if (!file.fork_evidence || json_util::text(*file.fork_evidence, "accounting") == "owned") return;
     Wire_usage owned(path.parent_path().parent_path().parent_path());
-    const auto boundary = count(member(*file.fork_evidence, "fork_event_count"));
+    const auto boundary = count(json_util::member(*file.fork_evidence, "fork_event_count"));
     Event_stream input(events, file.event_begin, file.event_end);
     std::string line;
     std::uint64_t occurrence = 0;
     while (input.next(line)) {
         check_cancel(context);
         if (occurrence++ < boundary) continue;
-        const auto event = parse(line);
+        const auto event = json_util::parse(line);
         if (!event) throw std::runtime_error("usage_cache_record_invalid");
         owned.consume_event(*event, context);
     }
@@ -1653,10 +1655,10 @@ struct Scan_result
 
 std::optional<File_record> previous_file(const Json& row)
 {
-    if (member(row, "previous").is_null()) return std::nullopt;
-    auto previous = decode_file(member(row, "previous"));
-    previous.event_begin = count(member(row, "previous_event_begin"));
-    previous.event_end = count(member(row, "previous_event_end"));
+    if (json_util::member(row, "previous").is_null()) return std::nullopt;
+    auto previous = decode_file(json_util::member(row, "previous"));
+    previous.event_begin = count(json_util::member(row, "previous_event_begin"));
+    previous.event_end = count(json_util::member(row, "previous_event_end"));
     return previous;
 }
 
@@ -1749,7 +1751,7 @@ fs::path read_predecessors(const addon::Usage_owned_event_correction_request& re
     bool stable = false;
     try {
         stable = read_stable_lines(path, fingerprint, context, [&](std::string_view line) {
-            const auto value = parse(line);
+            const auto value = json_util::parse(line);
             if (!value) throw Usage_ownership_unavailable();
             if (!header) {
                 const auto decoded = addon::decode_usage_owned_event_predecessor_header(*value, nullptr);
@@ -1783,7 +1785,7 @@ fs::path read_predecessors(const addon::Usage_owned_event_correction_request& re
 File_adjustment prepare_file_adjustment(const Json& row, bool proved, bool accepted_selection,
     const fs::path& events, addon::Invocation_context& context)
 {
-    const auto path = addon::path_from_utf8(text(member(row, "file"), "path"));
+    const auto path = addon::path_from_utf8(json_util::text(json_util::member(row, "file"), "path"));
     const auto previous = previous_file(row);
     File_adjustment result;
     result.ordinary = observed_file(row);
@@ -1795,11 +1797,11 @@ File_adjustment prepare_file_adjustment(const Json& row, bool proved, bool accep
         result.growth = file.usage;
         return result;
     }
-    const auto previous_mode = previous->fork_evidence ? text(*previous->fork_evidence, "accounting") :
+    const auto previous_mode = previous->fork_evidence ? json_util::text(*previous->fork_evidence, "accounting") :
         (previous->fork_carrier ? "retained" : "raw");
     const bool bound = file.retained_prefix_matches ||
         (accepted_selection && !previous->fork_carrier && file.legacy_prefix_matches);
-    const auto total = file.fork_evidence ? count(member(*file.fork_evidence, "event_count")) : 0;
+    const auto total = file.fork_evidence ? count(json_util::member(*file.fork_evidence, "event_count")) : 0;
     if (bound && file.fork_evidence) {
         result.growth = event_usage(file, path, events, file.accepted_event_count, total, context);
     }
@@ -1810,7 +1812,7 @@ File_adjustment prepare_file_adjustment(const Json& row, bool proved, bool accep
         if (file.fork_evidence) {
             file.fork_evidence->set("accounting", Json("retained"));
             const auto unresolved = bound ? (previous_mode == "retained" ?
-                count(member(*previous->fork_evidence, "unresolved_event_count")) : file.accepted_event_count) : total;
+                count(json_util::member(*previous->fork_evidence, "unresolved_event_count")) : file.accepted_event_count) : total;
             file.fork_evidence->set("unresolved_event_count", Json(unresolved));
         }
         result.corrected = file;
@@ -1829,7 +1831,7 @@ File_adjustment prepare_file_adjustment(const Json& row, bool proved, bool accep
         result.raw_establishment = true;
         return result;
     }
-    const auto boundary = count(member(*file.fork_evidence, "fork_event_count"));
+    const auto boundary = count(json_util::member(*file.fork_evidence, "fork_event_count"));
     const auto removed_count = std::min(boundary, file.accepted_event_count);
     result.removed = event_usage(file, path, events, 0, removed_count, context);
     if (result.removed) {
@@ -1908,7 +1910,7 @@ fs::path prepare_corrected_sessions(Row_lookup& observed, Ownership_origins& ori
                 for (std::uint64_t occurrence = 0; occurrence < plan.removed->input.coverage->total_records; ++occurrence) {
                     check_cancel(context);
                     require_io(owners.next(line));
-                    const auto owner = parse(line);
+                    const auto owner = json_util::parse(line);
                     if (!owner || !owner->is_string() || owner->as_string() == plan.removed->record_id) {
                         throw Usage_ownership_unavailable();
                     }
@@ -1962,17 +1964,17 @@ fs::path prepare_corrected_sessions(Row_lookup& observed, Ownership_origins& ori
                 accumulate_usage(established, file.usage, context, ++established_files);
             }
             else if (!predecessor) {
-                retain_owned_usage(file, addon::path_from_utf8(text(member(row.second, "file"), "path")), events, context);
+                retain_owned_usage(file, addon::path_from_utf8(json_util::text(json_util::member(row.second, "file"), "path")), events, context);
                 accumulate_usage(fresh, file.usage, context, ++fresh_files);
             }
-            const auto path = text(member(row.second, "file"), "path");
+            const auto path = json_util::text(json_util::member(row.second, "file"), "path");
             planned.add(row.first, observation(path, file));
         }
         if (establish_population) candidate = std::move(established);
         else if (!predecessor) candidate = std::move(fresh);
         if (!candidate) throw Usage_ownership_unavailable();
         const auto encoded = addon::serialize_json(spool_record(*candidate, true));
-        if (!parse(encoded)) throw Usage_ownership_unavailable();
+        if (!json_util::parse(encoded)) throw Usage_ownership_unavailable();
         write_line(output, encoded);
         first = last;
     }
@@ -2019,8 +2021,8 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             if (!pending) return;
             pending->event_end = static_cast<std::uint64_t>(events.tellp());
             if (pending->fork_evidence &&
-                (count(member(*pending->fork_evidence, "event_count")) != event_count ||
-                    text(*pending->fork_evidence, "event_sha256_hex") != addon::to_hex(event_digest.finish())))
+                (count(json_util::member(*pending->fork_evidence, "event_count")) != event_count ||
+                    json_util::text(*pending->fork_evidence, "event_sha256_hex") != addon::to_hex(event_digest.finish())))
             {
                 throw Usage_ownership_unavailable();
             }
@@ -2035,7 +2037,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             check_cancel(context);
             finish_pending();
             pending = decode_file(row);
-            pending_path = text(row, "path");
+            pending_path = json_util::text(row, "path");
             pending->event_begin = static_cast<std::uint64_t>(events.tellp());
             event_count = 0;
             event_digest = addon::Sha256{};
@@ -2045,7 +2047,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             receipts.add(receipt.as_string(), receipt);
             if (seed && receipt.as_string() == seed->sha256_hex) seed_imported = true;
         }, [&](const Json& event) {
-            if (!pending || !pending->fork_carrier || !event.is_object() || text(event, "type") != "usage.record") {
+            if (!pending || !pending->fork_carrier || !event.is_object() || json_util::text(event, "type") != "usage.record") {
                 throw std::runtime_error("usage_cache_invalid");
             }
             const auto canonical = addon::serialize_json_canonical(event);
@@ -2061,7 +2063,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         if (!seed_imported) receipts.add(seed->sha256_hex, Json(seed->sha256_hex));
     }
     auto workspaces = optional_document(profile / "workspaces.json");
-    if (!member(workspaces, "version").is_integer() || member(workspaces, "version").as_integer() != 1) workspaces = Json::object();
+    if (!json_util::member(workspaces, "version").is_integer() || json_util::member(workspaces, "version").as_integer() != 1) workspaces = Json::object();
     std::uint64_t total = 0;
     const auto entries = sessions_present
         ? fs::recursive_directory_iterator(sessions_directory)
@@ -2071,7 +2073,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         if (entry.path().filename() != "wire.jsonl" || !entry.is_regular_file() ||
             entry.path().parent_path().parent_path().filename() != "agents") continue;
         const auto path = fs::absolute(entry.path()).lexically_normal();
-        live.add(path_key(path), object({{"path", Json(path_string(path))}}));
+        live.add(path_key(path), json_util::object({{"path", Json(path_string(path))}}));
         ++total;
         if (total % 256 == 0) context.report_progress(0, std::nullopt, "Discovering usage logs");
     }
@@ -2080,7 +2082,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
     const auto staged_cache = work / "files.jsonl";
     std::ofstream cache_output(staged_cache, std::ios::binary);
     require_io(static_cast<bool>(cache_output));
-    write_line(cache_output, addon::serialize_json(object({{"version", Json(1)}, {"profile", Json(owner)}, {"format", Json("jsonl")}})));
+    write_line(cache_output, addon::serialize_json(json_util::object({{"version", Json(1)}, {"profile", Json(owner)}, {"format", Json("jsonl")}})));
     {
         Row_stream receipt_rows(receipts.finish());
         std::string previous;
@@ -2088,7 +2090,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             check_cancel(context);
             if (previous == receipt_rows.key()) throw std::runtime_error("usage_cache_invalid");
             previous = receipt_rows.key();
-            write_line(cache_output, addon::serialize_json(object({{"receipt", receipt_rows.value()}})));
+            write_line(cache_output, addon::serialize_json(json_util::object({{"receipt", receipt_rows.value()}})));
             receipt_rows.next();
         }
     }
@@ -2109,7 +2111,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         while (seed_rows.available() && seed_rows.key() == key) {
             check_cancel(context);
             const auto row = seed_rows.value();
-            const auto seed_path = text(row, "path");
+            const auto seed_path = json_util::text(row, "path");
             if (seed_path == previous_seed_path) throw std::runtime_error("usage_native_cache_duplicate");
             previous_seed_path = seed_path;
             if (!file || seed_path < path) {
@@ -2122,7 +2124,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         // observation may replace it. Duplicate cache rows remain invalid.
         if (cached_rows.available() && cached_rows.key() == key) {
             const auto row = cached_rows.value();
-            path = text(member(row, "file"), "path");
+            path = json_util::text(json_util::member(row, "file"), "path");
             file = observed_file(row);
             if (file->usage && file->usage->temporal && selection && selection->accepted) {
                 file->usage->temporal->retained_from = addon::Usage_temporal_retained_from{
@@ -2133,12 +2135,12 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         }
         const auto previous = file;
         if (live_rows.available() && live_rows.key() == key) {
-            path = text(live_rows.value(), "path");
+            path = json_util::text(live_rows.value(), "path");
             live_rows.next();
             ++processed;
             // Different spellings of one platform path identify one log.
             while (live_rows.available() && live_rows.key() == key) {
-                path = std::min(path, text(live_rows.value(), "path"));
+                path = std::min(path, json_util::text(live_rows.value(), "path"));
                 live_rows.next();
                 ++processed;
             }
@@ -2168,7 +2170,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         const auto status = chain_status.get();
         require_io(status == 2 || status == 3);
         const auto row = final_files.at(index).second;
-        const auto path = text(member(row, "file"), "path");
+        const auto path = json_util::text(json_util::member(row, "file"), "path");
         auto file = observed_file(row);
         if (!correction) file = prepare_file_adjustment(row, status == 2, false, events_path, context).ordinary;
         write_line(cache_output, addon::serialize_json(encode_file(path, file, selection != nullptr)));
@@ -2245,7 +2247,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
     std::string line;
     while (read_line(input, line)) {
         check_cancel(context);
-        const auto value = parse(line);
+        const auto value = json_util::parse(line);
         const auto record = value ? spool_record(*value) : std::nullopt;
         if (!record) throw std::runtime_error("usage_result_unrepresentable");
         result.push_back(*record);
@@ -2277,7 +2279,7 @@ void handle_usage(addon::Invocation_context& context)
         if (correction) {
             auto request = *correction;
             request.scan = identity;
-            binding = object({{"capability", Json(addon::k_usage_owned_event_correction_capability_id)},
+            binding = json_util::object({{"capability", Json(addon::k_usage_owned_event_correction_capability_id)},
                 {"operation", Json(context.request().operation)},
                 {"request", addon::encode_usage_owned_event_correction_request(request)}});
         }
@@ -2398,12 +2400,12 @@ void handle_usage(addon::Invocation_context& context)
     std::string line;
     while (page.records.size() < addon::k_max_usage_page_records && read_line(records, line)) {
         check_cancel(context);
-        const auto value = parse(line);
+        const auto value = json_util::parse(line);
         auto record = value ? spool_record(*value) : std::nullopt;
         if (!record) throw std::runtime_error("usage_result_unrepresentable");
         const auto* envelope = record->capabilities.find(addon::k_usage_owned_event_correction_capability_id);
-        const bool retaining = correction && envelope && text(*envelope, "disposition") == "retain";
-        const bool correcting = correction && envelope && text(*envelope, "disposition") == "correct";
+        const bool retaining = correction && envelope && json_util::text(*envelope, "disposition") == "retain";
+        const bool correcting = correction && envelope && json_util::text(*envelope, "disposition") == "correct";
         const bool opaque_temporal = !record->temporal && record->capabilities.find(addon::k_usage_temporal_capability_id);
         if (!correction) record->capabilities.erase(addon::k_usage_owned_event_correction_capability_id);
         // A surviving wire log can be only a subset of a session's events.

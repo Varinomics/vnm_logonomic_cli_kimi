@@ -13,6 +13,8 @@
 #include <regex>
 #include <stdexcept>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace kimi {
 namespace {
 
@@ -127,9 +129,9 @@ void prepare_resume(addon::Invocation_context& context)
     addon::Contract_failure error;
     const auto request = addon::decode_resume_prepare_request(context.request().payload, &error, 2);
     if (!request) { context.fail(addon::Result_status::FAILED, error.reason_code, error.detail); return; }
-    const auto session = text(request->resume_record, "provider_session_id");
+    const auto session = json_util::text(request->resume_record, "provider_session_id");
     static const std::regex identity("[A-Za-z0-9][A-Za-z0-9_-]{0,255}");
-    if (!exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, identity)) {
+    if (!json_util::exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, identity)) {
         context.fail(addon::Result_status::FAILED, "invalid_resume_record");
         return;
     }

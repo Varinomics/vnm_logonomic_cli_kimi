@@ -30,6 +30,8 @@
 #include <sys/wait.h>
 #endif
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -42,7 +44,7 @@ void require(bool condition, const char* description)
 
 Json json(const char* text)
 {
-    const auto result = kimi::parse(text);
+    const auto result = json_util::parse(text);
     if (!result) throw std::runtime_error("invalid test input");
     return *result;
 }
@@ -229,7 +231,7 @@ void saturated_session_end()
     kimi::Lifecycle_observer observer;
     addon::Classify_event_request start;
     start.event.name = "SessionStart";
-    start.event.body = kimi::object({{"session_id", Json("session")}, {"kimi_code_home", Json(kimi::path_string(fixture.root))}});
+    start.event.body = json_util::object({{"session_id", Json("session")}, {"kimi_code_home", Json(kimi::path_string(fixture.root))}});
     start.transition_nonce = nonce;
     Context reservation;
     reservation.invocation.capability = {"lifecycle-correlation-lifetime", 1};
@@ -418,23 +420,23 @@ void quota()
     // Oracle: Kimi local oauth/usage response has a weekly summary and exactly
     // one supported five-hour rolling window, with percentages allowed >100.
     const auto response = kimi::normalize_quota(json(R"({"code":0,"data":{"kind":"ok","summary":{"used":50,"limit":200,"window":{"duration":1,"unit":"week"}},"limits":[{"used":125,"limit":100,"window":{"duration":5,"unit":"hour"}}]}})"));
-    require(kimi::member(kimi::member(response, "primary"), "used_percent").as_number() == 125, "quota must not clamp over-limit usage");
-    require(kimi::member(kimi::member(response, "secondary"), "window_minutes").as_integer() == 10080, "weekly quota normalization");
+    require(json_util::member(json_util::member(response, "primary"), "used_percent").as_number() == 125, "quota must not clamp over-limit usage");
+    require(json_util::member(json_util::member(response, "secondary"), "window_minutes").as_integer() == 10080, "weekly quota normalization");
     // Oracle: Kimi Code 2.0.2's local oauth/usage reply (shape observed on
     // 2026-09-22) reports each window under data.quota.usages as a used ratio
     // with a UTC reset time, and no summary or limits.
     const auto usages = kimi::normalize_quota(json(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
         "limit5h":{"usedRatio":0.25,"resetAt":"2026-09-22T17:00:00Z"},
         "limit7d":{"usedRatio":1.5,"resetAt":"2026-09-28T09:00:00Z"}},"extraUsage":null}}})"));
-    const auto& five_hour = kimi::member(usages, "primary");
-    const auto& weekly    = kimi::member(usages, "secondary");
-    require(kimi::member(five_hour, "used_percent").as_number() == 25 &&
-        kimi::member(five_hour, "window_minutes").as_integer() == 300 &&
-        kimi::text(five_hour, "reset_at") == "2026-09-22T17:00:00Z", "five-hour usage ratio is the primary window");
-    require(kimi::member(weekly, "used_percent").as_number() == 150 &&
-        kimi::member(weekly, "window_minutes").as_integer() == 10080, "weekly usage ratio is not clamped");
+    const auto& five_hour = json_util::member(usages, "primary");
+    const auto& weekly    = json_util::member(usages, "secondary");
+    require(json_util::member(five_hour, "used_percent").as_number() == 25 &&
+        json_util::member(five_hour, "window_minutes").as_integer() == 300 &&
+        json_util::text(five_hour, "reset_at") == "2026-09-22T17:00:00Z", "five-hour usage ratio is the primary window");
+    require(json_util::member(weekly, "used_percent").as_number() == 150 &&
+        json_util::member(weekly, "window_minutes").as_integer() == 10080, "weekly usage ratio is not clamped");
     const auto missing = kimi::normalize_quota(json(R"({"code":0,"data":{"kind":"error","message":"No token for \"kimi-code\". Run /login to authenticate."}})"));
-    require(kimi::text(missing, "status") == "not_logged_in", "missing login remains distinct from service error");
+    require(json_util::text(missing, "status") == "not_logged_in", "missing login remains distinct from service error");
     bool rejected = false;
     try {
         kimi::normalize_quota(json(R"({"code":0,"data":{"kind":"ok","limits":[{"used":2,"limit":10,"window":{"duration":5,"unit":"hour"}},{"used":3,"limit":10,"window":{"duration":5,"unit":"hour"}}]}})"));
@@ -520,8 +522,8 @@ void quota_usages()
         "summary":{"used":90,"limit":100,"window":{"duration":1,"unit":"week"}},
         "limits":[{"used":80,"limit":100,"window":{"duration":5,"unit":"hour"}}]}})");
     check(both &&
-        kimi::member(kimi::member(*both, "primary"),   "used_percent").as_number() == 25 &&
-        kimi::member(kimi::member(*both, "secondary"), "used_percent").as_number() == 50,
+        json_util::member(json_util::member(*both, "primary"),   "used_percent").as_number() == 25 &&
+        json_util::member(json_util::member(*both, "secondary"), "used_percent").as_number() == 50,
         "quota.usages wins over summary and limits in the same reply");
     const auto primary_only = normalized_reply(R"({"code":0,"data":{"kind":"ok","quota":{"usages":{
         "limit5h":{"usedRatio":0.25}}}}})");

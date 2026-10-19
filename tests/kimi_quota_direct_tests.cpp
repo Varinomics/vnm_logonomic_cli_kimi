@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 void require(bool condition, const char* message)
@@ -17,7 +19,7 @@ void require(bool condition, const char* message)
 
 kimi::Json json(std::string_view text)
 {
-    const auto result = kimi::parse(text);
+    const auto result = json_util::parse(text);
     require(result.has_value(), "fixture JSON parses");
     return *result;
 }
@@ -98,15 +100,15 @@ void responses()
     const auto both = kimi::normalize_managed_quota(json(R"({"usages":{
         "limit_5h":{"used_ratio":"1.25","reset_time":"2026-10-02T02:00:00Z"},
         "limit_7d":{"used_ratio":0.2}}})"));
-    require(both && kimi::member(kimi::member(*both, "primary"), "used_percent").as_number() == 125 &&
-        kimi::member(kimi::member(*both, "secondary"), "used_percent").as_number() == 20,
+    require(both && json_util::member(json_util::member(*both, "primary"), "used_percent").as_number() == 125 &&
+        json_util::member(json_util::member(*both, "secondary"), "used_percent").as_number() == 20,
         "direct usage preserves native normalized percentages");
     const auto weekly = kimi::normalize_managed_quota(json(R"({"usages":{"limit_7d":{"used_ratio":0}}})"));
     require(weekly && !weekly->find("primary") && weekly->find("secondary"), "missing window stays absent");
     const auto empty = kimi::normalize_managed_quota(json(R"({"usages":{}})"));
-    require(empty && kimi::text(*empty, "status") == "unavailable", "no windows does not mean zero usage");
+    require(empty && json_util::text(*empty, "status") == "unavailable", "no windows does not mean zero usage");
     const auto missing = kimi::normalize_managed_quota(json("{}"));
-    require(missing && kimi::text(*missing, "status") == "unavailable",
+    require(missing && json_util::text(*missing, "status") == "unavailable",
         "the managed endpoint's empty account response stays unavailable without a second request");
     require(!kimi::normalize_managed_quota(json(R"({"usages":{"limit_5h":{"used_ratio":"unknown"}}})")),
         "unsupported response preserves the native compatibility route");
@@ -127,7 +129,7 @@ void numeric_strings()
         {"1.25e-1", 12.5}, {"1e+1", 1000.0}, {"", 0.0}, {" \t", 0.0}, {"-0", 0.0}})
     {
         const auto result = parse_ratio(text);
-        require(result && kimi::member(kimi::member(*result, "primary"), "used_percent").as_number() == expected,
+        require(result && json_util::member(json_util::member(*result, "primary"), "used_percent").as_number() == expected,
             "complete decimal quota strings remain locale-independent");
     }
     for (const auto& text : {"+1.25", "1,25", "1.25suffix", "1.25 0", "0x1", "nan", "inf", "-inf",

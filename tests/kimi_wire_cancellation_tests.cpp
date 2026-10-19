@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -22,7 +24,7 @@ void require(bool condition, const char* message)
 
 kimi::Json json(std::string_view text)
 {
-    const auto result = kimi::parse(text);
+    const auto result = json_util::parse(text);
     require(result.has_value(), "native wire fixture must be valid JSON");
     return *result;
 }

@@ -23,6 +23,8 @@
 #include <utility>
 #include <vector>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -104,7 +106,7 @@ addon::Classify_event_request start_request(const Workspace& workspace, const st
     addon::Classify_event_request request;
     request.transition_nonce = nonce;
     request.event.name = "SessionStart";
-    request.event.body = kimi::object({{"session_id", addon::Json_value(session)},
+    request.event.body = json_util::object({{"session_id", addon::Json_value(session)},
         {"kimi_code_home", addon::Json_value(kimi::path_string(workspace.m_root))}});
     return request;
 }

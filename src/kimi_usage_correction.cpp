@@ -9,6 +9,8 @@
 #include <array>
 #include <map>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace kimi {
 namespace {
 
@@ -64,7 +66,7 @@ addon::Usage_repository repository_usage(const Repository_parts& parts)
 
 std::string temporal_key(const addon::Usage_temporal_portion& portion)
 {
-    return addon::serialize_json_canonical(object({{"basis", Json(portion.basis)},
+    return addon::serialize_json_canonical(json_util::object({{"basis", Json(portion.basis)},
         {"instant", Json(portion.instant)}, {"date", Json(portion.date)}, {"calendar", Json(portion.calendar)}}));
 }
 
