@@ -5,6 +5,7 @@
 
 #include <logonomic_cli_addon/quota.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/launcher_utilities.h>
 
 #include <chrono>
 #include <cmath>
@@ -237,7 +238,7 @@ void handle_quota(addon::Invocation_context& context)
     if (context.request().operation == "prepare") {
         const auto request = addon::decode_probe_prepare_request(context.request().payload, &error, 2);
         if (!request) { context.fail(addon::Result_status::FAILED, error.reason_code, error.detail); return; }
-        const auto args = literal_argv(request->context.launcher.script_body);
+        const auto args = addon::literal_argv(request->context.launcher.script_body);
         if (args.empty() || !is_kimi_program(args.front())) {
             context.fail(addon::Result_status::UNAVAILABLE, "launcher_program_unavailable");
             return;

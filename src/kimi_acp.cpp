@@ -1,6 +1,7 @@
 #include "kimi_acp.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
+#include <logonomic_cli_addon/launcher_utilities.h>
 
 #include <algorithm>
 #include <chrono>
@@ -328,7 +329,7 @@ std::string initial_acp_state(const addon::Delegated_prepare_request& request)
     auto tools = Json::array();
     // Kimi's ACP entry ignores top-level mode flags. Mirror their CLI meaning
     // only when the launcher explicitly supplies one (plan takes precedence).
-    const auto args = literal_argv(request.context.launcher.script_body);
+    const auto args = addon::literal_argv(request.context.launcher.script_body);
     const auto has = [&](std::string_view flag) { return std::find(args.begin(), args.end(), flag) != args.end(); };
     const std::string mode = has("--plan") ? "plan" : has("--auto") ? "yolo" :
         (has("--yolo") || has("-y")) ? "auto" : "";

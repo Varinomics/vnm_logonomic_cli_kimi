@@ -8,6 +8,7 @@
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
+#include <logonomic_cli_addon/launcher_utilities.h>
 
 #include <filesystem>
 #include <regex>
@@ -105,7 +106,7 @@ void prepare_delegated(addon::Invocation_context& context)
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
     result.process.executable = k_bridge;
-    result.process.argv = literal_argv(request->context.launcher.script_body);
+    result.process.argv = addon::literal_argv(request->context.launcher.script_body);
     result.process.argv.front() = *program;
     result.process.argv.push_back("acp");
     result.process.environment = std::move(environment);
@@ -150,7 +151,7 @@ void prepare_resume(addon::Invocation_context& context)
         context.fail(addon::Result_status::UNAVAILABLE, "session_start_hook_unavailable");
         return;
     }
-    auto argv = literal_argv(request->context.launcher.script_body);
+    auto argv = addon::literal_argv(request->context.launcher.script_body);
     argv.front() = *program;
     argv.insert(argv.end(), {"--session", session});
     addon::Resume_prepare_result result;
