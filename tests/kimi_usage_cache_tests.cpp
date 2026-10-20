@@ -1,6 +1,9 @@
 #include "kimi_accounts.h"
 #include "kimi_usage.h"
 
+#include <logonomic_cli_addon_test/invocation_context.h>
+#include <logonomic_cli_addon_test/usage_scan.h>
+
 #include <logonomic_cli_addon/environment_bootstrap.h>
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/ids.h>
@@ -29,6 +32,7 @@
 namespace {
 
 namespace addon = logonomic::cli_addon;
+namespace test = addon::test;
 namespace fs = std::filesystem;
 
 void check(bool condition, const std::string& message)
@@ -38,36 +42,7 @@ void check(bool condition, const std::string& message)
     }
 }
 
-class Cancelled_context final : public addon::Invocation_context
-{
-public:
-    explicit Cancelled_context(const addon::Usage_scan_request& input)
-    {
-        m_request.capability = {"usage-scan", 3};
-        m_request.operation = "scan";
-        m_request.payload = addon::encode_usage_scan_request(input, 3);
-    }
-    explicit Cancelled_context(const addon::Usage_owned_event_correction_request& input)
-    {
-        m_request.capability = {addon::k_usage_owned_event_correction_capability_id, 1};
-        m_request.operation = "scan";
-        m_request.payload = addon::encode_usage_owned_event_correction_request(input);
-    }
-
-    const addon::Invoke_request& request() const override { return m_request; }
-    bool cancel_requested() const override { return true; }
-    bool wait_for_cancel(int) override { return true; }
-    void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
-    void succeed(addon::Json_value) override { throw std::runtime_error("cancelled scan succeeded"); }
-    void fail(addon::Result_status, std::string reason, std::string) override
-    {
-        throw std::runtime_error(reason);
-    }
-    bool finished() const override { return false; }
-
-private:
-    addon::Invoke_request m_request;
-};
+using Cancelled_context = test::Cancelled_scan_context;
 
 class Workspace
 {
@@ -163,63 +138,6 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(acknowledged && acknowledged->status == addon::Host_status::SUCCESS,
         "packaged adapter acknowledges allocated storage");
 
-    const auto outcome_for = [&](const addon::Usage_scan_request& input, std::uint16_t version) {
-        const auto id = host.invoke({"usage-scan", version}, "scan",
-            addon::encode_usage_scan_request(input, version), 30000);
-        const auto outcome = host.wait_outcome(id, 31000);
-        check(outcome.has_value(), "packaged scan must finish");
-        return *outcome;
-    };
-    const auto page_for = [&](const addon::Usage_scan_request& input, std::uint16_t version) {
-        const auto outcome = outcome_for(input, version);
-        check(outcome.status == addon::Host_status::SUCCESS,
-            "packaged scan failed: " + outcome.reason_code + "; request=" +
-                addon::serialize_json(addon::encode_usage_scan_request(input, version)));
-        const auto page = addon::decode_usage_scan_result(outcome.payload, &failure, version);
-        check(page.has_value(), failure.detail);
-        if (version == 3) {
-            check(page->profile_storage && input.context.profile_storage &&
-                page->profile_storage->version == input.context.profile_storage->version &&
-                page->profile_storage->root == input.context.profile_storage->root,
-                "every usage3 page echoes the exact requested profile storage");
-            check(page->account_context.has_value() == input.context.account_context.has_value(),
-                "usage3 preserves account-context presence without synthesizing it");
-            if (input.context.account_context) {
-                check(addon::encode_account_context(*page->account_context) ==
-                    addon::encode_account_context(*input.context.account_context),
-                    "every usage3 page preserves account version, key and profile exactly");
-            }
-            else {
-                check(!outcome.payload.find("account_context"),
-                    "absent account context is omitted on the wire, not null");
-            }
-        }
-        else {
-            check(!outcome.payload.find("account_context") && !outcome.payload.find("profile_storage"),
-                "legacy usage pages do not acquire usage3 acknowledgments");
-        }
-        return *page;
-    };
-    const auto all_pages = [&](addon::Usage_scan_request input, std::uint16_t version) {
-        auto first = page_for(input, version);
-        auto page = first;
-        while (!page.complete) {
-            input.snapshot_id = page.snapshot_id;
-            input.cursor = page.next_cursor;
-            page = page_for(input, version);
-            check(page.cache_candidate == first.cache_candidate,
-                "candidate descriptor stays identical across pages");
-            first.records.insert(first.records.end(), page.records.begin(), page.records.end());
-        }
-        return first;
-    };
-    const auto total = [](const addon::Usage_scan_page& page) {
-        std::uint64_t sum = 0;
-        for (const auto& record : page.records) {
-            sum += record.total_tokens;
-        }
-        return sum;
-    };
     const auto select = [&](std::string name, std::optional<addon::Usage_cache_reference> accepted) {
         request.snapshot_id.reset();
         request.cursor.reset();
@@ -256,12 +174,13 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         }
     };
 
-    check(total(all_pages(request, 2)) == 2700, "v2 retains its existing namespace and telemetry");
+    check(test::usage_token_total(test::usage_scan_pages(host, request, 2)) == 2700,
+        "v2 retains its existing namespace and telemetry");
     for (const auto& path : sources) {
         check(fs::remove(path), "remove fixture source");
     }
     select("empty-selection", std::nullopt);
-    const auto empty = all_pages(request, 3);
+    const auto empty = test::usage_scan_pages(host, request, 3);
     check(empty.records.empty() && empty.cache_candidate,
         "absent host selection never bootstraps from mutable provider cache");
     validate(*empty.cache_candidate);
@@ -269,7 +188,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     sources = write_sources(profile, 10);
     select("accepted", std::nullopt);
     const auto first_request = request;
-    const auto first = page_for(request, 3);
+    const auto first = test::usage_scan_page(host, request, 3);
     check(!first.complete && first.records.size() == 256 && first.cache_candidate,
         "packaged first page supplies a sealed bounded candidate");
     validate(*first.cache_candidate);
@@ -278,9 +197,9 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     request.cursor = first.next_cursor;
     auto changed = request;
     changed.mode = "repair";
-    check(outcome_for(changed, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(host, changed, 3).status != addon::Host_status::SUCCESS,
         "continuation cannot change the frozen request");
-    const auto last = page_for(request, 3);
+    const auto last = test::usage_scan_page(host, request, 3);
     check(last.complete && last.records.size() == 14 && last.cache_candidate == first.cache_candidate,
         "packaged final page preserves candidate identity");
     for (const auto& record : first.records) {
@@ -292,7 +211,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     request.context.account_context->profile_path.reset();
     // Version one has no profile locator; acknowledgment support must not
     // bypass the native provider's existing explicit-account admission.
-    const auto version_one = outcome_for(request, 3);
+    const auto version_one = test::usage_scan_outcome(host, request, 3);
     check(version_one.status != addon::Host_status::SUCCESS &&
         version_one.reason_code == "kimi_operation_failed",
         "version-one account without a profile locator retains its explicit refusal");
@@ -302,16 +221,17 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     select("account-absent", std::nullopt);
     request.context.account_context.reset();
     request.context.launch_environment->effective_environment.set("KIMI_CODE_HOME", addon::Json_value(native_profile));
-    const auto account_absent = all_pages(request, 3);
-    check(account_absent.records.size() == 270 && total(account_absent) == 2700,
+    const auto account_absent = test::usage_scan_pages(host, request, 3);
+    check(account_absent.records.size() == 270 && test::usage_token_total(account_absent) == 2700,
         "environment-selected profile keeps account context absent on every page");
     request.context = first_request.context;
 
     sources = write_sources(profile, 1);
     select("unaccepted", first.cache_candidate);
     request.mode = "repair";
-    const auto lower = all_pages(request, 3);
-    check(total(lower) == 270 && lower.cache_candidate, "lower native observation is a separate candidate");
+    const auto lower = test::usage_scan_pages(host, request, 3);
+    check(test::usage_token_total(lower) == 270 && lower.cache_candidate,
+        "lower native observation is a separate candidate");
     validate(*first.cache_candidate);
     for (const auto& path : sources) {
         check(fs::remove(path), "remove refreshed fixture source");
@@ -319,8 +239,9 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
 
     // The host rejects the lower partial aggregate and continues selecting the coherent original cache.
     select("recovered", first.cache_candidate);
-    const auto recovered = all_pages(request, 3);
-    check(total(recovered) == 2700, "rejected candidate cannot become retained history after source deletion");
+    const auto recovered = test::usage_scan_pages(host, request, 3);
+    check(test::usage_token_total(recovered) == 2700,
+        "rejected candidate cannot become retained history after source deletion");
     check_session_facts(recovered);
     validate(*first.cache_candidate);
     validate(*lower.cache_candidate);
@@ -341,22 +262,23 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
 
     select("reset", std::nullopt);
     request.mode = "reset";
-    const auto reset = all_pages(request, 3);
+    const auto reset = test::usage_scan_pages(host, request, 3);
     check(reset.records.empty() && reset.cache_candidate, "reset reconstructs only current sources");
     validate(*reset.cache_candidate);
     validate(*first.cache_candidate);
     auto invalid_reset = request;
     invalid_reset.cache_selection->accepted = first.cache_candidate;
-    check(outcome_for(invalid_reset, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(host, invalid_reset, 3).status != addon::Host_status::SUCCESS,
         "reset cannot import a retained selection");
 
     auto old_request = first_request;
     old_request.cache_selection.reset();
-    check(total(all_pages(old_request, 2)) == 2700, "v3 scans and reset leave v2 cache untouched");
+    check(test::usage_token_total(test::usage_scan_pages(host, old_request, 2)) == 2700,
+        "v3 scans and reset leave v2 cache untouched");
 
     select("occupied", first.cache_candidate);
     write(addon::path_from_utf8(request.cache_selection->candidate_root) / "foreign", "occupied");
-    check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(host, request, 3).status != addon::Host_status::SUCCESS,
         "provider refuses a nonempty host allocation");
     validate(*first.cache_candidate);
 
@@ -365,7 +287,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     // The v2 cache is a file, not a directory in which a host can allocate.
     // Submit the conflicting path for rejection without trying to create it.
     request.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(conflicting)};
-    check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(host, request, 3).status != addon::Host_status::SUCCESS,
         "host candidates cannot enter the provider mutable namespace");
 
     select("wrong-account", first.cache_candidate);
@@ -376,17 +298,17 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         2, kimi::account_key(other_profile), addon::path_to_utf8(other_profile)};
     wrong_account.context.launch_environment->bootstrap =
         addon::Environment_bootstrap_evidence{addon::path_to_utf8(other_profile)};
-    check(outcome_for(wrong_account, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(host, wrong_account, 3).status != addon::Host_status::SUCCESS,
         "selected cache cannot cross native profile and account ownership");
     validate(*first.cache_candidate);
 
     select("usage-host.tmp", std::nullopt);
-    check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(host, request, 3).status != addon::Host_status::SUCCESS,
         "host allocation cannot alias the mutable temporary-file namespace");
 
     select("corrupt-input", first.cache_candidate);
     write(addon::path_from_utf8(first.cache_candidate->root) / "unlisted", "unexpected");
-    check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(host, request, 3).status != addon::Host_status::SUCCESS,
         "corrupt selected inventory fails without fallback");
 
     // The Stop button cancels a scan that is reading history; the host must
@@ -462,7 +384,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     const auto next_root = storage / "concurrent-next";
     check(fs::create_directory(next_root), "host allocates later second-account candidate");
     waiter.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(next_root)};
-    const auto next_outcome = outcome_for(waiter, 3);
+    const auto next_outcome = test::usage_scan_outcome(host, waiter, 3);
     check(next_outcome.status == addon::Host_status::SUCCESS && host.generation_nonce() == generation,
         "second account can scan on the surviving generation");
     check(host.shutdown(1000, nullptr), "packaged adapter exits without contacting a model");
