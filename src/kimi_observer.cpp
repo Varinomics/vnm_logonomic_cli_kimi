@@ -113,6 +113,7 @@ struct Binding
     QStringList watched_files;
 #ifdef KIMI_OBSERVER_TEST_HOOKS
     std::function<void()> scan_gate;
+    std::function<void(bool)> wait_observer;
     std::function<void()> discovery_gate;
     std::function<bool()> read_allowed;
 #endif
@@ -428,6 +429,15 @@ void Lifecycle_observer::set_acquisition_failures_for_tests(
     }
 }
 
+void Lifecycle_observer::set_wait_observer_for_tests(std::function<void(bool)> observer)
+{
+    std::lock_guard lock(m_state->mutex);
+    for (const auto& [key, binding] : m_state->sessions) {
+        (void)key;
+        if (binding) binding->wait_observer = observer;
+    }
+}
+
 #endif
 
 addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_event_request& request)
@@ -638,6 +648,12 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
             // This wait only bounds SDK cancellation/deadline latency. A timeout
             // does not trigger a filesystem search or read.
             auto delivery = channel->wait(std::min(remaining, std::chrono::milliseconds(100)));
+#ifdef KIMI_OBSERVER_TEST_HOOKS
+            {
+                std::lock_guard lock(m_state->mutex);
+                if (binding->wait_observer) binding->wait_observer(delivery.has_value());
+            }
+#endif
             if (!delivery) continue;
             {
                 std::lock_guard lock(m_state->mutex);

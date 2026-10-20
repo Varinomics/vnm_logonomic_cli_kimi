@@ -31,6 +31,7 @@ public:
         const logonomic::cli_addon::Classify_event_request& request);
 #ifdef KIMI_OBSERVER_TEST_HOOKS
     void set_scan_gate_for_tests(std::function<void()> gate);
+    void set_wait_observer_for_tests(std::function<void(bool)> observer);
     void set_acquisition_failures_for_tests(
         std::function<void()> discovery_gate, std::function<bool()> read_allowed);
 #endif

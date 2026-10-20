@@ -315,12 +315,22 @@ void missing_ancestors_and_parent_replacement_reconcile_without_polling()
     const auto nonce = addon::random_nonce_hex();
     require(reserve(observer, nonce), "reserve missing home owner");
     observer.classify(start_request(workspace, nonce));
+    bool discovery_allowed = true;
+    std::atomic<int> timeouts = 0;
+    std::atomic<bool> private_polling = false;
+    // Registration and native detail-loss recovery may legitimately dispatch
+    // while the wire is absent. Only delivery-driven discovery is allowed
+    // after the initial subscription, including across actual wait timeouts.
+    observer.set_acquisition_failures_for_tests([&] {
+        if (!std::exchange(discovery_allowed, false)) private_polling = true;
+    }, {});
+    observer.set_wait_observer_for_tests([&](bool delivered) {
+        discovery_allowed = delivered;
+        if (!delivered) ++timeouts;
+    });
     Observe_window window(observer, workspace, nonce);
-    require(wait_until([&] { const auto statistics = service->statistics(); return statistics.dispatches > 0 &&
-        statistics.outstanding == 0 && statistics.pending_registrations == 0; }), "arm missing ancestor frontier");
-    const auto idle_dispatches = service->statistics().dispatches;
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    require(service->statistics().dispatches == idle_dispatches, "missing wire does not cause private rebind polling");
+    require(wait_until([&] { return timeouts >= 2; }), "missing wire reaches two observer wait timeouts");
+    require(!private_polling, "missing wire does not cause private rebind polling");
     native_call(workspace, "session");
     require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 1; }),
         "one creation of the complete missing chain wakes binding and post-arm acquisition");
@@ -330,6 +340,7 @@ void missing_ancestors_and_parent_replacement_reconcile_without_polling()
     write_bytes(directory / "wire.jsonl", call_record("replacement-parent-child"));
     require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 2; }),
         "new main directory replaces old native coverage without an extra edit");
+    require(!private_polling, "wire discovery remains owned by received deliveries");
     require(retire(observer, nonce), "abandonment wakes an active receiver");
     window.stop();
     require(window.context.m_failure == "correlation_retired", "retired capture cannot publish observe success");
