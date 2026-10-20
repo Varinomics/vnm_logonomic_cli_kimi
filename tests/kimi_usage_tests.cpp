@@ -824,6 +824,13 @@ int main(int argc, char** argv)
     try {
         if (argc == 2) {
             const std::string_view selected = argv[1];
+            if (selected == "--large-data") {
+                large_history_contract();
+                large_log_contract();
+                file_count_contract();
+                live_file_count_contract();
+                return 0;
+            }
             if (selected == "--fork-ownership") { fork_ownership_contract(); fork_chains_contract(); raw_fork_mode_contract(); return 0; }
             if (selected == "--native-aliases") { native_aliases_contract(); return 0; }
             if (selected == "--line-cache" || selected == "--history-limits") line_cache_contract();
@@ -842,11 +849,7 @@ int main(int argc, char** argv)
         scan_contract();
         timestamp_cache_identity_contract();
         missing_sessions_contract();
-        large_history_contract();
-        large_log_contract();
         line_cache_contract();
-        file_count_contract();
-        live_file_count_contract();
         return 0;
     }
     catch (const std::exception& error) {
