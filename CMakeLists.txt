@@ -130,6 +130,8 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
 endif()
 
 enable_testing()
+option(LOGONOMIC_CLI_ADDON_LARGE_DATA_TESTS
+    "Register full-size usage history and capacity regressions" OFF)
 kimi_add_provider(kimi_observer_test_provider)
 target_compile_definitions(kimi_observer_test_provider PUBLIC KIMI_OBSERVER_TEST_HOOKS)
 add_executable(kimi_observer_tests tests/kimi_observer_tests.cpp)
@@ -161,6 +163,12 @@ add_executable(kimi_usage_tests tests/kimi_usage_tests.cpp)
 target_link_libraries(kimi_usage_tests PRIVATE kimi_provider)
 kimi_target(kimi_usage_tests)
 add_test(NAME kimi_usage_tests COMMAND kimi_usage_tests)
+if(LOGONOMIC_CLI_ADDON_LARGE_DATA_TESTS)
+    add_test(NAME kimi_usage_large_data_tests COMMAND kimi_usage_tests --large-data)
+    # The real 100001-file regression includes filesystem setup and teardown.
+    set_tests_properties(kimi_usage_large_data_tests PROPERTIES
+        TIMEOUT 2400 LABELS "usage;large-data")
+endif()
 add_executable(kimi_usage_correction_tests tests/kimi_usage_correction_tests.cpp)
 target_link_libraries(kimi_usage_correction_tests PRIVATE kimi_provider)
 kimi_target(kimi_usage_correction_tests)
@@ -179,8 +187,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
             "${KIMI_MACOS_RUNTIME_DEPLOYER}")
     set_tests_properties(kimi_macos_runtime_tests PROPERTIES TIMEOUT 30)
 endif()
-# The real 100001-file regression includes filesystem setup and teardown.
-set_tests_properties(kimi_usage_tests PROPERTIES TIMEOUT 2400)
+set_tests_properties(kimi_usage_tests PROPERTIES TIMEOUT 180)
 add_executable(kimi_usage_cache_tests tests/kimi_usage_cache_tests.cpp)
 target_link_libraries(kimi_usage_cache_tests PRIVATE
     kimi_provider logonomic_cli_addon_sdk::test_support)
@@ -207,6 +214,10 @@ kimi_target(kimi_acp_causal_tests)
 add_test(NAME kimi_acp_causal_tests COMMAND kimi_acp_causal_tests)
 set_tests_properties(kimi_acp_causal_tests PROPERTIES TIMEOUT 120 LABELS "addon;protocol;causality")
 if(WIN32)
+    if(TEST kimi_usage_large_data_tests)
+        set_tests_properties(kimi_usage_large_data_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+    endif()
     # These executables run from the build tree, outside the assembled package.
     # Clean copied-package qualification supplies its own runtime environment.
     set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests
