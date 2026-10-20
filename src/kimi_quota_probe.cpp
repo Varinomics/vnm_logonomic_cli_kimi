@@ -40,6 +40,7 @@ extern char** environ;
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace json_util = logonomic::cli_addon::json;
@@ -60,12 +61,30 @@ struct Scrub_string
 std::string read_file(const fs::path& path, std::size_t maximum)
 {
     std::error_code error;
-    if (fs::is_symlink(path, error) || error || !fs::is_regular_file(path, error) || error ||
-        fs::file_size(path, error) > maximum || error) throw std::runtime_error("invalid_quota_file");
+    if (fs::is_symlink(path, error) || error || !fs::is_regular_file(path, error) || error) {
+        throw std::runtime_error("invalid_quota_file");
+    }
+    const auto size = fs::file_size(path, error);
+    if (error || size > maximum) {
+        throw std::runtime_error("invalid_quota_file");
+    }
     std::ifstream input(path, std::ios::binary);
-    std::string result(maximum + 1, '\0');
+    std::string result(static_cast<std::size_t>(size) + 1, '\0');
     input.read(result.data(), static_cast<std::streamsize>(result.size()));
     result.resize(static_cast<std::size_t>(input.gcount()));
+    // The size observation is a hint: accept subsequent growth up to the same limit.
+    while (input && result.size() <= maximum) {
+        const auto offset = result.size();
+        const auto size = std::min(maximum + 1, std::max<std::size_t>(4096, offset * 2));
+        // Reserve from empty so string growth does not double an existing capacity past the limit.
+        std::string grown;
+        grown.reserve(size);
+        grown.append(result);
+        result = std::move(grown);
+        result.resize(size);
+        input.read(result.data() + offset, static_cast<std::streamsize>(result.size() - offset));
+        result.resize(offset + static_cast<std::size_t>(input.gcount()));
+    }
     if (result.empty() || result.size() > maximum || input.bad()) throw std::runtime_error("invalid_quota_file");
     return result;
 }
