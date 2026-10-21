@@ -347,7 +347,7 @@ std::string initial_acp_state(const addon::Delegated_prepare_request& request)
 
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
-    const auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
+    auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
     if (!parsed || !json_util::exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
             "result_base64", "task_tools", "launcher_mode", "servers", "status_command", "request_id", "status_base64"}) ||
         !json_util::member(*parsed, "stage").is_string() || !json_util::bounded_string(json_util::member(*parsed, "session_id"), 512, true) ||
@@ -361,7 +361,7 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (!json_util::bounded_string(tool, 64)) return failure("malformed_acp_state");
     }
     if (!json_util::member(*parsed, "launcher_mode").is_string()) return failure("malformed_acp_state");
-    auto state = *parsed;
+    auto state = std::move(*parsed);
     for (const auto key : {"pending_base64", "deferred_input_base64", "prompt_base64", "result_base64", "status_base64"}) {
         if (!json_util::member(state, key).is_string()) return failure("malformed_acp_state");
     }
@@ -369,11 +369,11 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (!json_util::exact_keys(server, {"name", "actions"}) || !json_util::bounded_string(json_util::member(server, "name"), 512) ||
             !nonnegative_integer(json_util::member(server, "actions"))) return failure("malformed_acp_state");
     }
-    auto pending = addon::decode_base64(json_util::text(state, "pending_base64"));
-    auto deferred_input = addon::decode_base64(json_util::text(state, "deferred_input_base64"));
-    auto prompt  = addon::decode_base64(json_util::text(state, "prompt_base64"));
-    auto output  = addon::decode_base64(json_util::text(state, "result_base64"));
-    auto status  = addon::decode_base64(json_util::text(state, "status_base64"));
+    auto pending = addon::decode_base64(json_util::member(state, "pending_base64").as_string());
+    auto deferred_input = addon::decode_base64(json_util::member(state, "deferred_input_base64").as_string());
+    auto prompt  = addon::decode_base64(json_util::member(state, "prompt_base64").as_string());
+    auto output  = addon::decode_base64(json_util::member(state, "result_base64").as_string());
+    auto status  = addon::decode_base64(json_util::member(state, "status_base64").as_string());
     if (!pending || !deferred_input || !prompt || !output || !status || output->size() > k_result_limit ||
         status->size() > k_status_limit) return failure("malformed_acp_state");
     bool status_command = json_util::member(state, "status_command").as_boolean();
@@ -386,12 +386,17 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     // written yet. Retain that causal boundary across inspection calls.
     std::string input = std::move(*deferred_input);
     std::string replies;
+    std::string_view remaining = *pending;
     for (;;) {
-        const auto end = pending->find('\n');
-        if (end == std::string::npos) break;
-        if (end == 0 || end > k_record_limit) return failure("invalid_acp_record");
-        const auto value = json_util::parse(std::string_view(*pending).substr(0, end));
-        pending->erase(0, end + 1);
+        const auto end = remaining.find('\n');
+        if (end == std::string_view::npos) {
+            break;
+        }
+        if (end == 0 || end > k_record_limit) {
+            return failure("invalid_acp_record");
+        }
+        const auto value = json_util::parse(remaining.substr(0, end));
+        remaining.remove_prefix(end + 1);
         if (!value || !value->is_object()) return failure("invalid_acp_record");
         const auto stage = json_util::text(state, "stage");
         if (value->find("method")) {
@@ -490,7 +495,7 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         }
         else
         if (stage == "await_close") {
-            if (!response(*value, request_id) || !result.as_object().empty() || !pending->empty() ||
+            if (!response(*value, request_id) || !result.as_object().empty() || !remaining.empty() ||
                 (inspection.final && (inspection.timed_out || inspection.exit_code != 0))) return failure("invalid_acp_close");
             addon::Structured_inspect_result completed;
             completed.complete     = true;
@@ -499,14 +504,14 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         }
         else return failure("out_of_order_acp_response");
     }
-    if (pending->size() > k_record_limit) return failure("acp_record_limit");
+    if (remaining.size() > k_record_limit) return failure("acp_record_limit");
     if (inspection.final) return failure(inspection.timed_out ? "acp_timeout" : "acp_incomplete");
     // Never release a native request over an already observed, unclassified
     // output prefix. Complete housekeeping may be accepted, but a task reply
     // produced before its request must still be rejected on the next call.
-    const bool defer_input = !pending->empty() && !input.empty();
+    const bool defer_input = !remaining.empty() && !input.empty();
     state.set("deferred_input_base64", Json(defer_input ? addon::encode_base64(input) : ""));
-    state.set("pending_base64", Json(addon::encode_base64(*pending)));
+    state.set("pending_base64", Json(addon::encode_base64(remaining)));
     state.set("result_base64", Json(addon::encode_base64(*output)));
     state.set("status_base64", Json(addon::encode_base64(*status)));
     state.set("status_command", Json(status_command));
