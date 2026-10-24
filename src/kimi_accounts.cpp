@@ -1,8 +1,6 @@
 #include "kimi_accounts.h"
 #include "kimi_launcher.h"
-#include "kimi_json.h"
 
-#include <logonomic_cli_addon/legacy_state_import.h>
 #include <logonomic_cli_addon/sha256.h>
 #include <logonomic_cli_addon/package_source.h>
 
@@ -22,7 +20,6 @@ namespace {
 
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
-using Json = addon::Json_value;
 
 fs::path normalize(const fs::path& profile)
 {
@@ -150,68 +147,6 @@ std::string canonical_usage_session_id(std::string_view identity)
     const auto end = identity.find(':', 5);
     const auto result = identity.substr(0, end);
     return result.size() > 5 ? std::string(result) : std::string{};
-}
-
-void handle_legacy_data(addon::Invocation_context& context)
-{
-    addon::Contract_failure failure;
-    const auto input = addon::decode_import_record_request(context.request().payload, &failure);
-    if (!input) {
-        context.fail(addon::Result_status::FAILED, failure.reason_code);
-        return;
-    }
-    addon::Legacy_import_result result;
-    if (input->kind == addon::k_legacy_resume_record_kind) {
-        const auto record = addon::decode_legacy_resume_record(input->record, &failure);
-        if (!record) {
-            context.fail(addon::Result_status::FAILED, failure.reason_code);
-            return;
-        }
-        if (record->provider_id == "kimi") {
-            Json converted = Json::object();
-            converted.set("provider_session_id", Json(record->provider_session_id));
-            result = *addon::Legacy_import_result::from_conversion(addon::encode_legacy_resume_conversion(converted));
-        }
-    }
-    else
-    if (input->kind == addon::k_legacy_account_record_kind) {
-        const auto record = addon::decode_legacy_account_record(input->record, &failure);
-        if (!record) {
-            context.fail(addon::Result_status::FAILED, failure.reason_code);
-            return;
-        }
-        if (record->provider_id == "kimi" && record->profile_path) {
-            const auto profile = normalize(addon::path_from_utf8(*record->profile_path));
-            Json converted = Json::object();
-            converted.set("adapter_account_key", Json(account_key(profile)));
-            result = *addon::Legacy_import_result::from_conversion(std::move(converted));
-        }
-    }
-    else
-    if (input->kind == addon::k_legacy_usage_records_kind) {
-        const auto record = addon::decode_legacy_usage_records(input->record, &failure);
-        if (!record) {
-            context.fail(addon::Result_status::FAILED, failure.reason_code);
-            return;
-        }
-        if (record->provider_id == "kimi") {
-            // Native Kimi suffixes named agent logs; all agents aggregate under
-            // one session UUID. Convert identities only, never retained counters.
-            auto converted = record->records;
-            for (auto& identity : converted) {
-                const auto key = canonical_usage_session_id(identity.record_id);
-                if (key.empty()) throw std::runtime_error("invalid_usage_identity");
-                identity.record_id = key;
-                identity.session_key = key;
-            }
-            result = *addon::Legacy_import_result::from_conversion(addon::encode_legacy_usage_conversion(converted));
-        }
-    }
-    else {
-        context.fail(addon::Result_status::UNAVAILABLE, "unknown_record_kind");
-        return;
-    }
-    context.succeed(addon::encode_import_record_result(result));
 }
 
 } // namespace kimi

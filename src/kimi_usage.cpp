@@ -1087,121 +1087,6 @@ File_record decode_file(const Json& row)
 }
 
 
-File_record native_file_record(const Json& row)
-{
-    File_record file;
-    file.size = count(json_util::member(row, "size"));
-    if (!json_util::member(row, "modified_msecs").is_integer()) throw std::runtime_error("usage_native_cache_invalid");
-    file.modified_ms = json_util::member(row, "modified_msecs").as_integer();
-    const auto& records = json_util::member(row, "records");
-    if (!records.is_array() || records.as_array().size() > 1) throw std::runtime_error("usage_native_cache_invalid");
-    const auto& marker = json_util::member(json_util::member(row, "capabilities"), "token_breakdown_cache");
-    file.stale_breakdown = !json_util::member(marker, "version").is_integer() ||
-        json_util::member(marker, "version").as_integer() != 2 ||
-        !json_util::member(marker, "parser_revision").is_integer() || json_util::member(marker, "parser_revision").as_integer() != 2;
-    if (records.as_array().empty()) return file;
-    const auto& source = records.as_array().front();
-    addon::Usage_record record;
-    auto native_session = json_util::text(source, "session_id");
-    if (const auto* identity = json_util::member(source, "capabilities").find("usage-record-identity")) {
-        // The host rewrites the outer session_id to the mapped record's hex
-        // identity. Its preserved native key still names the owning directory.
-        if (!identity->is_object() || !json_util::member(*identity, "version").is_integer() ||
-            json_util::member(*identity, "version").as_integer() != 1 ||
-            !json_util::bounded_string(json_util::member(*identity, "legacy_session_key"), 4096))
-        {
-            throw std::runtime_error("usage_native_session_invalid");
-        }
-        native_session = json_util::text(*identity, "legacy_session_key");
-    }
-    record.record_id = canonical_usage_session_id(native_session);
-    if (record.record_id.empty()) throw std::runtime_error("usage_native_session_invalid");
-    record.session_key = record.record_id;
-    record.completed_date = json_util::text(source, "completed_date");
-    record.total_tokens = count(json_util::member(source, "total_tokens"));
-    record.source_path = json_util::text(source, "source_path");
-    record.model = json_util::text(source, "model");
-    record.counter_field = json_util::text(source, "counter_field");
-    record.source_counter_semantics = json_util::text(source, "counter_semantics");
-    file.cwd = json_util::text(source, "recorded_cwd");
-    auto fields = amounts(record);
-    const auto& breakdown = json_util::member(json_util::member(source, "capabilities"), "token_breakdown");
-    constexpr std::array<std::string_view, 4> names{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"};
-    const bool current = !file.stale_breakdown && json_util::member(breakdown, "version").is_integer() &&
-        json_util::member(breakdown, "version").as_integer() == 2;
-    record.coverage_unit = current && json_util::text(breakdown, "coverage_unit") == "records"
-        ? addon::Usage_coverage_unit::RECORDS : addon::Usage_coverage_unit::SESSIONS;
-    for (std::size_t index = 0; index < fields.size(); ++index) {
-        auto& destination = *fields[index];
-        destination.applicable = true;
-        destination.value = 0;
-        destination.coverage = addon::Usage_field_coverage{0, 1, false, addon::Usage_support::UNKNOWN};
-        if (!current) continue;
-        const auto& value = json_util::member(breakdown, names[index]);
-        auto& coverage = *destination.coverage;
-        coverage.covered_records = count(json_util::member(value, "covered_records"));
-        coverage.total_records = count(json_util::member(value, "total_records"));
-        if (const auto* overflow = value.find("overflow")) {
-            if (!overflow->is_boolean()) throw std::runtime_error("usage_native_breakdown_invalid");
-            coverage.overflow = overflow->as_boolean();
-        }
-        const auto support = json_util::text(value, "support");
-        if (support == "supported") coverage.support = addon::Usage_support::SUPPORTED;
-        else if (support == "unsupported") {
-            coverage.support = addon::Usage_support::UNSUPPORTED;
-            destination.applicable = false;
-            destination.value.reset();
-        }
-        else if (support != "unknown") throw std::runtime_error("usage_native_breakdown_invalid");
-        if (coverage.overflow) destination.value.reset();
-        if (const auto* known = value.find("known_tokens")) destination.value = count(*known);
-    }
-    attribute(record, file.cwd);
-    addon::Contract_failure failure;
-    if (!addon::decode_usage_record(addon::encode_usage_record(record, 2), &failure, 2)) throw std::runtime_error("usage_native_record_unrepresentable");
-    file.usage = std::move(record);
-    return file;
-}
-
-void import_native_cache(Row_sorter& files, const addon::Usage_native_file_cache& seed,
-    const fs::path& storage, std::string_view owner, bool imported, bool cache_empty,
-    addon::Invocation_context& context)
-{
-    if (seed.source_account_key != owner) throw std::runtime_error("usage_native_account_mismatch");
-    const auto path = addon::path_from_utf8(seed.path);
-    if (!path.is_absolute() || path.parent_path() != storage || fs::is_symlink(fs::symlink_status(path))) {
-        throw std::runtime_error("usage_native_cache_path_invalid");
-    }
-    std::ifstream input(cache_io_path(path), std::ios::binary);
-    require_io(static_cast<bool>(input));
-    addon::Sha256 digest;
-    std::string line;
-    bool empty = true;
-    while (read_line(input, line)) {
-        check_cancel(context);
-        empty = false;
-        digest.update(line);
-        digest.update("\n");
-        if (imported) continue;
-        const auto row = json_util::parse(line);
-        if (!row || !row->is_object()) throw std::runtime_error("usage_native_cache_invalid");
-        const auto path_text = json_util::text(*row, "path");
-        const auto original = addon::path_from_utf8(path_text);
-        if (!original.is_absolute() || original.filename() != "wire.jsonl" ||
-            original.parent_path().parent_path().filename() != "agents") throw std::runtime_error("usage_native_file_invalid");
-        auto file = native_file_record(*row);
-        if (file.usage && (!file.usage->source_path ||
-                path_key(addon::path_from_utf8(*file.usage->source_path)) != path_key(original.parent_path().parent_path().parent_path()) ||
-                file.usage->record_id != "kimi:" + path_string(original.parent_path().parent_path().parent_path().filename())))
-        {
-            throw std::runtime_error("usage_native_session_path_conflict");
-        }
-        files.add(path_key(original), encode_file(path_text, file));
-    }
-    if (addon::to_hex(digest.finish()) != seed.sha256_hex) throw std::runtime_error("usage_native_cache_digest_mismatch");
-    if (seed.cache_required && empty && cache_empty) throw std::runtime_error("usage_retained_cache_missing");
-}
-
 // Flush a completed spool, then atomically replace the cache. No history-sized
 // buffer is needed, and cancellation cannot publish a partially written file.
 void store_cache(const fs::path& destination, const fs::path& temporary)
@@ -1984,7 +1869,7 @@ fs::path prepare_corrected_sessions(Row_lookup& observed, Ownership_origins& ori
 }
 
 Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
-    std::string_view mode, const std::optional<addon::Usage_native_file_cache>& seed,
+    std::string_view mode,
     addon::Invocation_context& context, const addon::Usage_cache_selection* selection,
     const addon::Usage_owned_event_correction_request* correction = nullptr)
 {
@@ -2002,13 +1887,12 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         : destination;
     auto workspace = std::make_unique<Scan_workspace>(storage);
     const auto& work = workspace->path();
-    Row_sorter cached(work, "cache", context), imported(work, "seed", context), live(work, "live", context);
+    Row_sorter cached(work, "cache", context), live(work, "live", context);
     Row_sorter receipts(work, "receipts", context), sessions(work, "sessions", context);
     Row_sorter observations(work, "observations", context);
     const auto events_path = work / "events.jsonl";
     std::ofstream events(events_path, std::ios::binary);
     require_io(static_cast<bool>(events));
-    bool seed_imported = false, cache_empty = true;
     check_cancel(context);
     context.report_progress(0, std::nullopt, "Reading usage cache");
     if (mode != "reset" && fs::exists(input_file)) {
@@ -2041,11 +1925,9 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             pending->event_begin = static_cast<std::uint64_t>(events.tellp());
             event_count = 0;
             event_digest = addon::Sha256{};
-            cache_empty = false;
         }, [&](const Json& receipt) {
             if (!receipt.is_string() || !addon::sha256_from_hex(receipt.as_string())) throw std::runtime_error("usage_cache_invalid");
             receipts.add(receipt.as_string(), receipt);
-            if (seed && receipt.as_string() == seed->sha256_hex) seed_imported = true;
         }, [&](const Json& event) {
             if (!pending || !pending->fork_carrier || !event.is_object() || json_util::text(event, "type") != "usage.record") {
                 throw std::runtime_error("usage_cache_invalid");
@@ -2057,10 +1939,6 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
             ++event_count;
         });
         finish_pending();
-    }
-    if (mode != "reset" && seed) {
-        import_native_cache(imported, *seed, storage, owner, seed_imported, cache_empty, context);
-        if (!seed_imported) receipts.add(seed->sha256_hex, Json(seed->sha256_hex));
     }
     auto workspaces = optional_document(profile / "workspaces.json");
     if (!json_util::member(workspaces, "version").is_integer() || json_util::member(workspaces, "version").as_integer() != 1) workspaces = Json::object();
@@ -2078,7 +1956,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         if (total % 256 == 0) context.report_progress(0, std::nullopt, "Discovering usage logs");
     }
     context.report_progress(0, total, "Sorting usage logs");
-    Row_stream cached_rows(cached.finish()), seed_rows(imported.finish()), live_rows(live.finish());
+    Row_stream cached_rows(cached.finish()), live_rows(live.finish());
     const auto staged_cache = work / "files.jsonl";
     std::ofstream cache_output(staged_cache, std::ios::binary);
     require_io(static_cast<bool>(cache_output));
@@ -2095,33 +1973,14 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         }
     }
     std::uint64_t processed = 0;
-    while (cached_rows.available() || seed_rows.available() || live_rows.available()) {
+    while (cached_rows.available() || live_rows.available()) {
         check_cancel(context);
         std::string key;
-        for (const auto* rows : {&cached_rows, &seed_rows, &live_rows}) {
+        for (const auto* rows : {&cached_rows, &live_rows}) {
             if (rows->available() && (key.empty() || rows->key() < key)) key = rows->key();
         }
         std::optional<File_record> file;
         std::string path;
-        // Native paths may spell the same platform path differently. Retain
-        // the first raw path, as the legacy import map did, but reject exact
-        // duplicates. encode_file puts path first, so equal raw paths are
-        // adjacent in the sorter's serialized secondary order.
-        std::string previous_seed_path;
-        while (seed_rows.available() && seed_rows.key() == key) {
-            check_cancel(context);
-            const auto row = seed_rows.value();
-            const auto seed_path = json_util::text(row, "path");
-            if (seed_path == previous_seed_path) throw std::runtime_error("usage_native_cache_duplicate");
-            previous_seed_path = seed_path;
-            if (!file || seed_path < path) {
-                path = seed_path;
-                file = decode_file(row);
-            }
-            seed_rows.next();
-        }
-        // The package cache wins over an imported seed; only a live, stable
-        // observation may replace it. Duplicate cache rows remain invalid.
         if (cached_rows.available() && cached_rows.key() == key) {
             const auto row = cached_rows.value();
             path = json_util::text(json_util::member(row, "file"), "path");
@@ -2237,10 +2096,10 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
 } // namespace
 
 std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::path& storage,
-    std::string_view mode, const std::optional<addon::Usage_native_file_cache>& seed,
+    std::string_view mode,
     addon::Invocation_context& context, const addon::Usage_cache_selection* selection)
 {
-    const auto scan = scan_to_disk(profile, storage, mode, seed, context, selection);
+    const auto scan = scan_to_disk(profile, storage, mode, context, selection);
     std::ifstream input(scan.records, std::ios::binary);
     require_io(static_cast<bool>(input));
     std::vector<addon::Usage_record> result;
@@ -2269,8 +2128,7 @@ void handle_usage(addon::Invocation_context& context)
     if (!input->context.profile_storage) throw std::runtime_error("usage_storage_unavailable");
     const auto profile = profile_for_context(input->context);
     const auto storage = addon::path_from_utf8(input->context.profile_storage->root);
-    auto owner = account_key(profile) + ":" + path_string(storage) + ":" +
-        (input->native_file_cache ? input->native_file_cache->sha256_hex : std::string{});
+    auto owner = account_key(profile) + ":" + path_string(storage);
     if (version == 3) {
         auto identity = *input;
         identity.snapshot_id.reset();
@@ -2341,7 +2199,7 @@ void handle_usage(addon::Invocation_context& context)
                 }
             }
         }
-        auto scan = scan_to_disk(profile, storage, input->mode, input->native_file_cache, context,
+        auto scan = scan_to_disk(profile, storage, input->mode, context,
             input->cache_selection ? &*input->cache_selection : nullptr, correction ? &*correction : nullptr);
         snapshot.workspace = std::move(scan.workspace);
         snapshot.records = std::move(scan.records);

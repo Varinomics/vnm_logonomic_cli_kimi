@@ -9,7 +9,6 @@
 #include "kimi_usage.h"
 
 #include <logonomic_cli_addon/adapter_runtime.h>
-#include <logonomic_cli_addon/legacy_state_import.h>
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/profile_storage.h>
 #include <logonomic_cli_addon/session_contracts.h>
@@ -69,8 +68,6 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         const auto& request = context.request();
         const auto& capability = request.capability.capability_id;
         if (capability == "launcher-discovery") launcher(context);
-        else
-        if (capability == "legacy-state-import") kimi::handle_legacy_data(context);
         else
         if (capability == "accounts") kimi::handle_accounts(context);
         else
@@ -133,7 +130,7 @@ int main()
         {"lifecycle-correlation-lifetime", 1},
         {"launch-preparation", 3}, {"structured-session", 2}, {"delegated-session", 2},
         {"interactive-resume", 2}, {"quota", 2}, {"lifecycle-events", 2},
-        {"helper-ingress", 2}, {"coordination-delivery", 1}, {"legacy-state-import", 1},
+        {"helper-ingress", 2}, {"coordination-delivery", 1},
         {"accounts", 2}, {"usage-scan", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
         {addon::k_usage_temporal_capability_id, addon::k_usage_temporal_version},
         {addon::k_usage_session_capability_id, addon::k_usage_session_version},

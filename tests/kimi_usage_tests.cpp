@@ -149,7 +149,7 @@ void fork_ownership_contract()
         "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200002000,"
         "\"model\":\"kimi\",\"usageScope\":\"turn\",\"usage\":{\"output\":300}}\n");
     Context context;
-    const auto records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    const auto records = kimi::scan_usage(profile, storage, "incremental", context);
     std::uint64_t total = 0, parent_total = 0, child_total = 0;
     for (const auto& record : records) {
         std::cout << record.record_id << ": " << record.total_tokens << '\n';
@@ -198,7 +198,7 @@ void fork_chains_contract()
         "{\"type\":\"metadata\",\"protocol_version\":\"1.5\",\"created_at\":1789199999000,"
         "\"creator_session_id\":\"created-here\"}\n" + usage(80));
     Context context;
-    auto records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    auto records = kimi::scan_usage(profile, storage, "incremental", context);
     const auto verify = [&](std::uint64_t sibling) {
         std::uint64_t total = 0;
         for (const auto& record : records) {
@@ -224,11 +224,11 @@ void fork_chains_contract()
         append << usage(70);
         require(static_cast<bool>(append), "native own append fixture written");
     }
-    records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    records = kimi::scan_usage(profile, storage, "incremental", context);
     verify(670);
     fs::remove_all(directory / "root");
     fs::remove_all(directory / "child");
-    records = kimi::scan_usage(profile, storage, "repair", std::nullopt, context);
+    records = kimi::scan_usage(profile, storage, "repair", context);
     verify(670);
 
     const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
@@ -238,7 +238,7 @@ void fork_chains_contract()
     }();
     const auto unavailable = [&] {
         bool rejected = false;
-        try { (void)kimi::scan_usage(profile, storage, "incremental", std::nullopt, context); }
+        try { (void)kimi::scan_usage(profile, storage, "incremental", context); }
         catch (const kimi::Usage_ownership_unavailable&) { rejected = true; }
         require(rejected, "unproved ownership must be explicitly unavailable");
         std::ifstream input(cache, std::ios::binary);
@@ -300,7 +300,7 @@ void raw_fork_mode_contract()
     write(wire, inherited + "{\"type\":\"forked\",\"agentId\":\"main\",\"time\":1789200001000}\n"
         "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200002000,\"usage\":{\"output\":30}}\n");
     Context context;
-    (void)kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    (void)kimi::scan_usage(profile, storage, "incremental", context);
     const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
     std::string legacy;
     {
@@ -330,7 +330,7 @@ void raw_fork_mode_contract()
     // collector fixture, not a claim that a host accepted this mutable cache.
     write(cache, legacy);
     for (const auto mode : {"incremental", "repair"}) {
-        const auto records = kimi::scan_usage(profile, storage, mode, std::nullopt, context);
+        const auto records = kimi::scan_usage(profile, storage, mode, context);
         const auto child_record = std::find_if(records.begin(), records.end(), [](const auto& record) {
             return record.record_id == "kimi:child";
         });
@@ -342,7 +342,7 @@ void raw_fork_mode_contract()
         append << "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200003000,\"usage\":{\"output\":7}}\n";
         require(static_cast<bool>(append), "raw own growth fixture written");
     }
-    const auto records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    const auto records = kimi::scan_usage(profile, storage, "incremental", context);
     const auto child_record = std::find_if(records.begin(), records.end(), [](const auto& record) {
         return record.record_id == "kimi:child";
     });
@@ -366,7 +366,7 @@ void scan_contract()
         "{\"type\":\"usage.record\",\"time\":1789200001000,\"model\":\"two\",\"usage\":{\"output\":10}}\n"
         "{\"type\":\"usage.record\"");
     Context context;
-    auto records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    auto records = kimi::scan_usage(profile, storage, "incremental", context);
     require(records.size() == 1 && records.front().total_tokens == 17, "partial last record must not be counted");
     require(records.front().record_id == "kimi:Session-A" && records.front().model == "multiple", "canonical session and mixed model preserved");
     require(records.front().input.coverage->covered_records == 1 && records.front().input.coverage->total_records == 2,
@@ -376,48 +376,17 @@ void scan_contract()
         "observed zero and absent counter remain distinct");
     require(records.front().repository_usage->allocations.size() == 1, "recorded cwd attributes repository");
     fs::remove(wire);
-    records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    records = kimi::scan_usage(profile, storage, "incremental", context);
     require(records.front().total_tokens == 17, "disappeared agent log retains cached usage");
     write(session / "agents" / "Agent-B" / "wire.jsonl",
         "{\"type\":\"usage.record\",\"time\":1789200002000,\"usage\":{\"output\":5}}\n");
-    records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    records = kimi::scan_usage(profile, storage, "incremental", context);
     require(records.size() == 1 && records.front().total_tokens == 22, "all agent logs contribute to the same session");
-    const auto legacy_session = profile / "sessions" / "Workspace-B" / "Session-B";
-    const auto legacy_wire = legacy_session / "agents" / "Agent-A" / "wire.jsonl";
-    const auto identity = json_util::object({{"version", addon::Json_value(1)},
-        {"record_id", addon::Json_value("kimi:Session-B")},
-        {"session_key", addon::Json_value("kimi:Session-B")},
-        {"legacy_record_id", addon::Json_value("kimi:Session-B:old-agent")},
-        {"legacy_session_key", addon::Json_value("kimi:Session-B:old-agent")}});
-    const auto record = json_util::object({{"session_id", addon::Json_value("6b696d693a53657373696f6e2d42")},
-        {"capabilities", json_util::object({{"usage-record-identity", identity}})},
-        {"completed_date", addon::Json_value("2026-09-12")}, {"total_tokens", addon::Json_value(11)},
-        {"source_path", addon::Json_value(kimi::path_string(legacy_session))},
-        {"model", addon::Json_value("old")}, {"counter_field", addon::Json_value("usage")},
-        {"counter_semantics", addon::Json_value("per_event_sum")}, {"recorded_cwd", addon::Json_value("")}});
-    auto rows = addon::Json_value::array(); rows.push_back(record);
-    const auto seed_row = json_util::object({{"path", addon::Json_value(kimi::path_string(legacy_wire))},
-        {"size", addon::Json_value(99)}, {"modified_msecs", addon::Json_value(123)}, {"records", rows}});
-    const auto bytes = addon::serialize_json(seed_row) + "\n";
-    const auto seed_path = storage / "native-seed.jsonl";
-    write(seed_path, bytes);
-    addon::Usage_native_file_cache seed{kimi::path_string(seed_path),
-        addon::to_hex(addon::Sha256::digest(bytes)), kimi::account_key(profile), true};
-    records = kimi::scan_usage(profile, storage, "incremental", seed, context);
-    require(records.size() == 2 && records.back().record_id == "kimi:Session-B" &&
-        records.back().total_tokens == 11 && records.back().input.coverage->support == addon::Usage_support::UNKNOWN,
-        "mapped wrapper recovers native session identity and missing source totals without inventing stale breakdown");
-    records = kimi::scan_usage(profile, storage, "incremental", seed, context);
-    require(records.size() == 2 && records.back().total_tokens == 11, "reoffered seed is idempotent");
-    seed.sha256_hex[0] = seed.sha256_hex[0] == 'a' ? 'b' : 'a';
-    bool rejected = false;
-    try { (void)kimi::scan_usage(profile, storage, "incremental", seed, context); }
-    catch (const std::runtime_error&) { rejected = true; }
-    require(rejected, "wrong seed digest must fail before durable adoption");
-    records = kimi::scan_usage(profile, storage, "reset", std::nullopt, context);
+    records = kimi::scan_usage(profile, storage, "reset", context);
     require(records.size() == 1 && records.front().total_tokens == 5, "explicit reset discards retained cached history");
-    require(kimi::canonical_usage_session_id("kimi:Session-A:legacy") == "kimi:Session-A" &&
-        kimi::canonical_usage_session_id("foreign:Session-A").empty(), "legacy identity converter is provider scoped");
+    const auto session_fact = kimi::describe_usage_session({records.front().record_id, records.front().session_key});
+    require(session_fact && session_fact->provider_session_id == "Session-A" && !session_fact->excludes_turn_in_flight,
+        "current usage identity correlates with the native session without excluding an active turn");
 }
 
 std::int64_t cached_modified_ms(const fs::path& cache)
@@ -470,7 +439,7 @@ void timestamp_cache_identity_contract()
     fs::last_write_time(wire, file_modified);
     require(fs::last_write_time(wire) == file_modified, "fixture preserves an exact millisecond timestamp");
     Context context;
-    auto records = kimi::scan_usage(profile, storage, "repair", std::nullopt, context);
+    auto records = kimi::scan_usage(profile, storage, "repair", context);
     require(records.size() == 1 && records.front().total_tokens == 7,
         "initial stable read records the source usage");
     require(cached_modified_ms(cache) == k_modified_ms,
@@ -481,7 +450,7 @@ void timestamp_cache_identity_contract()
     write(wire, replacement);
     fs::last_write_time(wire, file_modified);
     for (int scan = 0; scan < 2; ++scan) {
-        records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+        records = kimi::scan_usage(profile, storage, "incremental", context);
         require(records.size() == 1 && records.front().total_tokens == 7,
             "equal size and timestamp reuse the retained usage across repeated scans");
         require(cached_modified_ms(cache) == k_modified_ms,
@@ -489,7 +458,7 @@ void timestamp_cache_identity_contract()
     }
 
     fs::last_write_time(wire, file_modified + std::chrono::seconds{2});
-    records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    records = kimi::scan_usage(profile, storage, "incremental", context);
     require(records.size() == 1 && records.front().total_tokens == 9,
         "changed timestamp invalidates a same-size file's retained usage");
     require(cached_modified_ms(cache) == k_modified_ms + 2000,
@@ -504,38 +473,38 @@ void missing_sessions_contract()
     fs::create_directories(profile);
     fs::create_directories(storage);
     Context context;
-    require(kimi::scan_usage(profile, storage, "incremental", std::nullopt, context).empty(),
+    require(kimi::scan_usage(profile, storage, "incremental", context).empty(),
         "existing new profile without sessions has an empty successful scan");
     const auto sessions = profile / "sessions";
     native_session(sessions / "workspace" / "session");
     write(sessions / "workspace" / "session" / "agents" / "main" / "wire.jsonl",
         "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":7}}\n");
-    const auto recorded = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    const auto recorded = kimi::scan_usage(profile, storage, "incremental", context);
     require(recorded.size() == 1 && recorded.front().total_tokens == 7,
         "fixture retains usage before source subtree disappears");
     fs::remove_all(sessions);
     for (const auto mode : {"incremental", "repair"}) {
-        const auto records = kimi::scan_usage(profile, storage, mode, std::nullopt, context);
+        const auto records = kimi::scan_usage(profile, storage, mode, context);
         require(records.size() == 1 && records.front().total_tokens == 7,
             "absent sessions subtree must retain previously accepted cached history");
     }
     write(sessions, "not a directory");
     bool rejected = false;
-    try { (void)kimi::scan_usage(profile, storage, "incremental", std::nullopt, context); }
+    try { (void)kimi::scan_usage(profile, storage, "incremental", context); }
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "existing non-directory sessions path is not an empty profile");
     fs::remove(sessions);
-    const auto retained = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    const auto retained = kimi::scan_usage(profile, storage, "incremental", context);
     require(retained.size() == 1 && retained.front().total_tokens == 7,
         "rejected non-directory source cannot replace retained cache");
     rejected = false;
-    try { (void)kimi::scan_usage(workspace.path / "missing-profile", storage, "incremental", std::nullopt, context); }
+    try { (void)kimi::scan_usage(workspace.path / "missing-profile", storage, "incremental", context); }
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "missing profile is unavailable even though missing sessions alone is valid");
     const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
     write(cache, "corrupt retained cache");
     rejected = false;
-    try { (void)kimi::scan_usage(profile, storage, "repair", std::nullopt, context); }
+    try { (void)kimi::scan_usage(profile, storage, "repair", context); }
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "empty live inventory cannot bypass retained cache integrity checks");
     std::ifstream preserved(cache);
@@ -571,7 +540,7 @@ void large_history_contract()
     Context context;
     for (const auto mode : {"incremental", "repair", "reset"}) {
         const auto started = std::chrono::steady_clock::now();
-        const auto records = kimi::scan_usage(profile, storage, mode, std::nullopt, context);
+        const auto records = kimi::scan_usage(profile, storage, mode, context);
         std::cout << mode << " scan of " << history_bytes << " history bytes: " <<
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() <<
             " ms\n";
@@ -608,7 +577,7 @@ void large_log_contract()
     require(fs::file_size(wire) > 512ull * 1024 * 1024, "one log exceeds the former per-log bound");
     Context context;
     for (const auto mode : {"incremental", "repair"}) {
-        const auto records = kimi::scan_usage(profile, storage, mode, std::nullopt, context);
+        const auto records = kimi::scan_usage(profile, storage, mode, context);
         require(records.size() == 1 && records.front().total_tokens == 24, "a log larger than 512 MiB scans completely");
     }
 
@@ -616,7 +585,7 @@ void large_log_contract()
     native_session(oversized.parent_path().parent_path().parent_path());
     write(oversized, "{\"type\":\"content.part\",\"text\":\"" + std::string(5 * 1000 * 1000, 'x') + "\"}\n");
     bool rejected = false;
-    try { (void)kimi::scan_usage(profile, storage, "repair", std::nullopt, context); }
+    try { (void)kimi::scan_usage(profile, storage, "repair", context); }
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "a line past the parser's document bound still fails the scan");
 }
@@ -632,9 +601,8 @@ std::vector<std::string> lines_of(const fs::path& path)
 
 void line_cache_contract()
 {
-    // The cache holds one line per wire log and per seed receipt, so neither
-    // the number of logs nor the number of imported seeds is bounded. A cache
-    // written as one document is still read and rewritten line by line.
+    // Current cache records and retained opaque metadata are streamed.
+    // Keeping the metadata must not alter accepted file or occurrence evidence.
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
@@ -646,41 +614,26 @@ void line_cache_contract()
     }
     const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
     Context context;
-    const auto total = [&](const char* mode, const std::optional<addon::Usage_native_file_cache>& seed) {
+    const auto total = [&](const char* mode) {
         std::uint64_t sum = 0;
-        for (const auto& record : kimi::scan_usage(profile, storage, mode, seed, context)) sum += record.total_tokens;
+        for (const auto& record : kimi::scan_usage(profile, storage, mode, context)) sum += record.total_tokens;
         return sum;
     };
-    require(total("incremental", std::nullopt) == 63, "first scan counts every log");
+    require(total("incremental") == 63, "first scan counts every log");
     require(lines_of(cache).size() == 7, "the cache streams each file and its retained occurrence separately");
 
-    // Rewrite the cache as the single document earlier versions wrote, with
-    // 1024 seed receipts, the most that format admitted.
-    auto rows = addon::Json_value::array();
-    for (const auto& line : lines_of(cache)) {
-        const auto value = json_util::parse(line);
-        require(value && value->is_object(), "cache line parses");
-        if (value->find("path")) {
-            auto legacy = *value;
-            legacy.erase("usage-fork-ownership");
-            rows.push_back(std::move(legacy));
-        }
-    }
-    auto receipts = addon::Json_value::array();
+    const auto original = lines_of(cache);
+    std::string retained = original.front() + '\n';
     for (unsigned index = 0; index < 1024; ++index) {
-        receipts.push_back(addon::Json_value(addon::to_hex(addon::Sha256::digest("receipt-" + std::to_string(index)))));
+        const auto receipt = addon::to_hex(addon::Sha256::digest("receipt-" + std::to_string(index)));
+        retained += addon::serialize_json(json_util::object({{"receipt", addon::Json_value(receipt)}})) + '\n';
     }
-    write(cache, addon::serialize_json(json_util::object({{"version", addon::Json_value(1)},
-        {"profile", addon::Json_value(kimi::account_key(profile))}, {"files", rows}, {"receipts", receipts}})));
-    require(total("incremental", std::nullopt) == 63, "a single-document cache upgrades with exact totals");
-    require(lines_of(cache).size() == 1 + 1024 + 6, "the upgraded cache keeps every receipt, log and occurrence");
-
-    const auto seed_path = storage / "native-file-cache.jsonl";
-    write(seed_path, "");
-    const addon::Usage_native_file_cache seed{kimi::path_string(seed_path), addon::to_hex(addon::Sha256::digest("")),
-        kimi::account_key(profile), false};
-    require(total("incremental", seed) == 63, "a seed beyond 1024 earlier imports is still accepted");
-    require(lines_of(cache).size() == 1 + 1025 + 6, "the new receipt is retained");
+    for (std::size_t index = 1; index < original.size(); ++index) retained += original[index] + '\n';
+    write(cache, retained);
+    fs::remove_all(profile / "sessions");
+    require(total("incremental") == 63, "current cache retains exact totals without source logs");
+    require(lines_of(cache).size() == 1 + 1024 + 6,
+        "current cache preserves every retained metadata row, file and occurrence");
 }
 
 void file_count_contract()
@@ -710,7 +663,7 @@ void file_count_contract()
         require(static_cast<bool>(stream), "large retained-file fixture written");
     }
     Context context;
-    require(kimi::scan_usage(profile, storage, "incremental", std::nullopt, context).empty(),
+    require(kimi::scan_usage(profile, storage, "incremental", context).empty(),
         "more than 100000 retained wire files are accepted without inventing usage");
     std::ifstream stream(cache, std::ios::binary);
     std::size_t rows = 0;
@@ -740,81 +693,11 @@ void live_file_count_contract()
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() <<
         " ms" << std::endl;
     Context context;
-    const auto records = kimi::scan_usage(profile, storage, "incremental", std::nullopt, context);
+    const auto records = kimi::scan_usage(profile, storage, "incremental", context);
     require(records.size() == 1 && records.front().total_tokens == 7,
         "a live history beyond 100000 files includes every agent's usage");
     require(context.progress_current == k_file_count && context.progress_total == k_file_count,
         "large live histories report progress through the complete file inventory");
-}
-
-void native_aliases_contract()
-{
-    Workspace workspace;
-    const auto profile   = workspace.path / ".kimi-code";
-    const auto storage   = workspace.path / "package-profile";
-    const auto cache     = storage / (kimi::account_key(profile) + "-usage-v1.json");
-    const auto seed_path = storage / "native-aliases.jsonl";
-    fs::create_directories(profile);
-    fs::create_directories(storage);
-    const auto canonical = profile / "sessions" / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
-    const auto alias     = profile / "sessions" / "." / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
-    const auto seed_row = [](const fs::path& path) {
-        return addon::serialize_json(json_util::object({
-            {"path", addon::Json_value(kimi::path_string(path))}, {"size", addon::Json_value(0)},
-            {"modified_msecs", addon::Json_value(0)}, {"records", addon::Json_value::array()}})) + "\n";
-    };
-    const auto canonical_row = seed_row(canonical);
-    const auto alias_row     = seed_row(alias);
-    require(canonical_row != alias_row && canonical.lexically_normal() == alias.lexically_normal(),
-        "native alias fixture uses distinct raw paths naming the same wire log");
-    const auto bytes = canonical_row + alias_row;
-    write(seed_path, bytes);
-    addon::Usage_native_file_cache seed{kimi::path_string(seed_path),
-        addon::to_hex(addon::Sha256::digest(bytes)), kimi::account_key(profile), false};
-    const auto verify_cache = [&] {
-        std::size_t files = 0, receipts = 0;
-        for (const auto& line : lines_of(cache)) {
-            const auto value = json_util::parse(line);
-            require(value && value->is_object(), "native alias cache records remain valid JSON");
-            if (const auto* rows = value->find("files")) {
-                require(rows->is_array() && rows->as_array().size() == 1,
-                    "native aliases retain exactly one file in a document cache");
-                files += rows->as_array().size();
-                require(json_util::text(rows->as_array().front(), "path") == kimi::path_string(alias),
-                    "native aliases retain the first lexical raw path");
-                const auto& imported = json_util::member(*value, "receipts");
-                require(imported.is_array(), "document cache retains import receipts");
-                receipts += imported.as_array().size();
-            }
-            else
-            if (value->find("path")) {
-                ++files;
-                require(json_util::text(*value, "path") == kimi::path_string(alias),
-                    "native aliases retain the first lexical raw path");
-            }
-            else
-            if (value->find("receipt")) {
-                ++receipts;
-            }
-        }
-        require(files == 1 && receipts == 1, "native aliases retain one file and one import receipt");
-    };
-    Context context;
-    require(kimi::scan_usage(profile, storage, "incremental", seed, context).empty(),
-        "distinct native paths naming the same wire log are accepted");
-    verify_cache();
-    require(kimi::scan_usage(profile, storage, "incremental", seed, context).empty(),
-        "reoffering native aliases remains idempotent");
-    verify_cache();
-    const auto accepted = lines_of(cache);
-    const auto duplicate_bytes = canonical_row + canonical_row;
-    write(seed_path, duplicate_bytes);
-    seed.sha256_hex = addon::to_hex(addon::Sha256::digest(duplicate_bytes));
-    bool rejected = false;
-    try { (void)kimi::scan_usage(profile, storage, "incremental", seed, context); }
-    catch (const std::runtime_error&) { rejected = true; }
-    require(rejected, "exact duplicate raw native paths remain invalid");
-    require(lines_of(cache) == accepted, "rejected duplicate import preserves the accepted cache");
 }
 
 } // namespace
@@ -832,7 +715,6 @@ int main(int argc, char** argv)
                 return 0;
             }
             if (selected == "--fork-ownership") { fork_ownership_contract(); fork_chains_contract(); raw_fork_mode_contract(); return 0; }
-            if (selected == "--native-aliases") { native_aliases_contract(); return 0; }
             if (selected == "--line-cache" || selected == "--history-limits") line_cache_contract();
             if (selected == "--file-count" || selected == "--history-limits") file_count_contract();
             if (selected == "--live-file-count" || selected == "--history-limits") live_file_count_contract();
@@ -844,7 +726,6 @@ int main(int argc, char** argv)
         fork_ownership_contract();
         fork_chains_contract();
         raw_fork_mode_contract();
-        native_aliases_contract();
         accounts_contract();
         scan_contract();
         timestamp_cache_identity_contract();
