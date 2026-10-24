@@ -474,7 +474,7 @@ public:
         addon::Contract_failure failure;
         const auto reference = addon::seal_usage_cache_candidate(addon::path_to_utf8(root),
             request.context.profile_storage->root, request.context.account_context, "fixture-" + name,
-            "kimi-wire-cache@1", [] { return false; }, &failure);
+            "kimi-wire-cache@2", [] { return false; }, &failure);
         check(reference.has_value(), "seal original-account cache fixture: " + failure.detail);
         return *reference;
     }
@@ -1183,7 +1183,7 @@ void owned_event_contract(const fs::path& package, const fs::path& fixture)
         check(!child_only || kept_files == 1, "legacy orphan fixture retains its accepted child row");
         write(directory / "files.json", bytes);
         const auto sealed = addon::seal_usage_cache_candidate(addon::path_to_utf8(directory), *allocated,
-            scan.context.account_context, name, "kimi-wire-cache@1", [] { return false; }, &failure);
+            scan.context.account_context, name, "kimi-wire-cache@2", [] { return false; }, &failure);
         check(sealed.has_value(), failure.detail);
         return *sealed;
     };

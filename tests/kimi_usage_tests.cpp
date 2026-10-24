@@ -398,11 +398,6 @@ std::int64_t cached_modified_ms(const fs::path& cache)
     while (std::getline(stream, line)) {
         const auto document = json_util::parse(line);
         require(document.has_value(), "usage cache records must remain valid JSON");
-        if (const auto* rows = document->find("files")) {
-            require(rows->is_array(), "single-document cache must contain a file array");
-            for (const auto& row : rows->as_array()) files.push_back(row);
-        }
-        else
         if (document->find("path")) {
             files.push_back(*document);
         }
@@ -648,17 +643,15 @@ void file_count_contract()
     {
         std::ofstream stream(cache, std::ios::binary);
         stream << "{\"version\":1,\"profile\":" << addon::serialize_json(addon::Json_value(kimi::account_key(profile))) <<
-            ",\"receipts\":[],\"files\":[";
+            ",\"format\":\"jsonl\"}\n";
         for (unsigned index = 0; index < k_file_count; ++index) {
             const auto path = profile / "sessions" / "workspace" / "session" / "agents" /
                 ("agent-" + std::to_string(index)) / "wire.jsonl";
-            if (index != 0) stream << ',';
             stream << addon::serialize_json(json_util::object({
                 {"path", addon::Json_value(kimi::path_string(path))}, {"size", addon::Json_value(0)},
                 {"modified_msecs", addon::Json_value(0)}, {"recorded_cwd", addon::Json_value("")},
-                {"stale_breakdown", addon::Json_value(false)}, {"usage", addon::Json_value{}}}));
+                {"stale_breakdown", addon::Json_value(false)}, {"usage", addon::Json_value{}}})) << '\n';
         }
-        stream << "]}";
         stream.close();
         require(static_cast<bool>(stream), "large retained-file fixture written");
     }
@@ -670,7 +663,7 @@ void file_count_contract()
     std::string line;
     while (std::getline(stream, line)) ++rows;
     require(stream.eof() && rows == 1 + k_file_count,
-        "migration retains every file past the former history count limit");
+        "current streamed cache retains every file past the former history count limit");
 }
 
 void live_file_count_contract()

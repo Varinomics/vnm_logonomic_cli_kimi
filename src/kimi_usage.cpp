@@ -871,9 +871,7 @@ private:
     std::uint64_t m_begin = 0;
 };
 
-// Read the first cache object one member at a time. In the document format,
-// files and receipts are arrays whose elements are individually parsed. This
-// also reads the JSONL header without buffering a document-sized first line.
+// Read the JSONL header one member at a time, then stream each cache row.
 class Cache_reader final
 {
 public:
@@ -889,36 +887,18 @@ public:
         expect('{');
         auto header = Json::object();
         std::set<std::string> keys;
-        bool have_files = false, have_receipts = false;
         for (;;) {
             const auto key = value();
-            if (!key.is_string() || (key.as_string() != "files" && key.as_string() != "receipts" &&
-                key.as_string() != "version" && key.as_string() != "profile" && key.as_string() != "format") ||
+            if (!key.is_string() || (key.as_string() != "version" &&
+                key.as_string() != "profile" && key.as_string() != "format") ||
                 !keys.insert(key.as_string()).second) invalid();
             expect(':');
-            if (key.as_string() == "files" || key.as_string() == "receipts") {
-                const bool files = key.as_string() == "files";
-                (files ? have_files : have_receipts) = true;
-                expect('[');
-                if (peek() != ']') {
-                    for (;;) {
-                        (files ? file : receipt)(value());
-                        if (peek() == ']') break;
-                        expect(',');
-                    }
-                }
-                expect(']');
-            }
-            else header.set(key.as_string(), value());
+            header.set(key.as_string(), value());
             if (peek() == '}') break;
             expect(',');
         }
         expect('}');
         if (count(json_util::member(header, "version")) != 1 || json_util::text(header, "profile") != owner) invalid();
-        if (have_files || have_receipts) {
-            if (!have_files || !have_receipts || !json_util::exact_keys(header, {"version", "profile"}) || peek() != EOF) invalid();
-            return;
-        }
         if (!json_util::exact_keys(header, {"version", "profile", "format"}) || json_util::text(header, "format") != "jsonl") invalid();
         // Header and each following row are separate complete JSON documents.
         std::string line;
@@ -2191,7 +2171,7 @@ void handle_usage(addon::Invocation_context& context)
                     *selection.accepted, path_string(storage), input->context.account_context,
                     [&context] { return context.cancel_requested(); }, &failure);
                 if (!manifest) throw std::runtime_error(failure.reason_code);
-                if ((manifest->format != "kimi-wire-cache@1" && manifest->format != "kimi-wire-cache@2") ||
+                if (manifest->format != "kimi-wire-cache@2" ||
                     manifest->files.size() != 1 ||
                     manifest->files.front().path != "files.json")
                 {
