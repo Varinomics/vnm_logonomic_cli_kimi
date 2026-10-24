@@ -88,13 +88,13 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         else
         if (capability == "structured-session" && request.operation == "inspect") {
             addon::Contract_failure failure;
-            const auto inspection = addon::decode_structured_inspect_request(request.payload, &failure, 2);
+            const auto inspection = addon::decode_structured_inspect_request(request.payload, &failure);
             if (!inspection) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
             if (inspection->purpose != addon::Structured_purpose::IMPLEMENTATION) {
                 context.fail(addon::Result_status::UNAVAILABLE, "purpose_unavailable");
                 return;
             }
-            auto payload = addon::encode_structured_inspect_result(kimi::inspect_acp(inspection->inspection), 2);
+            auto payload = addon::encode_structured_inspect_result(kimi::inspect_acp(inspection->inspection));
             if (!addon::validate_session_exchange_payload(payload, &failure)) {
                 context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
                 return;
@@ -128,7 +128,7 @@ int main()
     options.capabilities = {
         {"presentation", 1}, {"launcher-discovery", 1}, {"profile-storage", 1},
         {"lifecycle-correlation-lifetime", 1},
-        {"launch-preparation", 3}, {"structured-session", 2}, {"delegated-session", 2},
+        {"launch-preparation", 3}, {"structured-session", 3}, {"delegated-session", 3},
         {"interactive-resume", 2}, {"quota", 2}, {"lifecycle-events", 2},
         {"helper-ingress", 2}, {"coordination-delivery", 1},
         {"accounts", 2}, {"usage-scan", 3}, {"managed-configuration", 1},

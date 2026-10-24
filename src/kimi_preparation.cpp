@@ -77,7 +77,7 @@ void prepare_launch(addon::Invocation_context& context)
 void prepare_delegated(addon::Invocation_context& context)
 {
     addon::Contract_failure error;
-    const auto request = addon::decode_delegated_prepare_request(context.request().payload, &error, 2);
+    const auto request = addon::decode_delegated_prepare_request(context.request().payload, &error);
     if (!request) { context.fail(addon::Result_status::FAILED, error.reason_code, error.detail); return; }
     if (request->purpose != addon::Structured_purpose::IMPLEMENTATION) {
         context.fail(addon::Result_status::UNAVAILABLE, "purpose_unavailable");
@@ -117,7 +117,7 @@ void prepare_delegated(addon::Invocation_context& context)
     result.inspection.keep_stdin_open = true;
     result.inspection.protocol_state = initial_acp_state(*request);
     for (const auto& server : request->control.servers) result.acknowledgment.server_ids.push_back(server.server_id);
-    auto payload = addon::encode_delegated_prepare_result(result, 2);
+    auto payload = addon::encode_delegated_prepare_result(result);
     if (!addon::validate_session_exchange_payload(payload, &error)) {
         context.fail(addon::Result_status::FAILED, error.reason_code, error.detail);
         return;

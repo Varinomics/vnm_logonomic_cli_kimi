@@ -89,10 +89,10 @@ void required_control_reaches_native_admission(const char* executable)
         {{"VNM_CONTROL_TOKEN", "kimi-host-authority-canary"}}});
     request.control.servers.push_back({"delegation", server_program, {"targets", "submit"}, {}});
     Context context;
-    context.m_request = {"delegated", {"delegated-session", 2}, "prepare", addon::encode_delegated_prepare_request(request, 2)};
+    context.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request)};
     kimi::handle_preparation(context);
     addon::Contract_failure failure;
-    const auto result = context.m_result ? addon::decode_delegated_prepare_result(*context.m_result, &failure, 2) : std::nullopt;
+    const auto result = context.m_result ? addon::decode_delegated_prepare_result(*context.m_result, &failure) : std::nullopt;
     require(result && result->acknowledgment.connection_version == addon::k_delegated_connection_version &&
         result->acknowledgment.server_ids == std::vector<std::string>{"coordination", "delegation"},
         "required actions reach a relay-acknowledged native proposal");
@@ -104,11 +104,11 @@ void required_control_reaches_native_admission(const char* executable)
         for (const auto& option : options) selected.context.launcher.script_body += " " + option;
         selected.context.launcher_argv.insert(selected.context.launcher_argv.end(), options.begin(), options.end());
         Context configured;
-        configured.m_request = {"delegated", {"delegated-session", 2}, "prepare",
-            addon::encode_delegated_prepare_request(selected, 2)};
+        configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
+            addon::encode_delegated_prepare_request(selected)};
         kimi::handle_preparation(configured);
         const auto proposal = configured.m_result
-            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure, 2) : std::nullopt;
+            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure) : std::nullopt;
         auto expected = selected.context.launcher_argv;
         expected.push_back("acp");
         require(proposal && proposal->process.argv == expected, "launcher permission options are preserved in delegated ACP");
@@ -177,7 +177,7 @@ void required_control_reaches_native_admission(const char* executable)
     // its tool count would still match; such actions are refused up front.
     request.control.servers.back().actions = {"status.a", "status_a"};
     Context colliding;
-    colliding.m_request = {"delegated", {"delegated-session", 2}, "prepare", addon::encode_delegated_prepare_request(request, 2)};
+    colliding.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request)};
     bool collision_refused = false;
     try { kimi::handle_preparation(colliding); }
     catch (const std::runtime_error& error) {

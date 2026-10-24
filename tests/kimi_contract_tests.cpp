@@ -245,7 +245,7 @@ void saturated_session_end()
     request.window_ms = addon::limits::k_observe_window_ms;
     request.correlation = addon::Session_correlation{nonce};
     observing.invocation.operation = "observe";
-    observing.invocation.payload = addon::encode_observe_request(request, 2);
+    observing.invocation.payload = addon::encode_observe_request(request);
     observer.handle(observing);
     require(observing.succeeded, "full retained queue is established before SessionEnd");
     auto ending = start;
@@ -262,7 +262,7 @@ void saturated_session_end()
     for (int attempt = 0; attempt < 2; ++attempt) {
         Context polling;
         polling.invocation.operation = "poll_observations";
-        polling.invocation.payload = addon::encode_poll_observations_request(poll, 2);
+        polling.invocation.payload = addon::encode_poll_observations_request(poll);
         observer.handle(polling);
         require(!polling.succeeded && polling.failure == "observation_queue_capacity_exhausted",
             "poll reports retained failure repeatedly rather than silently draining and erasing the session");

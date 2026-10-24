@@ -564,7 +564,7 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
         return;
     }
     if (context.request().operation == "poll_observations") {
-        const auto request = addon::decode_poll_observations_request(context.request().payload, &failure, 2);
+        const auto request = addon::decode_poll_observations_request(context.request().payload, &failure);
         if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
         if (!request->correlation) { context.fail(addon::Result_status::UNAVAILABLE, "session_start_required"); return; }
         const auto cursor = request->resume_cursor.empty()
@@ -591,11 +591,11 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
         result.resume_cursor = cursor.key + ':' + std::to_string(cursor.sequence + count);
         result.more = count < binding.queue.size();
         if (binding.closed && !result.more) binding.final_cursor = result.resume_cursor;
-        context.succeed(addon::encode_poll_observations_result(result, 2));
+        context.succeed(addon::encode_poll_observations_result(result));
         return;
     }
     if (context.request().operation != "observe") { context.reject_unknown_operation(); return; }
-    const auto request = addon::decode_observe_request(context.request().payload, &failure, 2);
+    const auto request = addon::decode_observe_request(context.request().payload, &failure);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
     if (!request->correlation) { context.fail(addon::Result_status::UNAVAILABLE, "session_start_required"); return; }
     const auto cursor = request->resume_cursor.empty()

@@ -177,7 +177,7 @@ that implementation; this package does not retain a native fallback.
 
 ## Structured and delegated sessions
 
-The paired structured-session and delegated-session contracts use version 2.
+The paired structured-session and delegated-session contracts use version 3.
 An authenticated ACP session/close reply completes inspection and returns the
 answer. This is not evidence of clean native process exit.
 

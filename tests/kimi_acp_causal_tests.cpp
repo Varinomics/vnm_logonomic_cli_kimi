@@ -26,8 +26,8 @@ addon::Structured_inspect_result inspect(std::string state, std::string bytes,
     addon::Contract_failure failure;
     try {
         require(addon::decode_structured_inspect_result(
-            addon::encode_structured_inspect_result(result, 2), final, &failure, 2).has_value(),
-            "inspection must round-trip through the structured-session@2 codec");
+            addon::encode_structured_inspect_result(result), final, &failure).has_value(),
+            "inspection must round-trip through the structured-session@3 codec");
     }
     catch (const std::exception& error) {
         require(false, error.what());

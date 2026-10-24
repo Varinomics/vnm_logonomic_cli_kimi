@@ -129,7 +129,7 @@ void prepare_observe(Context& context, const Workspace& workspace, const std::st
     request.window_ms = addon::limits::k_observe_window_ms;
     context.m_request.capability = {"lifecycle-events", 2};
     context.m_request.operation = "observe";
-    context.m_request.payload = addon::encode_observe_request(request, 2);
+    context.m_request.payload = addon::encode_observe_request(request);
 }
 
 std::optional<addon::Poll_observations_result> poll(kimi::Lifecycle_observer& observer,
@@ -142,11 +142,11 @@ std::optional<addon::Poll_observations_result> poll(kimi::Lifecycle_observer& ob
     Context context;
     context.m_request.capability = {"lifecycle-events", 2};
     context.m_request.operation = "poll_observations";
-    context.m_request.payload = addon::encode_poll_observations_request(request, 2);
+    context.m_request.payload = addon::encode_poll_observations_request(request);
     observer.handle(context);
     addon::Contract_failure failure;
     return context.m_result
-        ? addon::decode_poll_observations_result(*context.m_result, request.limit, &failure, 2)
+        ? addon::decode_poll_observations_result(*context.m_result, request.limit, &failure)
         : std::nullopt;
 }
 
@@ -583,7 +583,7 @@ void declared_profile_admits_every_shape(const fs::path& package)
 {
     const addon::Directory_package_source source(package);
     const auto path = addon::sidecar_relative_path(
-        addon::k_lifecycle_events_capability_id, addon::k_lifecycle_events_correlated_version);
+        addon::k_lifecycle_events_capability_id, addon::k_lifecycle_events_version);
     const auto bytes = source.read(path, addon::limits::k_max_sidecar_bytes, nullptr);
     const auto sidecar = bytes ? addon::parse_sidecar(*bytes, nullptr) : std::nullopt;
     const auto declaration = sidecar ? addon::decode_lifecycle_declaration(sidecar->payload, nullptr) : std::nullopt;

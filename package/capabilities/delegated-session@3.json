@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "payload": {
     "environment_names": [
       "KIMI_CODE_HOME",
