@@ -131,7 +131,7 @@ int main()
         {"launch-preparation", 3}, {"structured-session", 2}, {"delegated-session", 2},
         {"interactive-resume", 2}, {"quota", 2}, {"lifecycle-events", 2},
         {"helper-ingress", 2}, {"coordination-delivery", 1},
-        {"accounts", 2}, {"usage-scan", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
+        {"accounts", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
         {addon::k_usage_temporal_capability_id, addon::k_usage_temporal_version},
         {addon::k_usage_session_capability_id, addon::k_usage_session_version},
         {addon::k_usage_owned_event_correction_capability_id, addon::k_usage_owned_event_correction_version},

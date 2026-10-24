@@ -57,7 +57,6 @@ distribute earlier usage. Optional proof is bounded independently of accounting
 history and stored in a versioned per-file carrier whose digest binds the
 original accounting row. Missing, unknown or damaged carriers leave cached
 accounting usable, including history whose original logs have been deleted.
-The ordinary `usage-scan@2` wire grammar is unchanged.
 
 Fork accounting follows native session ancestry and ordered usage occurrences
 through full and turn-specific copies. Only a proved inherited prefix is

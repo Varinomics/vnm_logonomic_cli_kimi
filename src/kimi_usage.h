@@ -24,7 +24,7 @@ std::vector<logonomic::cli_addon::Usage_record> scan_usage(
     const std::filesystem::path& storage,
     std::string_view mode,
     logonomic::cli_addon::Invocation_context& context,
-    const logonomic::cli_addon::Usage_cache_selection* selection = nullptr);
+    const logonomic::cli_addon::Usage_cache_selection& selection);
 void handle_usage(logonomic::cli_addon::Invocation_context& context);
 void handle_usage_session(logonomic::cli_addon::Invocation_context& context);
 std::optional<logonomic::cli_addon::Usage_session_fact> describe_usage_session(

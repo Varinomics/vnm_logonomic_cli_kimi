@@ -6,6 +6,7 @@
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/sha256.h>
+#include <logonomic_cli_addon/stored_usage_accounting.h>
 
 #include <chrono>
 #include <algorithm>
@@ -15,8 +16,10 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace json_util = logonomic::cli_addon::json;
@@ -61,9 +64,62 @@ public:
     Workspace() : path(fs::temp_directory_path() / ("kimi-usage-" + addon::random_nonce_hex()))
     {
         fs::create_directories(path);
+        path = fs::canonical(path);
     }
     ~Workspace() { std::error_code error; fs::remove_all(path, error); }
     fs::path path;
+};
+
+class Selected_cache
+{
+public:
+    explicit Selected_cache(fs::path storage) : m_storage(std::move(storage)) {}
+
+    std::vector<addon::Usage_record> scan(const fs::path& profile,
+        std::string_view mode, Context& context)
+    {
+        const auto accepted = mode == "reset" ? std::nullopt : m_accepted;
+        addon::Contract_failure failure;
+        if (accepted && !addon::validate_usage_cache_candidate(*accepted,
+            kimi::path_string(m_storage), std::nullopt,
+            [&context] { return context.cancel_requested(); }, &failure))
+        {
+            throw std::runtime_error(failure.reason_code);
+        }
+        const auto candidate = m_storage / addon::random_nonce_hex();
+        require(fs::create_directory(candidate), "allocate current collector cache");
+        const addon::Usage_cache_selection selection{accepted, kimi::path_string(candidate)};
+        auto records = kimi::scan_usage(profile, m_storage, mode, context, selection);
+        accept(candidate);
+        return records;
+    }
+
+    void accept(const fs::path& root)
+    {
+        addon::Contract_failure failure;
+        const auto sealed = addon::seal_usage_cache_candidate(kimi::path_string(root),
+            kimi::path_string(m_storage), std::nullopt, addon::random_nonce_hex(),
+            "kimi-wire-cache@2", [] { return false; }, &failure);
+        require(sealed.has_value(), "seal current collector cache fixture");
+        m_accepted = *sealed;
+    }
+
+    void reseal()
+    {
+        const auto root = path().parent_path();
+        require(fs::remove(root / "cache-manifest.json"), "replace fixture cache manifest");
+        accept(root);
+    }
+
+    fs::path path() const
+    {
+        require(m_accepted.has_value(), "collector cache must have an accepted selection");
+        return addon::path_from_utf8(m_accepted->root) / "files.json";
+    }
+
+private:
+    fs::path m_storage;
+    std::optional<addon::Usage_cache_reference> m_accepted;
 };
 
 void write(const fs::path& path, std::string_view bytes)
@@ -129,6 +185,7 @@ void fork_ownership_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     const auto parent  = profile / "sessions" / "workspace" / "parent-session";
     const auto child   = profile / "sessions" / "workspace" / "child-session";
     fs::create_directories(storage);
@@ -149,7 +206,7 @@ void fork_ownership_contract()
         "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200002000,"
         "\"model\":\"kimi\",\"usageScope\":\"turn\",\"usage\":{\"output\":300}}\n");
     Context context;
-    const auto records = kimi::scan_usage(profile, storage, "incremental", context);
+    const auto records = selected.scan(profile, "incremental", context);
     std::uint64_t total = 0, parent_total = 0, child_total = 0;
     for (const auto& record : records) {
         std::cout << record.record_id << ": " << record.total_tokens << '\n';
@@ -168,6 +225,7 @@ void fork_chains_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     const auto directory = profile / "sessions" / "workspace";
     fs::create_directories(storage);
     const std::string metadata = "{\"type\":\"metadata\",\"protocol_version\":\"1.5\",\"created_at\":1789199999000}\n";
@@ -198,7 +256,7 @@ void fork_chains_contract()
         "{\"type\":\"metadata\",\"protocol_version\":\"1.5\",\"created_at\":1789199999000,"
         "\"creator_session_id\":\"created-here\"}\n" + usage(80));
     Context context;
-    auto records = kimi::scan_usage(profile, storage, "incremental", context);
+    auto records = selected.scan(profile, "incremental", context);
     const auto verify = [&](std::uint64_t sibling) {
         std::uint64_t total = 0;
         for (const auto& record : records) {
@@ -224,21 +282,21 @@ void fork_chains_contract()
         append << usage(70);
         require(static_cast<bool>(append), "native own append fixture written");
     }
-    records = kimi::scan_usage(profile, storage, "incremental", context);
+    records = selected.scan(profile, "incremental", context);
     verify(670);
     fs::remove_all(directory / "root");
     fs::remove_all(directory / "child");
-    records = kimi::scan_usage(profile, storage, "repair", context);
+    records = selected.scan(profile, "repair", context);
     verify(670);
 
-    const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
+    const auto cache = selected.path();
     const auto accepted_bytes = [&] {
         std::ifstream input(cache, std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(input)), {});
     }();
     const auto unavailable = [&] {
         bool rejected = false;
-        try { (void)kimi::scan_usage(profile, storage, "incremental", context); }
+        try { (void)selected.scan(profile, "incremental", context); }
         catch (const kimi::Usage_ownership_unavailable&) { rejected = true; }
         require(rejected, "unproved ownership must be explicitly unavailable");
         std::ifstream input(cache, std::ios::binary);
@@ -288,6 +346,7 @@ void raw_fork_mode_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     const auto parent = profile / "sessions/workspace/parent";
     const auto child = profile / "sessions/workspace/child";
     fs::create_directories(storage);
@@ -300,9 +359,9 @@ void raw_fork_mode_contract()
     write(wire, inherited + "{\"type\":\"forked\",\"agentId\":\"main\",\"time\":1789200001000}\n"
         "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200002000,\"usage\":{\"output\":30}}\n");
     Context context;
-    (void)kimi::scan_usage(profile, storage, "incremental", context);
-    const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
-    std::string legacy;
+    (void)selected.scan(profile, "incremental", context);
+    const auto cache = selected.path();
+    std::string raw;
     {
         std::ifstream input(cache, std::ios::binary);
         std::string line;
@@ -312,8 +371,8 @@ void raw_fork_mode_contract()
             if (row->find("fork_event")) continue;
             row->erase("usage-fork-ownership");
             if (json_util::text(*row, "path") == kimi::path_string(wire)) {
-                auto record = addon::decode_usage_record(json_util::member(*row, "usage"), nullptr, 2);
-                require(record.has_value(), "legacy raw fixture has a child record");
+                auto record = addon::decode_stored_usage_accounting(json_util::member(*row, "usage"), nullptr);
+                require(record.has_value(), "raw accounting fixture has a child record");
                 record->total_tokens = 130;
                 record->output.value = 130;
                 for (auto* field : {&record->input, &record->output, &record->cache_read, &record->cache_creation}) {
@@ -321,28 +380,29 @@ void raw_fork_mode_contract()
                 }
                 record->output.coverage->covered_records = 2;
                 record->repository_usage->unattributed_tokens = 130;
-                row->set("usage", addon::encode_usage_record(*record, 2));
+                row->set("usage", addon::encode_stored_usage_accounting(*record));
             }
-            legacy += addon::serialize_json(*row) + '\n';
+            raw += addon::serialize_json(*row) + '\n';
         }
     }
-    // This reconstructs the old provider's raw per-file cache. It is a
-    // collector fixture, not a claim that a host accepted this mutable cache.
-    write(cache, legacy);
+    // Current cache@2 permits raw accounting without optional ownership
+    // evidence. Ordinary scans must preserve that accepted baseline.
+    write(cache, raw);
+    selected.reseal();
     for (const auto mode : {"incremental", "repair"}) {
-        const auto records = kimi::scan_usage(profile, storage, mode, context);
+        const auto records = selected.scan(profile, mode, context);
         const auto child_record = std::find_if(records.begin(), records.end(), [](const auto& record) {
             return record.record_id == "kimi:child";
         });
         require(child_record != records.end() && child_record->total_tokens == 130,
-            "ordinary reparses preserve legacy raw mode until an accepted correction");
+            "ordinary reparses preserve accepted raw mode until an accepted correction");
     }
     {
         std::ofstream append(wire, std::ios::binary | std::ios::app);
         append << "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200003000,\"usage\":{\"output\":7}}\n";
         require(static_cast<bool>(append), "raw own growth fixture written");
     }
-    const auto records = kimi::scan_usage(profile, storage, "incremental", context);
+    const auto records = selected.scan(profile, "incremental", context);
     const auto child_record = std::find_if(records.begin(), records.end(), [](const auto& record) {
         return record.record_id == "kimi:child";
     });
@@ -355,6 +415,7 @@ void scan_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     fs::create_directories(storage);
     const auto session = profile / "sessions" / "Workspace-A" / "Session-A";
     const auto wire = session / "agents" / "Agent-A" / "wire.jsonl";
@@ -366,7 +427,7 @@ void scan_contract()
         "{\"type\":\"usage.record\",\"time\":1789200001000,\"model\":\"two\",\"usage\":{\"output\":10}}\n"
         "{\"type\":\"usage.record\"");
     Context context;
-    auto records = kimi::scan_usage(profile, storage, "incremental", context);
+    auto records = selected.scan(profile, "incremental", context);
     require(records.size() == 1 && records.front().total_tokens == 17, "partial last record must not be counted");
     require(records.front().record_id == "kimi:Session-A" && records.front().model == "multiple", "canonical session and mixed model preserved");
     require(records.front().input.coverage->covered_records == 1 && records.front().input.coverage->total_records == 2,
@@ -376,13 +437,13 @@ void scan_contract()
         "observed zero and absent counter remain distinct");
     require(records.front().repository_usage->allocations.size() == 1, "recorded cwd attributes repository");
     fs::remove(wire);
-    records = kimi::scan_usage(profile, storage, "incremental", context);
+    records = selected.scan(profile, "incremental", context);
     require(records.front().total_tokens == 17, "disappeared agent log retains cached usage");
     write(session / "agents" / "Agent-B" / "wire.jsonl",
         "{\"type\":\"usage.record\",\"time\":1789200002000,\"usage\":{\"output\":5}}\n");
-    records = kimi::scan_usage(profile, storage, "incremental", context);
+    records = selected.scan(profile, "incremental", context);
     require(records.size() == 1 && records.front().total_tokens == 22, "all agent logs contribute to the same session");
-    records = kimi::scan_usage(profile, storage, "reset", context);
+    records = selected.scan(profile, "reset", context);
     require(records.size() == 1 && records.front().total_tokens == 5, "explicit reset discards retained cached history");
     const auto session_fact = kimi::describe_usage_session({records.front().record_id, records.front().session_key});
     require(session_fact && session_fact->provider_session_id == "Session-A" && !session_fact->excludes_turn_in_flight,
@@ -413,8 +474,8 @@ void timestamp_cache_identity_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     const auto wire    = profile / "sessions" / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
-    const auto cache   = storage / (kimi::account_key(profile) + "-usage-v1.json");
     fs::create_directories(storage);
     const std::string original =
         "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":7}}\n";
@@ -434,10 +495,10 @@ void timestamp_cache_identity_contract()
     fs::last_write_time(wire, file_modified);
     require(fs::last_write_time(wire) == file_modified, "fixture preserves an exact millisecond timestamp");
     Context context;
-    auto records = kimi::scan_usage(profile, storage, "repair", context);
+    auto records = selected.scan(profile, "repair", context);
     require(records.size() == 1 && records.front().total_tokens == 7,
         "initial stable read records the source usage");
-    require(cached_modified_ms(cache) == k_modified_ms,
+    require(cached_modified_ms(selected.path()) == k_modified_ms,
         "stable read persists Unix milliseconds without a file-clock epoch shift");
 
     // Preserving both metadata fields deliberately exercises the cache identity:
@@ -445,18 +506,18 @@ void timestamp_cache_identity_contract()
     write(wire, replacement);
     fs::last_write_time(wire, file_modified);
     for (int scan = 0; scan < 2; ++scan) {
-        records = kimi::scan_usage(profile, storage, "incremental", context);
+        records = selected.scan(profile, "incremental", context);
         require(records.size() == 1 && records.front().total_tokens == 7,
             "equal size and timestamp reuse the retained usage across repeated scans");
-        require(cached_modified_ms(cache) == k_modified_ms,
+        require(cached_modified_ms(selected.path()) == k_modified_ms,
             "incremental fingerprint uses the same Unix milliseconds as stable reads");
     }
 
     fs::last_write_time(wire, file_modified + std::chrono::seconds{2});
-    records = kimi::scan_usage(profile, storage, "incremental", context);
+    records = selected.scan(profile, "incremental", context);
     require(records.size() == 1 && records.front().total_tokens == 9,
         "changed timestamp invalidates a same-size file's retained usage");
-    require(cached_modified_ms(cache) == k_modified_ms + 2000,
+    require(cached_modified_ms(selected.path()) == k_modified_ms + 2000,
         "refreshed fingerprint preserves the exact timestamp change");
 }
 
@@ -465,41 +526,42 @@ void missing_sessions_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     fs::create_directories(profile);
     fs::create_directories(storage);
     Context context;
-    require(kimi::scan_usage(profile, storage, "incremental", context).empty(),
+    require(selected.scan(profile, "incremental", context).empty(),
         "existing new profile without sessions has an empty successful scan");
     const auto sessions = profile / "sessions";
     native_session(sessions / "workspace" / "session");
     write(sessions / "workspace" / "session" / "agents" / "main" / "wire.jsonl",
         "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":7}}\n");
-    const auto recorded = kimi::scan_usage(profile, storage, "incremental", context);
+    const auto recorded = selected.scan(profile, "incremental", context);
     require(recorded.size() == 1 && recorded.front().total_tokens == 7,
         "fixture retains usage before source subtree disappears");
     fs::remove_all(sessions);
     for (const auto mode : {"incremental", "repair"}) {
-        const auto records = kimi::scan_usage(profile, storage, mode, context);
+        const auto records = selected.scan(profile, mode, context);
         require(records.size() == 1 && records.front().total_tokens == 7,
             "absent sessions subtree must retain previously accepted cached history");
     }
     write(sessions, "not a directory");
     bool rejected = false;
-    try { (void)kimi::scan_usage(profile, storage, "incremental", context); }
+    try { (void)selected.scan(profile, "incremental", context); }
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "existing non-directory sessions path is not an empty profile");
     fs::remove(sessions);
-    const auto retained = kimi::scan_usage(profile, storage, "incremental", context);
+    const auto retained = selected.scan(profile, "incremental", context);
     require(retained.size() == 1 && retained.front().total_tokens == 7,
         "rejected non-directory source cannot replace retained cache");
     rejected = false;
-    try { (void)kimi::scan_usage(workspace.path / "missing-profile", storage, "incremental", context); }
+    try { (void)selected.scan(workspace.path / "missing-profile", "incremental", context); }
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "missing profile is unavailable even though missing sessions alone is valid");
-    const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
+    const auto cache = selected.path();
     write(cache, "corrupt retained cache");
     rejected = false;
-    try { (void)kimi::scan_usage(profile, storage, "repair", context); }
+    try { (void)selected.scan(profile, "repair", context); }
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "empty live inventory cannot bypass retained cache integrity checks");
     std::ifstream preserved(cache);
@@ -514,6 +576,7 @@ void large_history_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     fs::create_directories(storage);
     const auto filler = "{\"type\":\"content.part\",\"text\":\"" + std::string(1000 * 1000, 'x') + "\"}\n";
     std::uint64_t history_bytes = 0;
@@ -535,7 +598,7 @@ void large_history_contract()
     Context context;
     for (const auto mode : {"incremental", "repair", "reset"}) {
         const auto started = std::chrono::steady_clock::now();
-        const auto records = kimi::scan_usage(profile, storage, mode, context);
+        const auto records = selected.scan(profile, mode, context);
         std::cout << mode << " scan of " << history_bytes << " history bytes: " <<
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() <<
             " ms\n";
@@ -554,6 +617,7 @@ void large_log_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     fs::create_directories(storage);
     const auto wire = profile / "sessions" / "Workspace-A" / "Session-Large" / "agents" / "main" / "wire.jsonl";
     native_session(wire.parent_path().parent_path().parent_path());
@@ -572,7 +636,7 @@ void large_log_contract()
     require(fs::file_size(wire) > 512ull * 1024 * 1024, "one log exceeds the former per-log bound");
     Context context;
     for (const auto mode : {"incremental", "repair"}) {
-        const auto records = kimi::scan_usage(profile, storage, mode, context);
+        const auto records = selected.scan(profile, mode, context);
         require(records.size() == 1 && records.front().total_tokens == 24, "a log larger than 512 MiB scans completely");
     }
 
@@ -580,7 +644,7 @@ void large_log_contract()
     native_session(oversized.parent_path().parent_path().parent_path());
     write(oversized, "{\"type\":\"content.part\",\"text\":\"" + std::string(5 * 1000 * 1000, 'x') + "\"}\n");
     bool rejected = false;
-    try { (void)kimi::scan_usage(profile, storage, "repair", context); }
+    try { (void)selected.scan(profile, "repair", context); }
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "a line past the parser's document bound still fails the scan");
 }
@@ -601,33 +665,34 @@ void line_cache_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     fs::create_directories(storage);
     for (unsigned session = 0; session < 3; ++session) {
         native_session(profile / "sessions" / "Workspace-A" / ("Session-" + std::to_string(session)));
         write(profile / "sessions" / "Workspace-A" / ("Session-" + std::to_string(session)) / "agents" / "main" / "wire.jsonl",
             "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":" + std::to_string(20 + session) + "}}\n");
     }
-    const auto cache = storage / (kimi::account_key(profile) + "-usage-v1.json");
     Context context;
     const auto total = [&](const char* mode) {
         std::uint64_t sum = 0;
-        for (const auto& record : kimi::scan_usage(profile, storage, mode, context)) sum += record.total_tokens;
+        for (const auto& record : selected.scan(profile, mode, context)) sum += record.total_tokens;
         return sum;
     };
     require(total("incremental") == 63, "first scan counts every log");
-    require(lines_of(cache).size() == 7, "the cache streams each file and its retained occurrence separately");
+    require(lines_of(selected.path()).size() == 7, "the cache streams each file and its retained occurrence separately");
 
-    const auto original = lines_of(cache);
+    const auto original = lines_of(selected.path());
     std::string retained = original.front() + '\n';
     for (unsigned index = 0; index < 1024; ++index) {
         const auto receipt = addon::to_hex(addon::Sha256::digest("receipt-" + std::to_string(index)));
         retained += addon::serialize_json(json_util::object({{"receipt", addon::Json_value(receipt)}})) + '\n';
     }
     for (std::size_t index = 1; index < original.size(); ++index) retained += original[index] + '\n';
-    write(cache, retained);
+    write(selected.path(), retained);
+    selected.reseal();
     fs::remove_all(profile / "sessions");
     require(total("incremental") == 63, "current cache retains exact totals without source logs");
-    require(lines_of(cache).size() == 1 + 1024 + 6,
+    require(lines_of(selected.path()).size() == 1 + 1024 + 6,
         "current cache preserves every retained metadata row, file and occurrence");
 }
 
@@ -636,9 +701,12 @@ void file_count_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
-    const auto cache   = storage / (kimi::account_key(profile) + "-usage-v1.json");
+    Selected_cache selected(storage);
     fs::create_directories(profile);
     fs::create_directories(storage);
+    const auto retained_root = storage / "retained";
+    require(fs::create_directory(retained_root), "allocate retained-file fixture");
+    const auto cache = retained_root / "files.json";
     constexpr unsigned k_file_count = 100001;
     {
         std::ofstream stream(cache, std::ios::binary);
@@ -655,10 +723,11 @@ void file_count_contract()
         stream.close();
         require(static_cast<bool>(stream), "large retained-file fixture written");
     }
+    selected.accept(retained_root);
     Context context;
-    require(kimi::scan_usage(profile, storage, "incremental", context).empty(),
+    require(selected.scan(profile, "incremental", context).empty(),
         "more than 100000 retained wire files are accepted without inventing usage");
-    std::ifstream stream(cache, std::ios::binary);
+    std::ifstream stream(selected.path(), std::ios::binary);
     std::size_t rows = 0;
     std::string line;
     while (std::getline(stream, line)) ++rows;
@@ -671,6 +740,7 @@ void live_file_count_contract()
     Workspace workspace;
     const auto profile = workspace.path / ".kimi-code";
     const auto storage = workspace.path / "package-profile";
+    Selected_cache selected(storage);
     const auto agents  = profile / "sessions" / "workspace" / "session" / "agents";
     native_session(agents.parent_path());
     fs::create_directories(storage);
@@ -686,7 +756,7 @@ void live_file_count_contract()
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() <<
         " ms" << std::endl;
     Context context;
-    const auto records = kimi::scan_usage(profile, storage, "incremental", context);
+    const auto records = selected.scan(profile, "incremental", context);
     require(records.size() == 1 && records.front().total_tokens == 7,
         "a live history beyond 100000 files includes every agent's usage");
     require(context.progress_current == k_file_count && context.progress_total == k_file_count,

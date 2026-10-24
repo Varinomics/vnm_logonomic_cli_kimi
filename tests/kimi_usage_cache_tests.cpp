@@ -14,6 +14,7 @@
 #include <logonomic_cli_addon/usage_temporal.h>
 #include <logonomic_cli_addon/usage_owned_event_correction.h>
 #include <logonomic_cli_addon/sha256.h>
+#include <logonomic_cli_addon/stored_usage_accounting.h>
 
 #include <algorithm>
 #include <chrono>
@@ -174,15 +175,13 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         }
     };
 
-    check(test::usage_token_total(test::usage_scan_pages(host, request, 2)) == 2700,
-        "v2 retains its existing namespace and telemetry");
     for (const auto& path : sources) {
         check(fs::remove(path), "remove fixture source");
     }
     select("empty-selection", std::nullopt);
     const auto empty = test::usage_scan_pages(host, request, 3);
     check(empty.records.empty() && empty.cache_candidate,
-        "absent host selection never bootstraps from mutable provider cache");
+        "a new selected cache without live sources has no retained history");
     validate(*empty.cache_candidate);
 
     sources = write_sources(profile, 10);
@@ -271,24 +270,11 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(test::usage_scan_outcome(host, invalid_reset, 3).status != addon::Host_status::SUCCESS,
         "reset cannot import a retained selection");
 
-    auto old_request = first_request;
-    old_request.cache_selection.reset();
-    check(test::usage_token_total(test::usage_scan_pages(host, old_request, 2)) == 2700,
-        "v3 scans and reset leave v2 cache untouched");
-
     select("occupied", first.cache_candidate);
     write(addon::path_from_utf8(request.cache_selection->candidate_root) / "foreign", "occupied");
     check(test::usage_scan_outcome(host, request, 3).status != addon::Host_status::SUCCESS,
         "provider refuses a nonempty host allocation");
     validate(*first.cache_candidate);
-
-    const auto mutable_path = storage / (account + "-usage-v1.json");
-    const auto conflicting = mutable_path / "host-candidate";
-    // The v2 cache is a file, not a directory in which a host can allocate.
-    // Submit the conflicting path for rejection without trying to create it.
-    request.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(conflicting)};
-    check(test::usage_scan_outcome(host, request, 3).status != addon::Host_status::SUCCESS,
-        "host candidates cannot enter the provider mutable namespace");
 
     select("wrong-account", first.cache_candidate);
     auto wrong_account = request;
@@ -304,7 +290,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
 
     select("usage-host.tmp", std::nullopt);
     check(test::usage_scan_outcome(host, request, 3).status != addon::Host_status::SUCCESS,
-        "host allocation cannot alias the mutable temporary-file namespace");
+        "host allocation cannot alias a live scan workspace namespace");
 
     select("corrupt-input", first.cache_candidate);
     write(addon::path_from_utf8(first.cache_candidate->root) / "unlisted", "unexpected");
@@ -430,20 +416,19 @@ public:
         request.cache_selection = addon::Usage_cache_selection{std::move(accepted), addon::path_to_utf8(root)};
     }
 
-    addon::Usage_scan_page scan(std::uint16_t version = 3, int deadline_ms = 30000)
+    addon::Usage_scan_page scan(int deadline_ms = 30000)
     {
         auto input = request;
-        if (version == 2) input.cache_selection.reset();
         addon::Usage_scan_page result;
         bool first = true;
         page_count = 0;
         do {
-            const auto id = host.invoke({"usage-scan", version}, "scan", addon::encode_usage_scan_request(input, version), deadline_ms);
+            const auto id = host.invoke({"usage-scan", 3}, "scan", addon::encode_usage_scan_request(input, 3), deadline_ms);
             const auto outcome = host.wait_outcome(id, deadline_ms + 1000);
             check(outcome && outcome->status == addon::Host_status::SUCCESS,
                 "temporal scan succeeds: " + (outcome ? outcome->reason_code : "timeout"));
             addon::Contract_failure failure;
-            const auto page = addon::decode_usage_scan_result(outcome->payload, &failure, version);
+            const auto page = addon::decode_usage_scan_result(outcome->payload, &failure, 3);
             check(page.has_value(), "temporal page decodes: " + failure.detail);
             check(addon::serialize_json(outcome->payload).size() < 4 * 1024 * 1024 - 65536,
                 "original Kimi page byte ceiling preserved");
@@ -559,9 +544,6 @@ void temporal_cache_contract(const fs::path& package, const fs::path& fixture)
     auto unsupported = native_event(late, 2);
     unsupported.insert(unsupported.find(",\"usage\""), ".0");
     write(source_b, native_event(early, 2) + native_event(0, 3) + unsupported + native_event(late + 1, 0));
-    const auto legacy = host.scan(2);
-    check(legacy.records.size() == 1 && legacy.records.front().total_tokens == 57 && !legacy.records.front().temporal,
-        "usage2 keeps original repeated-event accounting without temporal output");
     host.select("observed");
     const auto observed = host.scan();
     check(observed.records.size() == 1 && observed.cache_candidate, "two native agent files reduce to one original conversation");
@@ -643,13 +625,13 @@ void temporal_cache_contract(const fs::path& package, const fs::path& fixture)
     auto corrected_rows = original_rows;
     for (auto& row : corrected_rows) {
         if (!row.find("usage")) continue;
-        auto accounting = addon::decode_usage_record(*row.find("usage"), nullptr, 2);
+        auto accounting = addon::decode_stored_usage_accounting(*row.find("usage"), nullptr);
         check(accounting.has_value(), "original canonical accounting fixture decodes");
         if (accounting->total_tokens == 50) {
             ++accounting->total_tokens;
             ++*accounting->input.value;
             ++accounting->repository_usage->allocations.front().total_tokens;
-            row.set("usage", addon::encode_usage_record(*accounting, 2));
+            row.set("usage", addon::encode_stored_usage_accounting(*accounting));
         }
     }
     const auto corrected = replay("changed-accounting", corrected_rows);
@@ -660,13 +642,13 @@ void temporal_cache_contract(const fs::path& package, const fs::path& fixture)
     auto control_rows = original_rows;
     const std::string control_id = "kimi:control-\x01-parent";
     for (auto& row : control_rows) if (row.find("usage")) {
-        auto accounting = addon::decode_usage_record(*row.find("usage"), nullptr, 2);
+        auto accounting = addon::decode_stored_usage_accounting(*row.find("usage"), nullptr);
         accounting->record_id = control_id;
         accounting->session_key = control_id;
-        const auto encoded = addon::encode_usage_record(*accounting, 2);
-        const auto original = addon::decode_usage_record(encoded, nullptr, 2);
+        const auto encoded = addon::encode_stored_usage_accounting(*accounting);
+        const auto original = addon::decode_stored_usage_accounting(encoded, nullptr);
         check(original && original->record_id == control_id,
-            "original usage2 grammar admits the exact nonNUL control parent ID");
+            "current stored accounting admits the exact nonNUL control parent ID");
         row.set("usage", encoded);
     }
     const auto control = replay("control-parent", control_rows);
@@ -698,7 +680,7 @@ void temporal_refresh_contract(const fs::path& package, const fs::path& fixture)
     host.select("observed");
     const auto observed = host.scan();
     check(observed.records.size() == 1 && observed.cache_candidate, "native refresh fixture has one conversation");
-    const auto accounting = addon::serialize_json_canonical(addon::encode_usage_record(observed.records.front(), 2));
+    const auto accounting = addon::serialize_json_canonical(addon::encode_stored_usage_accounting(observed.records.front()));
     const auto original_rows = cache_rows(*observed.cache_candidate);
     auto absent_rows = original_rows;
     for (auto& row : absent_rows) row.erase("usage-temporal");
@@ -710,7 +692,7 @@ void temporal_refresh_contract(const fs::path& package, const fs::path& fixture)
     check(refreshed.records.size() == 1 && refreshed.records.front().total_tokens == 33 &&
         proved(refreshed.records.front(), refreshed, host, 2) == expected,
         "unchanged surviving logs refresh absent temporal evidence from exact native increments");
-    check(addon::serialize_json_canonical(addon::encode_usage_record(refreshed.records.front(), 2)) == accounting &&
+    check(addon::serialize_json_canonical(addon::encode_stored_usage_accounting(refreshed.records.front())) == accounting &&
         !refreshed.records.front().temporal->retained_from,
         "native temporal enrichment preserves all accounting and does not claim retained proof");
     addon::Contract_failure failure;
@@ -742,7 +724,7 @@ void temporal_refresh_contract(const fs::path& package, const fs::path& fixture)
     fs::last_write_time(source, modified);
     host.select("invalid-source-output", accepted);
     const auto invalid_source = host.scan();
-    check(addon::serialize_json_canonical(addon::encode_usage_record(invalid_source.records.front(), 2)) == accounting &&
+    check(addon::serialize_json_canonical(addon::encode_stored_usage_accounting(invalid_source.records.front())) == accounting &&
         proved(invalid_source.records.front(), invalid_source, host, 33).empty(),
         "failed optional enrichment preserves same-fingerprint accounting with unavailable temporal evidence");
     host.select("reused", refreshed.cache_candidate);
@@ -797,7 +779,7 @@ void temporal_capacity_contract(const fs::path& package, const fs::path& fixture
     host.select("capacity");
     // The first page seals all ~70,000 events before returning. Give that
     // bounded workload the long-cache budget, within the phase's CTest limit.
-    const auto page = host.scan(3, 120000);
+    const auto page = host.scan(120000);
     check(page.records.size() == 19 && host.page_count > 1, "optional bytes trigger real bounded continuation before record-count limit");
     std::uint64_t total = 0;
     for (const auto& record : page.records) {
