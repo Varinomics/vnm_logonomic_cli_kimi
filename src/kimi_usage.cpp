@@ -309,31 +309,46 @@ void attribute(addon::Usage_record& record, std::string_view cwd)
     record.repository_usage = std::move(allocation);
 }
 
+enum class Wire_read
+{
+    STABLE,
+    UNAVAILABLE,
+    CHANGED,
+};
+
 // Passes each complete line of a wire log to `consume`, buffering at most one
 // line of the parser's document bound; a final unterminated line is still being
-// written and is skipped. False when the log was unreadable or changed while it
-// was read, in which case the caller keeps the log's previous evidence.
-bool read_stable_lines(const fs::path& path, File_record& fingerprint, addon::Invocation_context& context,
+// written and is skipped. A changing native log can settle on another read;
+// neither that observation nor an unreadable log replaces previous evidence.
+Wire_read read_stable_lines(const fs::path& path, File_record& fingerprint, addon::Invocation_context& context,
     const std::function<void(std::string_view line)>& consume,
     const std::function<void(std::string_view bytes)>& observe_bytes = {})
 {
     std::error_code error;
     const auto before_size = fs::file_size(path, error);
-    if (error) return false;
+    if (error) return Wire_read::UNAVAILABLE;
     const auto before_time = fs::last_write_time(path, error);
-    if (error) return false;
+    if (error) return Wire_read::UNAVAILABLE;
     // A failed line blames the log only if the log was at rest.
     fingerprint.size = before_size;
     fingerprint.modified_ms = file_modified_ms(before_time);
-    const auto unchanged = [&] {
+    const auto observation = [&] {
         std::error_code stat_error;
         const auto size = fs::file_size(path, stat_error);
-        if (stat_error || size != before_size) return false;
+        if (stat_error) {
+            return stat_error == std::errc::no_such_file_or_directory
+                ? Wire_read::CHANGED : Wire_read::UNAVAILABLE;
+        }
+        if (size != before_size) return Wire_read::CHANGED;
         const auto time = fs::last_write_time(path, stat_error);
-        return !stat_error && time == before_time;
+        if (stat_error) {
+            return stat_error == std::errc::no_such_file_or_directory
+                ? Wire_read::CHANGED : Wire_read::UNAVAILABLE;
+        }
+        return time == before_time ? Wire_read::STABLE : Wire_read::CHANGED;
     };
     std::ifstream stream(path, std::ios::binary);
-    if (!stream) return false;
+    if (!stream) return Wire_read::UNAVAILABLE;
     const auto line_limit = static_cast<std::size_t>(addon::Json_parse_limits{}.max_bytes);
     std::string buffer;
     std::size_t begin = 0;
@@ -361,19 +376,37 @@ bool read_stable_lines(const fs::path& path, File_record& fingerprint, addon::In
         }
     }
     catch (...) {
-        if (!unchanged()) return false;
+        const auto observed = observation();
+        if (observed != Wire_read::STABLE) return observed;
         throw;
     }
-    if (stream.bad() || consumed + buffer.size() != before_size || !unchanged()) return false;
-    return true;
+    if (stream.bad()) {
+        return Wire_read::UNAVAILABLE;
+    }
+    const auto observed = observation();
+    if (observed != Wire_read::STABLE) return observed;
+    if (consumed + buffer.size() != before_size) {
+        return Wire_read::CHANGED;
+    }
+    return Wire_read::STABLE;
 }
 
-Json optional_document(const fs::path& path)
+Json optional_document(const fs::path& path, bool* missing = nullptr)
 {
     std::error_code error;
-    if (fs::file_size(path, error) > 2 * 1024 * 1024 || error) return Json::object();
+    const auto size = fs::file_size(path, error);
+    if (missing) {
+        *missing = error == std::errc::no_such_file_or_directory;
+    }
+    if (size > 2 * 1024 * 1024 || error) return Json::object();
     std::ifstream stream(path, std::ios::binary);
-    if (!stream) return Json::object();
+    if (!stream) {
+        if (missing) {
+            const auto status = fs::status(path, error);
+            *missing = status.type() == fs::file_type::not_found;
+        }
+        return Json::object();
+    }
     std::string bytes((std::istreambuf_iterator<char>(stream)), {});
     const auto result = json_util::parse(bytes);
     return result && result->is_object() ? *result : Json::object();
@@ -489,10 +522,10 @@ private:
     bool m_temporal_capacity = false;
 };
 
-std::optional<Json> fork_session_identity(const fs::path& wire)
+std::optional<Json> fork_session_identity(const fs::path& wire, bool& missing_state)
 {
     const auto session = wire.parent_path().parent_path().parent_path();
-    const auto state = optional_document(session / "state.json");
+    const auto state = optional_document(session / "state.json", &missing_state);
     const auto id = path_string(session.filename());
     const auto* created = state.find("createdAt");
     const auto* parent = state.find("forkedFrom");
@@ -1100,11 +1133,13 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
     std::ofstream& events, addon::Invocation_context& context)
 {
     const auto session = path.parent_path().parent_path().parent_path();
-    const auto identity = fork_session_identity(path);
+    bool missing_state = false;
+    const auto identity = fork_session_identity(path, missing_state);
     // state.json can briefly disappear during Kimi's Windows replacement.
     // Retention is safe; treating that interval as a new root is not.
     if (!identity) {
         if (previous) return previous;
+        if (missing_state) throw Usage_observation_unsettled();
         throw Usage_ownership_unavailable();
     }
     if (previous && previous->fork_evidence &&
@@ -1139,9 +1174,9 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
     bool forked = false;
     bool first_record = true;
     std::string creator_session_id;
-    bool stable = false;
+    auto read = Wire_read::UNAVAILABLE;
     try {
-        stable = read_stable_lines(path, current, context, [&](std::string_view line) {
+        read = read_stable_lines(path, current, context, [&](std::string_view line) {
             line_end += line.size() + 1;
             while (!line.empty() && line.front() == '\0') line.remove_prefix(1);
             const auto event = json_util::parse(line);
@@ -1189,12 +1224,15 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
     }
     output.close();
     require_io(static_cast<bool>(output));
-    const auto after_identity = fork_session_identity(path);
-    if (!stable || !after_identity || addon::serialize_json_canonical(*after_identity) !=
-        addon::serialize_json_canonical(*identity))
-    {
+    const auto after_identity = fork_session_identity(path, missing_state);
+    const bool identity_changed = after_identity && addon::serialize_json_canonical(*after_identity) !=
+        addon::serialize_json_canonical(*identity);
+    if (read != Wire_read::STABLE || !after_identity || identity_changed) {
         if (previous) return previous;
-        throw Usage_ownership_unavailable();
+        if ((!after_identity && !missing_state) || read == Wire_read::UNAVAILABLE) {
+            throw Usage_ownership_unavailable();
+        }
+        throw Usage_observation_unsettled();
     }
     current.retained_prefix_matches = previous && previous->fork_evidence && bytes >= previous->size &&
         addon::to_hex(prefix_digest.finish()) == json_util::text(*previous->fork_evidence, "native_prefix_sha256_hex");
@@ -1613,9 +1651,9 @@ fs::path read_predecessors(const addon::Usage_owned_event_correction_request& re
     const addon::Usage_owned_event_predecessor_header expected{"logonomic.cli.kimi",
         request.scan.context.account_context, request.scan.context.profile_storage->root,
         request.scan.cache_selection->accepted};
-    bool stable = false;
+    auto read = Wire_read::UNAVAILABLE;
     try {
-        stable = read_stable_lines(path, fingerprint, context, [&](std::string_view line) {
+        read = read_stable_lines(path, fingerprint, context, [&](std::string_view line) {
             const auto value = json_util::parse(line);
             if (!value) throw Usage_ownership_unavailable();
             if (!header) {
@@ -1642,7 +1680,7 @@ fs::path read_predecessors(const addon::Usage_owned_event_correction_request& re
         throw Usage_ownership_unavailable();
     }
     validate_predecessor_path(path, storage);
-    if (!stable || !header || last_byte != '\n' ||
+    if (read != Wire_read::STABLE || !header || last_byte != '\n' ||
         addon::to_hex(digest.finish()) != request.predecessors.sha256_hex) throw Usage_ownership_unavailable();
     return rows.finish();
 }

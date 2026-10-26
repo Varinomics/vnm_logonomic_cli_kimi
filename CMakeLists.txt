@@ -194,7 +194,7 @@ target_link_libraries(kimi_usage_cache_tests PRIVATE
 kimi_target(kimi_usage_cache_tests)
 add_dependencies(kimi_usage_cache_tests kimi_package)
 set(KIMI_USAGE_CACHE_PHASE_TESTS)
-foreach(phase IN ITEMS cache temporal refresh capacity owned)
+foreach(phase IN ITEMS cache temporal refresh capacity owned observation)
     set(test_name kimi_usage_cache_tests_${phase})
     add_test(NAME ${test_name}
         COMMAND kimi_usage_cache_tests "${KIMI_PACKAGE_DIRECTORY}" ${phase})

@@ -17,6 +17,15 @@ public:
     Usage_ownership_unavailable() : std::runtime_error("usage_ownership_unavailable") {}
 };
 
+class Usage_observation_unsettled final : public std::runtime_error
+{
+public:
+    Usage_observation_unsettled()
+    :
+        std::runtime_error("usage_observation_unsettled")
+    {}
+};
+
 // In-process collector used by package tests. The adapter streams disk-backed
 // snapshots instead of retaining this vector across the history.
 std::vector<logonomic::cli_addon::Usage_record> scan_usage(

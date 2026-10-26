@@ -103,6 +103,10 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         }
         else kimi::handle_preparation(context);
     }
+    catch (const kimi::Usage_observation_unsettled&) {
+        context.fail(context.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
+            context.cancel_requested() ? "cancelled" : "usage_observation_unsettled");
+    }
     catch (const kimi::Usage_ownership_unavailable&) {
         context.fail(context.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
             context.cancel_requested() ? "cancelled" : "usage_ownership_unavailable");

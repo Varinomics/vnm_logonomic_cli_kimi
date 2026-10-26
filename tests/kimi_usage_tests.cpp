@@ -294,10 +294,11 @@ void fork_chains_contract()
         std::ifstream input(cache, std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(input)), {});
     }();
-    const auto unavailable = [&] {
+    const auto unavailable = [&](bool unsettled = false) {
         bool rejected = false;
         try { (void)selected.scan(profile, "incremental", context); }
-        catch (const kimi::Usage_ownership_unavailable&) { rejected = true; }
+        catch (const kimi::Usage_ownership_unavailable&) { rejected = !unsettled; }
+        catch (const kimi::Usage_observation_unsettled&) { rejected = unsettled; }
         require(rejected, "unproved ownership must be explicitly unavailable");
         std::ifstream input(cache, std::ios::binary);
         require(std::string((std::istreambuf_iterator<char>(input)), {}) == accepted_bytes,
@@ -338,7 +339,7 @@ void fork_chains_contract()
     fs::remove_all(directory / "excess-copy");
     add_session("unpublished", {}, usage(17));
     fs::remove(directory / "unpublished" / "state.json");
-    unavailable();
+    unavailable(true);
 }
 
 void raw_fork_mode_contract()

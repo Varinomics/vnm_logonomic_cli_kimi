@@ -1247,6 +1247,100 @@ void owned_event_contract(const fs::path& package, const fs::path& fixture)
     std::cerr << "owned-event child400/zero/rejected-replay/ordinary-reparse passed\n";
 }
 
+void unsettled_observation_contract(const fs::path& package, const fs::path& fixture)
+{
+    const auto profile = fixture / "native-profile";
+    const auto session = profile / "sessions/workspace/first-observation";
+    native_session(session);
+    write(session / "agents/main/wire.jsonl",
+        "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200000000,"
+        "\"usage\":{\"inputOther\":120,\"output\":30,\"inputCacheRead\":0,\"inputCacheCreation\":0}}\n");
+
+    addon::Simulator_options options;
+    options.package_directory = package;
+    options.profile_storage_root = fixture / "host-storage";
+    addon::Host_simulator host(options, nullptr);
+    addon::Contract_failure failure;
+    check(host.start(&failure), failure.detail);
+    const auto generation = host.generation_nonce();
+    const auto process = host.adapter_pid();
+    const auto account = kimi::account_key(profile);
+    std::string error;
+    const auto allocated = addon::allocate_profile_storage_root(
+        host.profile_storage_root(), "logonomic.cli.kimi", &error, account);
+    check(allocated.has_value(), error);
+
+    addon::Usage_scan_request request;
+    const auto native_profile = addon::path_to_utf8(profile);
+    request.context.launcher = {"kimi", addon::k_runner_direct, {}};
+    request.context.launcher_argv = {"kimi"};
+    request.context.profile_storage = addon::Profile_storage_context{1, *allocated};
+    request.context.account_context = addon::Account_context{2, account, native_profile};
+    request.context.launch_environment = addon::Launch_environment{
+        addon::host_platform_id(), addon::Json_value::object(),
+        addon::Environment_bootstrap_evidence{native_profile}};
+    addon::Simulator_invocation_options invocation;
+    invocation.profile_storage = request.context.profile_storage;
+    const auto acknowledge = host.invoke({"profile-storage", 1}, "acknowledge",
+        addon::Json_value::object(), 5000, invocation);
+    const auto acknowledged = host.wait_outcome(acknowledge, 6000);
+    check(acknowledged && acknowledged->status == addon::Host_status::SUCCESS,
+        "packaged adapter acknowledges the observation fixture's storage");
+    const auto select = [&](const char* name) {
+        const auto candidate = addon::path_from_utf8(*allocated) / name;
+        check(fs::create_directory(candidate), "allocate observation candidate");
+        request.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(candidate)};
+    };
+    const auto unpublished = [&] {
+        const auto candidate = addon::path_from_utf8(request.cache_selection->candidate_root);
+        check(!fs::exists(candidate / "files.json") && !fs::exists(candidate / "cache-manifest.json"),
+            "an unavailable observation publishes no cache candidate");
+        check(host.state() == addon::Simulator_state::READY && host.generation_nonce() == generation &&
+            host.adapter_pid() == process, "the observation keeps the same adapter generation and process");
+    };
+
+    // Hold the native replacement gap open, rather than racing a timer against the reader.
+    fs::rename(session / "state.json", session / "state.json.replacing");
+    select("state-replacement-gap");
+    const auto unsettled = test::usage_scan_outcome(host, request, 3);
+    check(unsettled.status == addon::Host_status::UNAVAILABLE, "missing native state remains unavailable");
+    unpublished();
+    fs::rename(session / "state.json.replacing", session / "state.json");
+    select("state-settled");
+    const auto settled = test::usage_scan_pages(host, request, 3);
+    check(settled.records.size() == 1 && test::usage_token_total(settled) == 150 && settled.cache_candidate,
+        "the settled first observation succeeds with its exact token total");
+    check(host.state() == addon::Simulator_state::READY && host.generation_nonce() == generation &&
+        host.adapter_pid() == process, "settling the source needs no adapter restart or generation replacement");
+    check(addon::validate_usage_cache_candidate(*settled.cache_candidate, *allocated,
+        request.context.account_context, [] { return false; }, &failure).has_value(), failure.detail);
+    std::cerr << "state replacement: " << addon::host_status_name(unsettled.status) << '/'
+        << unsettled.reason_code << "; settled total=150; same generation and process\n";
+
+    write(session / "state.json", "{}");
+    select("invalid-identity");
+    const auto invalid = test::usage_scan_outcome(host, request, 3);
+    check(invalid.status == addon::Host_status::UNAVAILABLE && invalid.reason_code == "usage_ownership_unavailable",
+        "a present invalid session identity remains an ownership refusal");
+    unpublished();
+
+    native_session(session);
+    std::ifstream state_input(session / "state.json", std::ios::binary);
+    const std::string state_bytes((std::istreambuf_iterator<char>(state_input)), {});
+    state_input.close();
+    auto state = addon::parse_json(state_bytes, {}, nullptr);
+    check(state.has_value(), "native session fixture must parse");
+    state->set("forkedFrom", addon::Json_value("missing-ancestor"));
+    write(session / "state.json", addon::serialize_json(*state));
+    select("missing-ancestor");
+    const auto orphan = test::usage_scan_outcome(host, request, 3);
+    check(orphan.status == addon::Host_status::UNAVAILABLE && orphan.reason_code == "usage_ownership_unavailable",
+        "unresolved ancestry remains an ownership refusal");
+    unpublished();
+    check(unsettled.reason_code == "usage_observation_unsettled",
+        "the first-observation replacement gap must be distinguishable from invalid ownership");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1255,7 +1349,8 @@ int main(int argc, char** argv)
         check(argc == 2 || argc == 3, "expected built package directory and optional phase");
         const std::string phase = argc == 3 ? argv[2] : "";
         check(phase.empty() || phase == "cache" || phase == "temporal" ||
-            phase == "refresh" || phase == "capacity" || phase == "owned", "unknown usage cache test phase");
+            phase == "refresh" || phase == "capacity" || phase == "owned" ||
+            phase == "observation", "unknown usage cache test phase");
         Workspace workspace;
         const auto run_phase = [&](const char* name, const auto& contract, const fs::path& fixture) {
             if (!phase.empty() && phase != name) {
@@ -1273,6 +1368,7 @@ int main(int argc, char** argv)
         run_phase("refresh", temporal_refresh_contract, workspace.m_path / "refresh");
         run_phase("capacity", temporal_capacity_contract, workspace.m_path / "capacity");
         run_phase("owned", owned_event_contract, workspace.m_path / "owned");
+        run_phase("observation", unsettled_observation_contract, workspace.m_path / "observation");
         return 0;
     }
     catch (const std::exception& error) {
