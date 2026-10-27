@@ -283,6 +283,17 @@ void handle_quota(addon::Invocation_context& context)
     if (!payload || !payload->is_object()) { context.fail(addon::Result_status::FAILED, "invalid_quota_response"); return; }
     const auto status = json_util::text(*payload, "status");
     if (status == "error") {
+        if (const auto category = addon::parse_quota_failure(json_util::text(*payload, "reason_code"))) {
+            auto envelope = addon::encode_quota_inspect_result(addon::make_quota_failure(*category));
+            if (const auto* diagnostic = payload->find("diagnostic")) envelope.set("diagnostic", *diagnostic);
+            const auto failure = addon::decode_quota_inspect_result(envelope, true, &error, 2);
+            if (!failure) {
+                context.fail(addon::Result_status::FAILED, "invalid_quota_response");
+                return;
+            }
+            context.succeed(addon::encode_quota_inspect_result(*failure, 2));
+            return;
+        }
         const auto failure = quota_probe_failure(json_util::text(*payload, "reason_code"));
         context.fail(addon::Result_status::FAILED, json_util::text(failure, "reason_code"), json_util::text(failure, "detail"));
         return;

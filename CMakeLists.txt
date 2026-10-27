@@ -130,6 +130,11 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
 endif()
 
 enable_testing()
+add_executable(kimi_quota_startup_tests tests/kimi_quota_startup_tests.cpp)
+target_link_libraries(kimi_quota_startup_tests PRIVATE kimi_provider)
+kimi_target(kimi_quota_startup_tests)
+add_dependencies(kimi_quota_startup_tests kimi_quota_probe)
+add_test(NAME kimi_quota_startup_tests COMMAND kimi_quota_startup_tests)
 option(LOGONOMIC_CLI_ADDON_LARGE_DATA_TESTS
     "Register full-size usage history and capacity regressions" OFF)
 kimi_add_provider(kimi_observer_test_provider)
@@ -261,3 +266,8 @@ endif()
 # Contract and recipe tests must not be confused with real native qualification.
 get_directory_property(_provider_tests TESTS)
 set_property(TEST ${_provider_tests} APPEND PROPERTY LABELS "cli-addon;provider-contract")
+
+add_executable(kimi_error_boundary_tests tests/kimi_error_boundary_tests.cpp)
+target_link_libraries(kimi_error_boundary_tests PRIVATE kimi_provider logonomic_cli_addon_sdk::test_support)
+kimi_target(kimi_error_boundary_tests)
+add_test(NAME kimi_error_boundary_tests COMMAND kimi_error_boundary_tests)

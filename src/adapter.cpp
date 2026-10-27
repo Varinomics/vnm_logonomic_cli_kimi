@@ -17,6 +17,7 @@
 #include <exception>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -111,9 +112,15 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         context.fail(context.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
             context.cancel_requested() ? "cancelled" : "usage_ownership_unavailable");
     }
-    catch (const std::exception&) {
+    catch (const std::exception& error) {
         if (context.cancel_requested()) {
             context.fail(addon::Result_status::CANCELLED, "cancelled");
+            return;
+        }
+        const std::string_view reason = error.what();
+        if (reason == "usage_record_invalid" || reason == "usage_counters_missing") {
+            context.fail(addon::Result_status::FAILED, std::string(reason),
+                "Kimi usage record is invalid.");
             return;
         }
         // Configuration, prompt, tokens and private filesystem bytes never
