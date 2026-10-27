@@ -28,6 +28,7 @@
 #include <utility>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -1298,6 +1299,24 @@ void unsettled_observation_contract(const fs::path& package, const fs::path& fix
         check(host.state() == addon::Simulator_state::READY && host.generation_nonce() == generation &&
             host.adapter_pid() == process, "the observation keeps the same adapter generation and process");
     };
+
+    const auto wire = session / "agents/main/wire.jsonl";
+    for (const auto& [name, bytes, reason] : {
+             std::tuple{"invalid-json", "{private-sentinel\n", "usage_record_invalid"},
+             std::tuple{"missing-counters", "{\"type\":\"usage.record\",\"time\":1789200000000,"
+                 "\"usage\":{\"private\":\"private-sentinel\"}}\n",
+                 "usage_counters_missing"}})
+    {
+        write(wire, bytes);
+        select(name);
+        const auto rejected = test::usage_scan_outcome(host, request, 3);
+        check(rejected.status == addon::Host_status::FAILED && rejected.reason_code == reason,
+            "invalid usage retains its established reason through the adapter privacy boundary: " + rejected.reason_code);
+        check(rejected.message.find("private-sentinel") == std::string::npos,
+            "private usage bytes do not enter the host description");
+    }
+    write(wire, "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200000000,"
+        "\"usage\":{\"inputOther\":120,\"output\":30,\"inputCacheRead\":0,\"inputCacheCreation\":0}}\n");
 
     // Hold the native replacement gap open, rather than racing a timer against the reader.
     fs::rename(session / "state.json", session / "state.json.replacing");

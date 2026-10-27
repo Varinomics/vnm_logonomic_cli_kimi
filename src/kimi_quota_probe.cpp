@@ -5,6 +5,10 @@
 
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/quota.h>
+
+#include <QProcess>
+#include <QProcessEnvironment>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -13,15 +17,11 @@
 #else
 #include <arpa/inet.h>
 #include <cerrno>
-#include <csignal>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <spawn.h>
 #include <sys/socket.h>
-#include <sys/wait.h>
 #include <unistd.h>
-extern char** environ;
 #endif
 
 #include <algorithm>
@@ -31,7 +31,6 @@ extern char** environ;
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
-#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -89,138 +88,77 @@ std::string read_file(const fs::path& path, std::size_t maximum)
     return result;
 }
 
-#ifdef _WIN32
-std::wstring wide(std::string_view text)
+class Probe_failure : public std::runtime_error
 {
-    const auto length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), nullptr, 0);
-    if (length == 0 && !text.empty()) throw std::runtime_error("invalid_utf8_path");
-    std::wstring result(static_cast<std::size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()), result.data(), length);
-    return result;
-}
+public:
+    Probe_failure(const char* reason, addon::Quota_failure_stage stage, std::int64_t code)
+    :
+        std::runtime_error(reason),
+        diagnostic{stage, code}
+    {}
 
-std::wstring quote(std::wstring_view input)
-{
-    std::wstring result = L"\"";
-    std::size_t slashes = 0;
-    for (const auto character : input) {
-        if (character == L'\\') { ++slashes; continue; }
-        result.append(character == L'"' ? 2 * slashes + 1 : slashes, L'\\');
-        result += character;
-        slashes = 0;
-    }
-    result.append(2 * slashes, L'\\');
-    return result + L'"';
-}
-#endif
+    addon::Quota_diagnostic diagnostic;
+};
 
 class Owned_server
 {
 public:
     explicit Owned_server(const std::string& program)
     {
+        auto environment = QProcessEnvironment::systemEnvironment();
+        for (const auto& name : environment.keys()) {
 #ifdef _WIN32
-        auto command = quote(wide(program)) + L" web --no-open --host 127.0.0.1 --port 0";
-        auto* block = GetEnvironmentStringsW();
-        if (!block) throw std::runtime_error("quota_environment_failed");
-        std::wstring environment;
-        for (const auto* item = block; *item; item += wcslen(item) + 1) {
-            const std::wstring value(item);
-            if (_wcsnicmp(item, L"LOGONOMIC_", 10) == 0 || _wcsnicmp(item, L"VNM_CONTROL_", 12) == 0) continue;
-            environment += value;
-            environment += L'\0';
-        }
-        FreeEnvironmentStringsW(block);
-        environment += L'\0';
-        SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
-        auto null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-            &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (null_handle == INVALID_HANDLE_VALUE) throw std::runtime_error("quota_start_failed");
-        SIZE_T size = 0;
-        InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
-        std::vector<unsigned char> storage(size);
-        auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
-        const bool initialized = InitializeProcThreadAttributeList(attributes, 1, 0, &size) != FALSE;
-        STARTUPINFOEXW startup{};
-        startup.StartupInfo.cb = sizeof(startup);
-        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        startup.StartupInfo.hStdInput = null_handle;
-        startup.StartupInfo.hStdOutput = null_handle;
-        startup.StartupInfo.hStdError = null_handle;
-        startup.lpAttributeList = attributes;
-        PROCESS_INFORMATION process{};
-        const bool started = initialized && UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            &null_handle, sizeof(null_handle), nullptr, nullptr) &&
-            CreateProcessW(wide(program).c_str(), command.data(), nullptr, nullptr, TRUE,
-                CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-                environment.data(), nullptr, &startup.StartupInfo, &process);
-        if (initialized) DeleteProcThreadAttributeList(attributes);
-        CloseHandle(null_handle);
-        if (!started) throw std::runtime_error("quota_start_failed");
-        m_process = process.hProcess;
-        m_pid = process.dwProcessId;
-        CloseHandle(process.hThread);
+            constexpr auto sensitivity = Qt::CaseInsensitive;
 #else
-        std::vector<std::string> variables;
-        for (char** item = environ; *item; ++item) {
-            const std::string value(*item);
-            if (value.starts_with("LOGONOMIC_") || value.starts_with("VNM_CONTROL_")) continue;
-            variables.push_back(value);
-        }
-        std::vector<char*> environment;
-        for (auto& variable : variables) environment.push_back(variable.data());
-        environment.push_back(nullptr);
-        std::vector<std::string> values{program, "web", "--no-open", "--host", "127.0.0.1", "--port", "0"};
-        std::vector<char*> arguments;
-        for (auto& value : values) arguments.push_back(value.data());
-        arguments.push_back(nullptr);
-        posix_spawn_file_actions_t actions;
-        posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
-        const auto error = posix_spawn(&m_pid, program.c_str(), &actions, nullptr, arguments.data(), environment.data());
-        posix_spawn_file_actions_destroy(&actions);
-        if (error != 0) { m_pid = 0; throw std::runtime_error("quota_start_failed"); }
+            constexpr auto sensitivity = Qt::CaseSensitive;
 #endif
+            if (name.startsWith(QStringLiteral("LOGONOMIC_"), sensitivity) ||
+                name.startsWith(QStringLiteral("VNM_CONTROL_"), sensitivity))
+            {
+                environment.remove(name);
+            }
+        }
+        m_process.setProcessEnvironment(environment);
+        // The native server may log without limit while the helper waits on it;
+        // no output of it explains a failure, so none is kept.
+        m_process.setStandardInputFile(QProcess::nullDevice());
+        m_process.setStandardOutputFile(QProcess::nullDevice());
+        m_process.setStandardErrorFile(QProcess::nullDevice());
+        m_process.start(QString::fromUtf8(program),
+            {QStringLiteral("web"), QStringLiteral("--no-open"), QStringLiteral("--host"),
+                QStringLiteral("127.0.0.1"), QStringLiteral("--port"), QStringLiteral("0")});
+        if (!m_process.waitForStarted()) {
+            throw Probe_failure("quota_start_failed", addon::Quota_failure_stage::PROCESS_START,
+                static_cast<int>(m_process.error()));
+        }
+        m_pid = static_cast<std::uint64_t>(m_process.processId());
     }
 
     ~Owned_server()
     {
-#ifdef _WIN32
-        if (m_process) {
-            if (WaitForSingleObject(m_process, 0) != WAIT_OBJECT_0) TerminateProcess(m_process, 1);
-            WaitForSingleObject(m_process, INFINITE);
-            CloseHandle(m_process);
-        }
-#else
-        if (m_pid != 0 && !m_reaped) {
-            kill(m_pid, SIGTERM);
-            const auto end = Clock::now() + std::chrono::seconds(1);
-            while (alive() && Clock::now() < end) std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            if (!m_reaped) {
-                kill(m_pid, SIGKILL);
-                int status = 0;
-                while (waitpid(m_pid, &status, 0) < 0 && errno == EINTR) {}
+        if (alive()) {
+            m_process.terminate();
+            if (!m_process.waitForFinished(1000)) {
+                m_process.kill();
+                m_process.waitForFinished(-1);
             }
         }
-#endif
     }
 
     Owned_server(const Owned_server&) = delete;
     Owned_server& operator=(const Owned_server&) = delete;
-    std::uint64_t pid() const { return static_cast<std::uint64_t>(m_pid); }
+    std::uint64_t pid() const { return m_pid; }
     bool alive()
     {
-#ifdef _WIN32
-        return WaitForSingleObject(m_process, 0) == WAIT_TIMEOUT;
-#else
-        if (m_reaped) return false;
-        int status = 0;
-        const auto result = waitpid(m_pid, &status, WNOHANG);
-        if (result == m_pid || (result < 0 && errno == ECHILD)) m_reaped = true;
-        return !m_reaped;
-#endif
+        m_process.waitForFinished(0);
+        return m_process.state() != QProcess::NotRunning;
+    }
+    [[noreturn]] void failed()
+    {
+        // Native text can contain settings and credentials. Exit status proves
+        // process failure; no substring of private output proves a safe cause.
+        throw Probe_failure("quota_server_exited", addon::Quota_failure_stage::PROCESS_EXIT,
+            m_process.exitCode());
     }
     void wait_for_shutdown()
     {
@@ -229,13 +167,8 @@ public:
     }
 
 private:
-#ifdef _WIN32
-    HANDLE m_process = nullptr;
-    DWORD m_pid = 0;
-#else
-    pid_t m_pid = 0;
-    bool m_reaped = false;
-#endif
+    QProcess m_process;
+    std::uint64_t m_pid = 0;
 };
 
 std::set<std::string> registry_names(const fs::path& directory)
@@ -244,6 +177,9 @@ std::set<std::string> registry_names(const fs::path& directory)
     std::error_code error;
     for (fs::directory_iterator item(directory, error), end; !error && item != end; item.increment(error)) {
         if (item->path().extension() == ".json") result.insert(kimi::path_string(item->path().filename()));
+    }
+    if (error && error != std::errc::no_such_file_or_directory) {
+        throw Probe_failure("quota_registry_unavailable", addon::Quota_failure_stage::REGISTRY_READ, error.value());
     }
     return result;
 }
@@ -517,7 +453,8 @@ Json run(const std::string& program, const std::string& home)
         if (port) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
-    if (!port || !child.alive()) throw std::runtime_error("quota_server_not_ready");
+    if (!child.alive()) child.failed();
+    if (!port) throw std::runtime_error("quota_server_not_ready");
     auto token = kimi::trim(read_file(directory / "server.token", 16384));
     Scrub_string scrub_token{token};
     if (token.empty() || token.find_first_of("\r\n") != std::string::npos) throw std::runtime_error("invalid_quota_token");
@@ -561,6 +498,13 @@ int main(int argc, char** argv)
             throw std::runtime_error("invalid_quota_request");
         }
         result = run(arguments[2], arguments[4]);
+    }
+    catch (const Probe_failure& error) {
+        const auto category = error.diagnostic.stage == addon::Quota_failure_stage::REGISTRY_READ
+            ? addon::Quota_failure::REGISTRY_FAILED : addon::Quota_failure::PROCESS_FAILED;
+        result = json_util::object({{"status", Json("error")},
+            {"reason_code", Json(addon::quota_failure_reason(category))},
+            {"diagnostic", addon::encode_quota_diagnostic(error.diagnostic)}});
     }
     catch (const std::exception& error) {
         result = kimi::quota_probe_failure(error.what());

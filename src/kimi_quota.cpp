@@ -188,9 +188,6 @@ Json quota_probe_failure(std::string_view reason)
     }
     failures[] = {
         {"invalid_quota_request",    "The Kimi quota check has an invalid executable or profile path."},
-        {"invalid_utf8_path",        "The Kimi executable or profile path is not valid UTF-8."},
-        {"quota_environment_failed", "The Kimi quota service could not inherit its process environment."},
-        {"quota_start_failed",       "The Kimi quota service could not be started."},
         {"quota_server_not_ready",   "The Kimi quota service did not become ready."},
         {"invalid_owned_server",     "The Kimi quota service published an invalid connection record."},
         {"ambiguous_owned_server",   "The Kimi quota service published conflicting connection records."},
@@ -282,7 +279,25 @@ void handle_quota(addon::Invocation_context& context)
     const auto payload = json_util::parse(request->inspection.stdout_bytes);
     if (!payload || !payload->is_object()) { context.fail(addon::Result_status::FAILED, "invalid_quota_response"); return; }
     const auto status = json_util::text(*payload, "status");
+    addon::Observation_scope scope;
+    if (request->account_context) scope.source_account_key = request->account_context->adapter_account_key;
+    scope.observed_at_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    scope.fresh_for_ms = 60000;
     if (status == "error") {
+        if (const auto category = addon::parse_quota_failure(json_util::text(*payload, "reason_code"))) {
+            std::optional<addon::Quota_diagnostic> diagnostic;
+            if (const auto* evidence = payload->find("diagnostic")) {
+                diagnostic = addon::decode_quota_diagnostic(*evidence);
+                if (!diagnostic) {
+                    context.fail(addon::Result_status::FAILED, "invalid_quota_response");
+                    return;
+                }
+            }
+            context.succeed(addon::encode_quota_inspect_result(
+                addon::make_quota_failure(*category, scope, diagnostic), 2, request->report_quota_failure));
+            return;
+        }
         const auto failure = quota_probe_failure(json_util::text(*payload, "reason_code"));
         context.fail(addon::Result_status::FAILED, json_util::text(failure, "reason_code"), json_util::text(failure, "detail"));
         return;
@@ -292,10 +307,7 @@ void handle_quota(addon::Invocation_context& context)
         return;
     }
     addon::Quota_observation observation;
-    if (request->account_context) observation.scope.source_account_key = request->account_context->adapter_account_key;
-    observation.scope.observed_at_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count());
-    observation.scope.fresh_for_ms = 60000;
+    observation.scope = scope;
     observation.state = status == "ok"            ? addon::Quota_status::READY :
                         status == "not_logged_in" ? addon::Quota_status::NOT_LOGGED_IN :
                                                     addon::Quota_status::UNAVAILABLE;
