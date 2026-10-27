@@ -140,7 +140,7 @@ int main()
         {"presentation", 1}, {"launcher-discovery", 1}, {"profile-storage", 1},
         {"lifecycle-correlation-lifetime", 1},
         {"launch-preparation", 3}, {"structured-session", 3}, {"delegated-session", 3},
-        {"interactive-resume", 2}, {"quota", 2}, {"lifecycle-events", 2},
+        {"interactive-resume", 2}, {"quota", 2}, {"quota-failure", 1}, {"lifecycle-events", 2},
         {"helper-ingress", 2}, {"coordination-delivery", 1},
         {"accounts", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
         {addon::k_usage_temporal_capability_id, addon::k_usage_temporal_version},

@@ -119,8 +119,11 @@ public:
             }
         }
         m_process.setProcessEnvironment(environment);
+        // The native server may log without limit while the helper waits on it;
+        // no output of it explains a failure, so none is kept.
         m_process.setStandardInputFile(QProcess::nullDevice());
         m_process.setStandardOutputFile(QProcess::nullDevice());
+        m_process.setStandardErrorFile(QProcess::nullDevice());
         m_process.start(QString::fromUtf8(program),
             {QStringLiteral("web"), QStringLiteral("--no-open"), QStringLiteral("--host"),
                 QStringLiteral("127.0.0.1"), QStringLiteral("--port"), QStringLiteral("0")});
@@ -140,7 +143,6 @@ public:
                 m_process.waitForFinished(-1);
             }
         }
-        m_stderr.fill('\0');
     }
 
     Owned_server(const Owned_server&) = delete;
@@ -149,10 +151,6 @@ public:
     bool alive()
     {
         m_process.waitForFinished(0);
-        auto bytes = m_process.readAllStandardError();
-        m_stderr.append(bytes);
-        if (m_stderr.size() > 8192) m_stderr.remove(0, m_stderr.size() - 8192);
-        bytes.fill('\0');
         return m_process.state() != QProcess::NotRunning;
     }
     [[noreturn]] void failed()
@@ -170,7 +168,6 @@ public:
 
 private:
     QProcess m_process;
-    QByteArray m_stderr;
     std::uint64_t m_pid = 0;
 };
 
@@ -505,10 +502,9 @@ int main(int argc, char** argv)
     catch (const Probe_failure& error) {
         const auto category = error.diagnostic.stage == addon::Quota_failure_stage::REGISTRY_READ
             ? addon::Quota_failure::REGISTRY_FAILED : addon::Quota_failure::PROCESS_FAILED;
-        const auto failed = addon::encode_quota_inspect_result(addon::make_quota_failure(category, {}, error.diagnostic));
         result = json_util::object({{"status", Json("error")},
             {"reason_code", Json(addon::quota_failure_reason(category))},
-            {"diagnostic", *failed.find("diagnostic")}});
+            {"diagnostic", addon::encode_quota_diagnostic(error.diagnostic)}});
     }
     catch (const std::exception& error) {
         result = kimi::quota_probe_failure(error.what());
