@@ -73,7 +73,7 @@ endfunction()
 
 set(kimi_provider_sources
     src/kimi_accounts.cpp src/kimi_usage.cpp src/kimi_usage_correction.cpp
-    src/kimi_acp.cpp src/kimi_config.cpp src/kimi_guidance.cpp src/kimi_launcher.cpp
+    src/kimi_acp.cpp src/kimi_config.cpp src/kimi_guidance.cpp src/kimi_interactions.cpp src/kimi_launcher.cpp
     src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_quota_direct.cpp src/kimi_wire.cpp)
 function(kimi_add_provider target)
     add_library(${target} STATIC ${kimi_provider_sources})

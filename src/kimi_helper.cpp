@@ -1,5 +1,6 @@
 #include "kimi_config.h"
 #include "kimi_guidance.h"
+#include "kimi_interactions.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
 
@@ -93,6 +94,18 @@ int main()
         }
         const auto home = kimi::code_home(runtime, kimi::path_string(std::filesystem::current_path()));
         body.set("kimi_code_home", Json(home));
+        if (name == "SessionStart") {
+            try {
+                body.set("interaction_frontier", kimi::capture_interaction_frontier(
+                    home, json_util::text(*payload, "session_id")));
+            }
+            catch (const std::exception&) {
+                // Optional wire access must not suppress authoritative session admission.
+                // Null disables interactions for this admission without replaying history.
+                body.set("interaction_frontier", Json());
+                std::fputs("Logonomic native interaction observation is unavailable for this session.\n", stderr);
+            }
+        }
         guidance = kimi::session_guidance_path(addon::path_from_utf8(home), environment->generation_nonce,
             json_util::text(*payload, "session_id"));
     }

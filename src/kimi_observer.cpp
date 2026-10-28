@@ -1,5 +1,6 @@
 #include "kimi_observer.h"
 #include "kimi_json.h"
+#include "kimi_interactions.h"
 #include "kimi_launcher.h"
 
 #include <logonomic_cli_addon/package_source.h>
@@ -107,6 +108,8 @@ struct Binding
     std::string nonce;
     std::optional<fs::path> path;
     Wire_decoder decoder;
+    std::unique_ptr<Interaction_reader> interactions;
+    Interaction_inventory interaction_inventory;
     observation::Subscription subscription;
     std::shared_ptr<observation::Wait_channel> channel;
     QStringList watched_directories;
@@ -180,6 +183,9 @@ bool update_observation(Binding& binding, observation::Service& service,
         binding.bind_deadline = Clock::now() + std::chrono::seconds(60);
     }
     binding.path = resolved;
+    if (binding.interactions) {
+        binding.interaction_inventory = discover_interaction_wires(binding.home, binding.session);
+    }
 
     QStringList directories;
     QStringList files;
@@ -228,6 +234,14 @@ bool update_observation(Binding& binding, observation::Service& service,
     if (binding.path) {
         add_interest(files, *binding.path);
         wires.append(observation_path(*binding.path));
+    }
+    if (binding.interaction_inventory.root && directory_exists(*binding.interaction_inventory.root)) {
+        add_interest(directories, *binding.interaction_inventory.root);
+        for (const auto& wire : binding.interaction_inventory.wires) {
+            add_interest(files, wire.path.parent_path());
+            add_interest(files, wire.path);
+            wires.append(observation_path(wire.path));
+        }
     }
     directories.removeDuplicates();
     directories.sort();
@@ -367,7 +381,14 @@ bool scan(Binding& binding, addon::Invocation_context* invocation)
     input.seekg(static_cast<std::streamoff>(binding.anchor_offset));
     input.read(binding.anchor.data(), static_cast<std::streamsize>(size));
     if (input.gcount() != static_cast<std::streamsize>(size)) binding.anchor.clear();
-    return length >= 0 && binding.offset == snapshot_end && binding.failure.empty();
+    bool complete = length >= 0 && binding.offset == snapshot_end && binding.failure.empty();
+    if (complete && binding.interactions) {
+        std::vector<addon::Lifecycle_observation> interactions;
+        complete = binding.interactions->acquire(binding.interaction_inventory, interactions,
+            [&] { return invocation && invocation->cancel_requested(); });
+        enqueue(binding, std::move(interactions));
+    }
+    return complete && binding.failure.empty();
 }
 
 void finish_session(Binding& binding)
@@ -495,6 +516,9 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
         if (!found->second) {
             auto binding = std::make_shared<Binding>(session, home);
             binding->nonce = request.transition_nonce;
+            if (const auto* frontier = event.body.find("interaction_frontier"); frontier && !frontier->is_null()) {
+                binding->interactions = std::make_unique<Interaction_reader>(session, *frontier);
+            }
             m_state->sessions[request.transition_nonce] = std::move(binding);
         }
         result.classification = addon::Classification::TRANSITION;

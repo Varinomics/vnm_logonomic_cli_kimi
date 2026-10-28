@@ -1,4 +1,5 @@
 #include "kimi_json.h"
+#include "kimi_interactions.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/helper_client.h>
@@ -7,6 +8,7 @@
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
 #include <logonomic_cli_addon/lifecycle_events.h>
+#include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
 
 #include <QByteArray>
@@ -15,11 +17,14 @@
 #include <QProcessEnvironment>
 #include <QString>
 
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -108,7 +113,8 @@ addon::Provider_event relay(
     const fs::path& executable,
     const fs::path& home,
     const addon::Host_simulator& host,
-    const Json& payload)
+    const Json& payload,
+    std::string* diagnostic = nullptr)
 {
     const auto capture = home / "captured-event.json";
     fs::remove(capture);
@@ -136,6 +142,9 @@ addon::Provider_event relay(
     require(process.write(bytes) == bytes.size(), "native hook input was not written");
     process.closeWriteChannel();
     require(process.waitForFinished(10000), "packaged helper did not finish");
+    if (diagnostic) {
+        *diagnostic = process.readAllStandardError().toStdString();
+    }
     require(process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0,
         "packaged helper rejected a native hook");
     require(process.readAllStandardOutput().isEmpty(), "permission hooks must not print private hook data");
@@ -271,6 +280,316 @@ void permission_pair(const fs::path& package, const fs::path& executable)
     require(host.shutdown(5000, &exit_code) && exit_code == 0, "packaged adapter must stop cleanly");
 }
 
+void append_wire(const fs::path& path, const Json& record)
+{
+    fs::create_directories(path.parent_path());
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    output << addon::serialize_json(record) << '\n';
+    output.close();
+    require(output.good(), "native interaction fixture was not written");
+}
+
+Json interaction(std::string_view id, std::string_view agent, bool resolved = false,
+    std::string_view kind = "question")
+{
+    // Serialized InteractionRequestEvent / InteractionResolvedEvent from Kimi
+    // 18bea3d: agent/interaction/interactionOps.ts and interactionWiring.ts.
+    auto result = json_util::object({
+        {"type",    Json(resolved ? "interaction.resolved" : "interaction.request")},
+        {"agentId", Json(agent)},
+        {"id",      Json(id)},
+        {"time",    Json(std::int64_t{1793199600000LL})},
+    });
+    if (resolved) {
+        result.set("response", json_util::object({{"cancelled", Json(true)}, {"reason", Json("turn_ended")}}));
+    }
+    else {
+        result.set("kind", Json(kind));
+        result.set("toolCallId", Json("call_native_interaction"));
+        if (kind == "question") {
+            auto questions = Json::array();
+            auto choices = Json::array();
+            choices.as_array().push_back(json_util::object({{"label", Json("Continue")},
+                {"description", Json("private-choice")}}));
+            questions.as_array().push_back(json_util::object({{"question", Json("private-question")},
+                {"header", Json("Deploy")}, {"options", std::move(choices)}, {"multiSelect", Json(false)}}));
+            result.set("request", json_util::object({{"turnId", Json(7)},
+                {"toolCallId", Json("call_native_interaction")}, {"questions", std::move(questions)}}));
+        }
+        else {
+            result.set("request", json_util::object({{"id", Json(id)},
+                {"sessionId", Json("session-permission")}, {"agentId", Json(agent)},
+                {"turnId", Json(7)}, {"toolCallId", Json("call_native_interaction")},
+                {"toolName", Json("Shell")}, {"action", Json("execute")},
+                {"display", json_util::object({{"kind", Json("shell")}, {"command", Json("private-command")}})}}));
+        }
+    }
+    return result;
+}
+
+std::string observe(addon::Host_simulator& host, const fs::path& home, const std::string& nonce)
+{
+    addon::Observe_request request;
+    request.session = {addon::path_to_utf8(home), {"kimi"}, "session-permission"};
+    request.correlation = addon::Session_correlation{nonce};
+    request.window_ms = addon::limits::k_observe_window_ms;
+    return host.invoke({"lifecycle-events", 2}, "observe", addon::encode_observe_request(request), 25000);
+}
+
+addon::Poll_observations_result poll_attention(addon::Host_simulator& host, const std::string& nonce)
+{
+    addon::Poll_observations_request request;
+    request.correlation = addon::Session_correlation{nonce};
+    request.limit = addon::limits::k_max_observations_per_result;
+    const auto payload = invoke(host, {"lifecycle-events", 2}, "poll_observations",
+        addon::encode_poll_observations_request(request));
+    addon::Contract_failure failure;
+    const auto result = addon::decode_poll_observations_result(payload, request.limit, &failure);
+    require(result.has_value(), "continuous interaction result must obey the host schema");
+    return *result;
+}
+
+void wait_for_progress(addon::Host_simulator& host, const std::string& window, std::uint64_t previous)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (host.progress_count(window) <= previous && std::chrono::steady_clock::now() < deadline) {
+        host.pump(20);
+        require(!host.outcome(window), "interaction observation stopped before acquiring native evidence");
+    }
+    require(host.progress_count(window) > previous,
+        "native interaction wire did not publish its pending question");
+}
+
+void native_interactions(const fs::path& package, const fs::path& executable)
+{
+    Workspace workspace;
+    const auto agents = workspace.m_path / "sessions/workspace/session-permission/agents";
+    const auto main_wire = agents / "main/wire.jsonl";
+    const auto child_wire = agents / "reviewer/wire.jsonl";
+    const auto partial_wire = agents / "partial/wire.jsonl";
+    append_wire(main_wire, interaction("question_old_process", "main"));
+    append_wire(child_wire, interaction("question_old_child", "reviewer"));
+    const auto old_partial = addon::serialize_json(interaction("question_old_partial", "partial"));
+    fs::create_directories(partial_wire.parent_path());
+    {
+        std::ofstream output(partial_wire, std::ios::binary);
+        output << old_partial.substr(0, old_partial.size() / 2);
+        require(output.good(), "old native partial record must reach the captured frontier");
+    }
+
+    addon::Simulator_options options;
+    options.package_directory = package;
+    addon::Host_simulator host(options, nullptr);
+    addon::Contract_failure failure;
+    require(host.start(&failure), failure.reason_code + ": " + failure.detail);
+    auto nonce = addon::random_nonce_hex();
+    invoke(host, {addon::k_lifecycle_correlation_lifetime_capability_id, 1}, "reserve",
+        addon::encode_lifecycle_correlation_reserve_request({{nonce}}));
+    addon::Classify_event_request start;
+    start.transition_nonce = nonce;
+    start.event = relay(package, executable, workspace.m_path, host,
+        json_util::object({{"hook_event_name", Json("SessionStart")},
+            {"session_id", Json("session-permission")}, {"source", Json("resume")},
+            {"interaction_frontier", Json("untrusted native input")}}));
+
+    // The helper has returned, but adapter admission has not run. A native first
+    // prompt in this interval must remain after the helper's frozen frontier.
+    {
+        std::ofstream output(partial_wire, std::ios::binary | std::ios::app);
+        output << old_partial.substr(old_partial.size() / 2) << '\n';
+        require(output.good(), "the pre-launch partial record must complete after capture");
+    }
+    append_wire(main_wire, interaction("question_first_prompt", "main"));
+    append_wire(child_wire, interaction("question_background", "reviewer"));
+    require(classify(host, start).base.classification == addon::Classification::TRANSITION,
+        "admit the captured native launch before observing its wires");
+    auto window = observe(host, workspace.m_path, nonce);
+    wait_for_progress(host, window, 0);
+    auto page = poll_attention(host, nonce);
+    require(page.observations.size() == 2, "only current-process root and child questions are pending");
+    std::map<std::string, std::string> pending;
+    for (const auto& observation : page.observations) {
+        require(observation.attention_transition == addon::Attention_transition::REQUESTED &&
+            observation.attention_evidence == addon::Evidence::CONFIRMED &&
+            observation.provider_turn_id.empty() && observation.phase_transition == addon::Phase_transition::NONE,
+            "native interaction requests must retain exact attention without inventing a root phase");
+        pending.emplace(observation.attention_request_id, observation.agent_id);
+    }
+    require(pending == std::map<std::string, std::string>{{"question_first_prompt", "main"},
+        {"question_background", "reviewer"}}, "old process interactions must not be replayed");
+    require(json_util::member(start.event.body, "interaction_frontier").is_object(),
+        "the helper must replace native input with its own admission frontier");
+    const auto frontier = addon::serialize_json(json_util::member(start.event.body, "interaction_frontier"));
+    require(frontier.find(addon::path_to_utf8(workspace.m_path)) == std::string::npos &&
+        frontier.find("private-question") == std::string::npos,
+        "frontier metadata must not contain paths or native question text");
+
+    auto progress = host.progress_count(window);
+    append_wire(child_wire, json_util::object({{"type", Json("context.append_loop_event")},
+        {"event", json_util::object({{"type", Json("tool.result")},
+            {"toolCallId", Json("call_native_interaction")}, {"result", json_util::object({
+                {"output", Json("task_id: background-question\nstatus: running\n")}})}})}}));
+    append_wire(main_wire, interaction("question_background", "reviewer", true));
+    append_wire(agents / "new-child/wire.jsonl", interaction("approval_cancelled", "new-child", false, "approval"));
+    wait_for_progress(host, window, progress);
+    page = poll_attention(host, nonce);
+    require(page.observations.size() == 3 &&
+        page.observations.back().attention_request_id == "approval_cancelled",
+        "a new child wire must be acquired without clearing either existing question");
+
+    progress = host.progress_count(window);
+    append_wire(agents / "new-child/wire.jsonl", interaction("approval_cancelled", "new-child", true));
+    wait_for_progress(host, window, progress);
+    page = poll_attention(host, nonce);
+    require(page.observations.size() == 4 &&
+        page.observations.back().attention_request_id == "approval_cancelled" &&
+        page.observations.back().agent_id == "new-child" &&
+        page.observations.back().attention_transition == addon::Attention_transition::RESOLVED,
+        "native cancellation must settle only its exact child approval");
+
+    progress = host.progress_count(window);
+    auto answered = interaction("question_background", "reviewer", true);
+    answered.set("response", json_util::object({{"answers", json_util::object({
+        {"private-question", Json("Continue")}})}, {"method", Json("enter")}}));
+    append_wire(child_wire, answered);
+    wait_for_progress(host, window, progress);
+    page = poll_attention(host, nonce);
+    require(page.observations.size() == 5 &&
+        page.observations.back().attention_request_id == "question_background" &&
+        page.observations.back().attention_transition == addon::Attention_transition::RESOLVED,
+        "background question resolution must wait for its native interaction response");
+    require(addon::serialize_json(addon::encode_poll_observations_result(page)).find("private-question") ==
+        std::string::npos, "continuous attention must not expose question or answer content");
+
+    host.cancel(window);
+    require(host.wait_outcome(window, 5000).has_value(), "stop the observation window before retiring its scope");
+    invoke(host, {addon::k_lifecycle_correlation_lifetime_capability_id, 1}, "retire",
+        addon::encode_lifecycle_correlation_retire_request({{nonce},
+            addon::Lifecycle_correlation_retire_disposition::ABANDONED, std::nullopt}));
+    nonce = addon::random_nonce_hex();
+    invoke(host, {addon::k_lifecycle_correlation_lifetime_capability_id, 1}, "reserve",
+        addon::encode_lifecycle_correlation_reserve_request({{nonce}}));
+    start.transition_nonce = nonce;
+    start.event = relay(package, executable, workspace.m_path, host,
+        json_util::object({{"hook_event_name", Json("SessionStart")},
+            {"session_id", Json("session-permission")}, {"source", Json("resume")}}));
+    classify(host, start);
+    append_wire(main_wire, interaction("question_next_process", "main"));
+    window = observe(host, workspace.m_path, nonce);
+    wait_for_progress(host, window, 0);
+    page = poll_attention(host, nonce);
+    require(page.observations.size() == 1 &&
+        page.observations.front().attention_request_id == "question_next_process",
+        "a new native launch must not revive an unresolved question from the retired process");
+    host.cancel(window);
+    require(host.wait_outcome(window, 5000).has_value(), "stop the second observation window");
+    int exit_code = -1;
+    require(host.shutdown(5000, &exit_code) && exit_code == 0, "interaction adapter must stop cleanly");
+}
+
+void frontier_failures_are_explicit()
+{
+    Workspace workspace;
+    const auto agents = workspace.m_path / "sessions/workspace/session-permission/agents";
+    fs::create_directories(agents / "main/wire.jsonl");
+    bool refused = false;
+    try {
+        kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission");
+    }
+    catch (const std::runtime_error& error) {
+        refused = std::string_view(error.what()) == "interaction_wire_unavailable";
+    }
+    require(refused, "an unreadable native wire must not silently become a zero history frontier");
+    fs::remove(agents / "main/wire.jsonl");
+    for (int index = 0; index < 256; ++index) {
+        fs::create_directories(agents / ("child-" + std::to_string(index)));
+    }
+    refused = false;
+    try {
+        kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission");
+    }
+    catch (const std::runtime_error& error) {
+        refused = std::string_view(error.what()) == "interaction_inventory_capacity_exhausted";
+    }
+    require(refused, "oversized native agent inventory must fail before historical prompts can be replayed");
+}
+
+void frontier_failure_preserves_admission(const fs::path& package, const fs::path& executable, bool oversized)
+{
+    Workspace workspace;
+    const auto agents = workspace.m_path / "sessions/workspace/session-permission/agents";
+    const auto main_wire = agents / "main/wire.jsonl";
+    append_wire(agents / "reviewer/wire.jsonl", interaction("question_historical_child", "reviewer"));
+    if (oversized) {
+        append_wire(main_wire, interaction("question_historical_main", "main"));
+        for (int index = 0; index < 255; ++index) {
+            fs::create_directories(agents / ("child-" + std::to_string(index)));
+        }
+    }
+    else {
+        fs::create_directories(main_wire);
+    }
+
+    addon::Simulator_options options;
+    options.package_directory = package;
+    addon::Host_simulator host(options, nullptr);
+    addon::Contract_failure failure;
+    require(host.start(&failure), failure.reason_code + ": " + failure.detail);
+    const auto nonce = addon::random_nonce_hex();
+    invoke(host, {addon::k_lifecycle_correlation_lifetime_capability_id, 1}, "reserve",
+        addon::encode_lifecycle_correlation_reserve_request({{nonce}}));
+    addon::Classify_event_request request;
+    request.transition_nonce = nonce;
+    std::string diagnostic;
+    request.event = relay(package, executable, workspace.m_path, host,
+        json_util::object({{"hook_event_name", Json("SessionStart")},
+            {"session_id", Json("session-permission")}, {"source", Json("resume")},
+            {"interaction_frontier", Json("untrusted native input")}}), &diagnostic);
+    const auto* frontier = request.event.body.find("interaction_frontier");
+    require(frontier && frontier->is_null(),
+        "failed optional capture must explicitly disable interaction observation for this admission");
+    require(diagnostic == "Logonomic native interaction observation is unavailable for this session.\n",
+        "optional capture failure must report a bounded diagnostic without paths or native data");
+    require(classify(host, request).base.classification == addon::Classification::TRANSITION,
+        "failed optional capture must preserve authoritative SessionStart admission");
+    request.ledger = {1, addon::Ledger_transition{addon::Transition_kind::RESUME, "session-permission", nonce}};
+    for (const auto* event : {"PermissionRequest", "PermissionResult"}) {
+        request.event = relay(package, executable, workspace.m_path, host,
+            native_permission(event, "approval_degraded_reader", "reviewer"));
+        const auto result = classify(host, request);
+        require(result.base.classification == addon::Classification::EVENT &&
+            result.base.observations.size() == 1 && result.attention_kind && result.attention_kind->kind == "permission",
+            "optional interaction failure must preserve the published permission classification");
+        const auto& observation = result.base.observations.front();
+        require(observation.attention_request_id == "approval_degraded_reader" && observation.agent_id == "reviewer" &&
+            observation.attention_transition == (std::string_view(event) == "PermissionRequest"
+                ? addon::Attention_transition::REQUESTED : addon::Attention_transition::RESOLVED),
+            "degraded interaction admission must retain the exact native permission pair");
+    }
+
+    // Repairing the inventory cannot retroactively establish a launch frontier.
+    if (oversized) {
+        fs::remove(agents / "child-254");
+    }
+    else {
+        fs::remove(main_wire);
+    }
+    append_wire(main_wire, interaction("question_after_failed_capture", "main"));
+    append_wire(main_wire, json_util::object({{"type", Json("subagent.started")},
+        {"subagentId", Json("existing-lifecycle")}}));
+    const auto window = observe(host, workspace.m_path, nonce);
+    wait_for_progress(host, window, 0);
+    const auto page = poll_attention(host, nonce);
+    require(page.observations.size() == 1 && page.observations.front().agent_id == "existing-lifecycle" &&
+        page.observations.front().subagent_transition == addon::Subagent_transition::STARTED &&
+        page.observations.front().attention_transition == addon::Attention_transition::NONE,
+        "existing lifecycle observation must continue without replaying interaction history after failed capture");
+    host.cancel(window);
+    require(host.wait_outcome(window, 5000).has_value(), "stop observation after degraded admission");
+    int exit_code = -1;
+    require(host.shutdown(5000, &exit_code) && exit_code == 0, "degraded interaction adapter must stop cleanly");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -281,6 +600,12 @@ int main(int argc, char** argv)
         }
         require(argc == 2, "usage: kimi_permission_tests <package directory>");
         permission_pair(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
+        native_interactions(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
+        frontier_failures_are_explicit();
+        frontier_failure_preserves_admission(fs::absolute(addon::path_from_utf8(argv[1])),
+            fs::absolute(addon::path_from_utf8(argv[0])), false);
+        frontier_failure_preserves_admission(fs::absolute(addon::path_from_utf8(argv[1])),
+            fs::absolute(addon::path_from_utf8(argv[0])), true);
         return 0;
     }
     catch (const std::exception& error) {
