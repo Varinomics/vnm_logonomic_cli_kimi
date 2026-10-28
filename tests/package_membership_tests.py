@@ -192,6 +192,15 @@ def main() -> int:
         rebuild()
         require((package / 'package.files.json').stat().st_mtime_ns == stamp, 'no-op rebuild rewrote package index')
         require(hashlib.sha256((package / 'package.files.json').read_bytes()).hexdigest() == digest, 'no-op rebuild changed index')
+        staged_asset = package / 'assets/cli-addon-membership-a.txt'
+        staged_stamp = staged_asset.stat()
+        staged_asset.write_bytes(b'damaged staged resource\n')
+        os.utime(staged_asset, ns=(staged_stamp.st_atime_ns, staged_stamp.st_mtime_ns))
+        rebuild()
+        check(True, False)
+        staged_asset.unlink()
+        rebuild()
+        check(True, False)
         # Separate filesystem timestamp ticks; this is not an asynchronous
         # safety assertion or a replacement for a synchronous product oracle.
         time.sleep(1.1)

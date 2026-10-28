@@ -113,9 +113,9 @@ logonomic_cli_addon_package_directory(logonomic.cli.kimi KIMI_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
 logonomic_cli_addon_package_indexer(kimi_package_indexer kimi_index_dependencies)
 include(cmake/kimi_package_runtime.cmake)
-# Inspect the executable closure on every build: an external shared library can
-# change without relinking an executable. The assembler compares exact inputs
-# and leaves a complete unchanged package (including its index) untouched.
+# Check exact source and package bytes on every build: external runtimes can
+# change without a relink. Reuse PE import discovery only while all resolution
+# inputs remain unchanged, and leave a complete unchanged package untouched.
 add_custom_target(kimi_package ALL
     COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/assemble-package-$<CONFIG>.cmake"
     BYPRODUCTS "${KIMI_PACKAGE_DIRECTORY}/package.files.json"
@@ -243,6 +243,16 @@ option(LOGONOMIC_CLI_ADDON_RECIPE_TESTS
     "Register isolated package rebuild regressions (requires Python 3)" OFF)
 if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    if(MSVC)
+        get_filename_component(kimi_compiler_directory "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        add_test(NAME kimi_runtime_dependency_cache
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_dependency_cache_tests.py"
+                "--module=${CMAKE_CURRENT_SOURCE_DIR}/cmake/kimi_runtime_dependencies.cmake"
+                "--cmake=${CMAKE_COMMAND}" "--inspector=${kimi_compiler_directory}/dumpbin.exe"
+                "--binary=$<TARGET_FILE:kimi_adapter>" "--qt-runtime=$<TARGET_FILE:Qt6::Core>")
+        set_tests_properties(kimi_runtime_dependency_cache PROPERTIES
+            TIMEOUT 180 LABELS "cli-addon;delivery;recipe")
+    endif()
     get_target_property(_membership_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
     get_filename_component(_membership_toml_source "${kimi_toml_source}" ABSOLUTE
         BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
