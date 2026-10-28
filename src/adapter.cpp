@@ -83,6 +83,7 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         }
         else
         if (capability == "lifecycle-events" || capability == "helper-ingress" ||
+            capability == addon::k_attention_kind_capability_id ||
             capability == "lifecycle-correlation-lifetime") observer.handle(context);
         else
         if (capability == "quota") kimi::handle_quota(context);
@@ -142,6 +143,7 @@ int main()
         {"launch-preparation", 3}, {"structured-session", 3}, {"delegated-session", 3},
         {"interactive-resume", 2}, {"quota", 2}, {"quota-failure", 1}, {"lifecycle-events", 2},
         {"helper-ingress", 2}, {"coordination-delivery", 1},
+        {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
         {"accounts", 2}, {"usage-scan", 3}, {"managed-configuration", 1},
         {addon::k_usage_temporal_capability_id, addon::k_usage_temporal_version},
         {addon::k_usage_session_capability_id, addon::k_usage_session_version},

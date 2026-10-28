@@ -168,7 +168,10 @@ std::string updated_config(std::string config)
     }
     std::vector<Config_edit> edits;
     std::string appended;
-    for (const auto& [event, timeout] : {std::pair{"SessionStart", 18}, {"SessionEnd", 13}, {"UserPromptSubmit", 23}}) {
+    for (const auto& [event, timeout] : {
+            std::pair{"SessionStart", 18}, {"SessionEnd", 13}, {"UserPromptSubmit", 23},
+            {"PermissionRequest", 13}, {"PermissionResult", 13}})
+    {
         const auto marker = std::string("# Logonomic managed Kimi hook: ") + event;
         bool found = false;
         std::size_t cursor = config.starts_with("\xEF\xBB\xBF") ? 3 : 0;

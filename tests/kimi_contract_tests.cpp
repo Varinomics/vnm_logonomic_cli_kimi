@@ -57,6 +57,10 @@ void configuration()
     const auto updated = kimi::updated_config(user);
     require(updated.starts_with(user), "unmanaged configuration bytes must survive");
     require(updated.find(kimi::hook_entry("SessionStart", 18)) != std::string::npos, "SessionStart relay deadline must be preserved");
+    for (const auto* event : {"PermissionRequest", "PermissionResult"}) {
+        require(updated.find(kimi::hook_entry(event, 13)) != std::string::npos,
+            "native permission requests and results must both reach the helper");
+    }
     require(kimi::updated_config(updated) == updated, "managed hook installation must be idempotent");
     const auto duplicate = kimi::updated_config(updated + kimi::hook_entry("SessionStart", 18));
     const auto marker = std::string("# Logonomic managed Kimi hook: SessionStart");

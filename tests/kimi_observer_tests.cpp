@@ -578,7 +578,7 @@ void final_page_requires_exact_acknowledgment()
 
 // Oracle: the host's feature gate. It rejects an observation carrying a fact
 // the package's own declaration leaves unsupported. The observer reports no
-// native turn hook, only session boundaries and the children its wire shows.
+// native turn hook; session and permission hooks and wire children retain their own facts.
 void declared_profile_admits_every_shape(const fs::path& package)
 {
     const addon::Directory_package_source source(package);
@@ -603,6 +603,17 @@ void declared_profile_admits_every_shape(const fs::path& package)
     require(reserve(observer, nonce), "reserve the gated owner");
     auto request = start_request(workspace, nonce);
     admitted(observer.classify(request).observations);
+    request.ledger.current_epoch = 1;
+    request.ledger.current_transition = addon::Ledger_transition{addon::Transition_kind::START, "session", nonce};
+    request.event.body.set("id", addon::Json_value("approval_b590bd4c-78da-4d18-a319-b06c5a7f6453"));
+    request.event.body.set("agent_id", addon::Json_value("main"));
+    request.event.body.set("tool_call_id", addon::Json_value("call_deploy_preview"));
+    for (const auto* name : {"PermissionRequest", "PermissionResult"}) {
+        request.event.name = name;
+        const auto permission = observer.classify(request);
+        require(permission.observations.size() == 1, "native permission hook produces one identified fact");
+        admitted(permission.observations);
+    }
     Context window;
     prepare_observe(window, workspace, nonce);
     window.m_cancel_on_progress = true;
@@ -618,7 +629,7 @@ void declared_profile_admits_every_shape(const fs::path& package)
         cursor = page->resume_cursor;
         more = page->more;
     }
-    require(observed >= 4, "the session start, child start, child stop and session end were all gated");
+    require(observed >= 6, "session, permission and child facts were all gated");
 }
 
 void in_flight_watch_stops_on_retirement()

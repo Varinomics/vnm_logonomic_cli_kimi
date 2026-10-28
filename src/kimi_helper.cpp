@@ -64,14 +64,27 @@ int main()
     if (!payload || !payload->is_object()) return 0;
     auto name = json_util::text(*payload, "hook_event_name");
     if (name.empty()) name = json_util::text(*payload, "event");
-    if (name != "SessionStart" && name != "SessionEnd" && name != "UserPromptSubmit") return 0;
-    const int budget_ms = name == "SessionStart" ? 16000 : name == "SessionEnd" ? 11000 : 21000;
+    const bool permission = name == "PermissionRequest" || name == "PermissionResult";
+    if (name != "SessionStart" && name != "SessionEnd" && name != "UserPromptSubmit" && !permission) {
+        return 0;
+    }
+    const int budget_ms = name == "SessionStart" ? 16000 : name == "UserPromptSubmit" ? 21000 : 11000;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
     addon::Helper_client client(*environment, [&] { return std::chrono::steady_clock::now() >= deadline; });
     const auto id = addon::random_nonce_hex();
     const auto nonce = addon::random_nonce_hex();
     auto body = json_util::object({{"session_id", Json(json_util::text(*payload, "session_id"))},
         {"source", Json(json_util::text(*payload, "source"))}});
+    if (permission) {
+        // Approval IDs pair native hooks without relaying commands or approval prose.
+        for (const auto key : {"id", "agent_id", "tool_call_id"}) {
+            const auto& identity = json_util::member(*payload, key);
+            if (!json_util::bounded_string(identity, 256)) {
+                return 1;
+            }
+            body.set(key, identity);
+        }
+    }
     std::filesystem::path guidance;
     try {
         kimi::Environment runtime;
