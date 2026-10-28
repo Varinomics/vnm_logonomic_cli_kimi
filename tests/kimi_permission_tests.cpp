@@ -30,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -487,6 +488,64 @@ void native_interactions(const fs::path& package, const fs::path& executable)
     require(host.shutdown(5000, &exit_code) && exit_code == 0, "interaction adapter must stop cleanly");
 }
 
+void interaction_acquisition_retries_missing_wire()
+{
+    Workspace workspace;
+    const auto agents = workspace.m_path / "sessions/workspace/session-permission/agents";
+    const auto main_wire   = agents / "main/wire.jsonl";
+    const auto child_wire  = agents / "reviewer/wire.jsonl";
+    const auto writer_wire = agents / "writer/wire.jsonl";
+    append_wire(main_wire, Json::object());
+    append_wire(child_wire, Json::object());
+    append_wire(writer_wire, Json::object());
+    kimi::Interaction_reader reader("session-permission",
+        kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission"));
+    const kimi::Interaction_inventory inventory{agents, {
+        {"main", main_wire, true}, {"reviewer", child_wire, true}, {"writer", writer_wire, true}}};
+    append_wire(main_wire, interaction("question_main_during_acquisition", "main"));
+    append_wire(child_wire, interaction("question_child_during_acquisition", "reviewer"));
+    append_wire(writer_wire, interaction("question_writer_during_acquisition", "writer"));
+
+    // Discovery and opening are separate operations. A temporary disappearance
+    // must preserve earlier events and let available later wires make progress.
+    const auto parked_wire = agents / "reviewer/parked.jsonl";
+    fs::rename(child_wire, parked_wire);
+    std::vector<addon::Lifecycle_observation> observations;
+    require(!reader.acquire(inventory, observations, [] { return false; }),
+        "a wire unavailable after discovery must leave acquisition incomplete");
+    require(observations.size() == 2 &&
+        observations.front().attention_request_id == "question_main_during_acquisition" &&
+        observations.back().attention_request_id == "question_writer_during_acquisition",
+        "an unavailable child wire must preserve earlier questions and acquire later wires");
+
+    append_wire(writer_wire, interaction("question_writer_during_retry", "writer"));
+    observations.clear();
+    require(!reader.acquire(inventory, observations, [] { return false; }) &&
+        observations.size() == 1 &&
+        observations.front().attention_request_id == "question_writer_during_retry",
+        "repeated unavailable opens must not starve later wires or replay earlier questions");
+
+    fs::rename(parked_wire, child_wire);
+    observations.clear();
+    require(reader.acquire(inventory, observations, [] { return false; }),
+        "restoring the same wire must allow acquisition to resume");
+    require(observations.size() == 1 &&
+        observations.front().attention_request_id == "question_child_during_acquisition",
+        "resumed acquisition must deliver the child question without replaying the main question");
+
+    append_wire(main_wire, interaction("question_main_during_acquisition", "main", true));
+    append_wire(child_wire, interaction("question_child_during_acquisition", "reviewer", true));
+    append_wire(writer_wire, interaction("question_writer_during_acquisition", "writer", true));
+    append_wire(writer_wire, interaction("question_writer_during_retry", "writer", true));
+    observations.clear();
+    require(reader.acquire(inventory, observations, [] { return false; }) && observations.size() == 4,
+        "all native resolutions must remain observable after acquisition recovers");
+    for (const auto& observation : observations) {
+        require(observation.attention_transition == addon::Attention_transition::RESOLVED,
+            "recovered acquisition must preserve exact native retirement");
+    }
+}
+
 void frontier_failures_are_explicit()
 {
     Workspace workspace;
@@ -599,6 +658,7 @@ int main(int argc, char** argv)
             return capture_delivery(argc, argv);
         }
         require(argc == 2, "usage: kimi_permission_tests <package directory>");
+        interaction_acquisition_retries_missing_wire();
         permission_pair(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
         native_interactions(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
         frontier_failures_are_explicit();

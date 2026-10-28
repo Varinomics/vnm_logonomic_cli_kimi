@@ -304,6 +304,12 @@ bool Interaction_reader::acquire(const Interaction_inventory& inventory,
         }
         auto& stream = m_state->streams[wire.agent_id];
         std::ifstream input(wire.path, std::ios::binary);
+        if (!input) {
+            // Inventory and opening can race. Keep other wires progressing
+            // while the observer requests a rescan for this incomplete acquisition.
+            complete = false;
+            continue;
+        }
         const auto end = wire_size(input);
         if (end < stream.offset || addon::to_hex(addon::Sha256::digest(read_anchor(input, stream.offset))) != stream.anchor) {
             // Rewritten history cannot prove which prompts belong to this process.
