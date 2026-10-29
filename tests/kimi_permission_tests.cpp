@@ -144,7 +144,7 @@ addon::Provider_event relay(
     process.closeWriteChannel();
     require(process.waitForFinished(10000), "packaged helper did not finish");
     if (diagnostic) {
-        *diagnostic = process.readAllStandardError().toStdString();
+        *diagnostic = process.readAllStandardError().replace("\r\n", "\n").toStdString();
     }
     require(process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0,
         "packaged helper rejected a native hook");
@@ -500,7 +500,7 @@ void interaction_acquisition_retries_missing_wire()
     append_wire(writer_wire, Json::object());
     kimi::Interaction_reader reader("session-permission",
         kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission"));
-    const kimi::Interaction_inventory inventory{agents, {
+    const kimi::Interaction_inventory inventory{fs::canonical(agents), {
         {"main", main_wire, true}, {"reviewer", child_wire, true}, {"writer", writer_wire, true}}};
     append_wire(main_wire, interaction("question_main_during_acquisition", "main"));
     append_wire(child_wire, interaction("question_child_during_acquisition", "reviewer"));
