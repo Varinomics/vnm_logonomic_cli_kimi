@@ -1,5 +1,6 @@
 #include "kimi_observer.h"
 #include "kimi_json.h"
+#include "kimi_interactions.h"
 #include "kimi_launcher.h"
 
 #include <logonomic_cli_addon/package_source.h>
@@ -107,6 +108,8 @@ struct Binding
     std::string nonce;
     std::optional<fs::path> path;
     Wire_decoder decoder;
+    std::unique_ptr<Interaction_reader> interactions;
+    Interaction_inventory interaction_inventory;
     observation::Subscription subscription;
     std::shared_ptr<observation::Wait_channel> channel;
     QStringList watched_directories;
@@ -180,6 +183,9 @@ bool update_observation(Binding& binding, observation::Service& service,
         binding.bind_deadline = Clock::now() + std::chrono::seconds(60);
     }
     binding.path = resolved;
+    if (binding.interactions) {
+        binding.interaction_inventory = discover_interaction_wires(binding.home, binding.session);
+    }
 
     QStringList directories;
     QStringList files;
@@ -228,6 +234,14 @@ bool update_observation(Binding& binding, observation::Service& service,
     if (binding.path) {
         add_interest(files, *binding.path);
         wires.append(observation_path(*binding.path));
+    }
+    if (binding.interaction_inventory.root && directory_exists(*binding.interaction_inventory.root)) {
+        add_interest(directories, *binding.interaction_inventory.root);
+        for (const auto& wire : binding.interaction_inventory.wires) {
+            add_interest(files, wire.path.parent_path());
+            add_interest(files, wire.path);
+            wires.append(observation_path(wire.path));
+        }
     }
     directories.removeDuplicates();
     directories.sort();
@@ -367,7 +381,14 @@ bool scan(Binding& binding, addon::Invocation_context* invocation)
     input.seekg(static_cast<std::streamoff>(binding.anchor_offset));
     input.read(binding.anchor.data(), static_cast<std::streamsize>(size));
     if (input.gcount() != static_cast<std::streamsize>(size)) binding.anchor.clear();
-    return length >= 0 && binding.offset == snapshot_end && binding.failure.empty();
+    bool complete = length >= 0 && binding.offset == snapshot_end && binding.failure.empty();
+    if (complete && binding.interactions) {
+        std::vector<addon::Lifecycle_observation> interactions;
+        complete = binding.interactions->acquire(binding.interaction_inventory, interactions,
+            [&] { return invocation && invocation->cancel_requested(); });
+        enqueue(binding, std::move(interactions));
+    }
+    return complete && binding.failure.empty();
 }
 
 void finish_session(Binding& binding)
@@ -444,7 +465,10 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
 {
     addon::Classify_event_result result;
     const auto& event = request.event;
-    if (event.name != "SessionStart" && event.name != "SessionEnd") return result;
+    const bool permission = event.name == "PermissionRequest" || event.name == "PermissionResult";
+    if (event.name != "SessionStart" && event.name != "SessionEnd" && !permission) {
+        return result;
+    }
     const auto session = json_util::text(event.body, "session_id");
     const auto source = json_util::text(event.body, "source");
     if (!json_util::bounded_string(json_util::member(event.body, "session_id"), 256) || source.size() > 128 ||
@@ -456,6 +480,30 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     observation.provider_session_id = session;
     observation.session_source = source;
     std::lock_guard lock(m_state->mutex);
+    if (permission) {
+        for (const auto key : {"id", "agent_id", "tool_call_id"}) {
+            if (!json_util::bounded_string(json_util::member(event.body, key), 256)) {
+                throw std::runtime_error("invalid_kimi_permission");
+            }
+        }
+        const auto& transition = request.ledger.current_transition;
+        if (!transition || request.ledger.current_epoch == 0 || transition->provider_session_id != session) {
+            return result;
+        }
+        const auto found = m_state->sessions.find(transition->nonce);
+        if (found == m_state->sessions.end() || !found->second || found->second->closed ||
+            found->second->session != session || found->second->home != json_util::text(event.body, "kimi_code_home"))
+        {
+            return result;
+        }
+        result.classification = addon::Classification::EVENT;
+        observation.attention_request_id = json_util::text(event.body, "id");
+        observation.agent_id             = json_util::text(event.body, "agent_id");
+        observation.attention_transition = event.name == "PermissionRequest"
+            ? addon::Attention_transition::REQUESTED : addon::Attention_transition::RESOLVED;
+        observation.attention_evidence   = addon::Evidence::CONFIRMED;
+    }
+    else
     if (event.name == "SessionStart") {
         const auto home = json_util::text(event.body, "kimi_code_home");
         if (home.empty() || !addon::path_from_utf8(home).is_absolute()) throw std::runtime_error("invalid_kimi_home");
@@ -468,6 +516,9 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
         if (!found->second) {
             auto binding = std::make_shared<Binding>(session, home);
             binding->nonce = request.transition_nonce;
+            if (const auto* frontier = event.body.find("interaction_frontier"); frontier && !frontier->is_null()) {
+                binding->interactions = std::make_unique<Interaction_reader>(session, *frontier);
+            }
             m_state->sessions[request.transition_nonce] = std::move(binding);
         }
         result.classification = addon::Classification::TRANSITION;
@@ -558,6 +609,21 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
         return;
     }
     if (context.request().operation == "classify_event") {
+        if (context.request().capability.capability_id == addon::k_attention_kind_capability_id) {
+            const auto request = addon::decode_attention_classification_request(context.request().payload, &failure);
+            if (!request) {
+                context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
+                return;
+            }
+            addon::Attention_classification_result result{classify(request->base), std::nullopt};
+            if (!result.base.observations.empty() &&
+                result.base.observations.front().attention_transition != addon::Attention_transition::NONE)
+            {
+                result.attention_kind = addon::Attention_kind{0, "permission"};
+            }
+            context.succeed(addon::encode_attention_classification_result(result));
+            return;
+        }
         const auto request = addon::decode_classify_event_request(context.request().payload, &failure);
         if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
         context.succeed(addon::encode_classify_event_result(classify(*request)));

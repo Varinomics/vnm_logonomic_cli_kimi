@@ -4,13 +4,13 @@
     "turn_origin_correlation": "unsupported",
     "features": {
       "subagents": "supported",
-      "attention": "unsupported",
+      "attention": "supported",
       "root_turn_completion": "unsupported",
       "blockable_completion": "unsupported",
       "confirmed_phase_status": "unsupported",
       "root_turn_start": "unsupported",
       "cooperative_description": "unsupported",
-      "paired_attention": "unsupported"
+      "paired_attention": "supported"
     },
     "profile_id": "kimi-agent-wire",
     "observation": "continuous"
