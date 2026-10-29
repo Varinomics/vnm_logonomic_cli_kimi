@@ -1,5 +1,7 @@
 # Kimi CLI add-on for Logonomic
 
+[![Provider CI](https://github.com/Varinomics/vnm_logonomic_cli_kimi/actions/workflows/ci.yml/badge.svg?branch=master&event=workflow_dispatch)](https://github.com/Varinomics/vnm_logonomic_cli_kimi/actions/workflows/ci.yml)
+
 This standalone C++20 package supplies Kimi launcher discovery, account selection,
 interactive launch and exact resume, delegated ACP implementation sessions, quota,
 historical token usage, hook delivery, and continuous Agent lifecycle observation.
