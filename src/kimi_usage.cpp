@@ -414,7 +414,9 @@ Json optional_document(const fs::path& path, bool* missing = nullptr)
 
 std::string recorded_cwd(const fs::path& session, const Json& workspaces)
 {
-    const auto state = json_util::text(optional_document(session / "state.json"), "cwd");
+    const auto metadata = optional_document(session / "state.json");
+    auto state = json_util::text(metadata, "cwd");
+    if (!metadata.find("cwd")) state = json_util::text(metadata, "workDir");
     const auto mapped = json_util::text(json_util::member(json_util::member(workspaces, "workspaces"), path_string(session.parent_path().filename())), "root");
     if (!state.empty() && !mapped.empty() && path_key(addon::path_from_utf8(state)) != path_key(addon::path_from_utf8(mapped))) return {};
     return state.empty() ? mapped : state;
@@ -527,16 +529,27 @@ std::optional<Json> fork_session_identity(const fs::path& wire, bool& missing_st
     const auto session = wire.parent_path().parent_path().parent_path();
     const auto state = optional_document(session / "state.json", &missing_state);
     const auto id = path_string(session.filename());
+    const auto* version = state.find("version");
+    const bool legacy = !version || (version->is_integer() && version->as_integer() == 1);
+    const auto* stored_id = state.find("id");
     const auto* created = state.find("createdAt");
     const auto* parent = state.find("forkedFrom");
-    if (json_util::text(state, "id") != id || !created || !created->is_integer() || created->as_integer() < 0 ||
+    std::optional<std::int64_t> created_at;
+    if (created && created->is_integer()) created_at = created->as_integer();
+    else if (legacy && created && created->is_string() && created->as_string().ends_with('Z')) {
+        // Native legacy metadata uses an ISO UTC date and the containing
+        // directory's identity. Kimi normalizes both when opening that session.
+        created_at = addon::parse_native_usage_timestamp(created->as_string());
+    }
+    if ((stored_id ? json_util::text(state, "id") != id : !legacy || !created || !created->is_string()) ||
+        !created_at || *created_at < 0 ||
         (parent && !parent->is_string())) return std::nullopt;
     const auto parent_id = parent ? parent->as_string() : std::string{};
     const auto parent_path = addon::path_from_utf8(parent_id);
     if (!parent_id.empty() && (parent_path.is_absolute() || parent_path.has_parent_path() ||
             parent_id == "." || parent_id == "..")) return std::nullopt;
     return json_util::object({{"session_id", Json(id)}, {"parent_session_id", Json(parent_id)},
-        {"created_at", *created}, {"agent_id", Json(path_string(wire.parent_path().filename()))}});
+        {"created_at", Json(*created_at)}, {"agent_id", Json(path_string(wire.parent_path().filename()))}});
 }
 
 bool same_counted_usage(const addon::Usage_record& observed, const addon::Usage_record& accepted)

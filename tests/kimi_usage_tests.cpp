@@ -142,6 +142,81 @@ void native_session(const fs::path& session, std::string_view parent = {}, std::
     write(session / "state.json", addon::serialize_json(state));
 }
 
+void legacy_metadata_contract()
+{
+    Workspace workspace;
+    const auto profile = workspace.path / "native-profile";
+    const auto storage = workspace.path / "cache";
+    const auto repository = workspace.path / "repository";
+    const auto session = profile / "sessions/workspace/legacy";
+    const auto modern = profile / "sessions/workspace/modern";
+    fs::create_directories(storage);
+    fs::create_directories(repository / ".git");
+    auto state = json_util::object({{"createdAt", addon::Json_value("2026-09-12T07:59:59.000Z")},
+        {"updatedAt", addon::Json_value("2026-09-12T08:00:00.000Z")},
+        {"agents", addon::Json_value::object()}, {"custom", addon::Json_value::object()},
+        {"workDir", addon::Json_value(kimi::path_string(repository))}});
+    write(session / "state.json", addon::serialize_json(state));
+    write(session / "agents/main/wire.jsonl",
+        "{\"type\":\"metadata\",\"protocol_version\":\"1.4\",\"created_at\":1789199999000}\n"
+        "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":70}}\n");
+    native_session(modern);
+    write(modern / "agents/main/wire.jsonl",
+        "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":30}}\n");
+    Selected_cache selected(storage);
+    Context context;
+    const auto records = selected.scan(profile, "incremental", context);
+    require(records.size() == 2, "legacy and current session metadata share one first scan");
+    const auto legacy = std::find_if(records.begin(), records.end(), [](const auto& record) {
+        return record.record_id == "kimi:legacy";
+    });
+    require(legacy != records.end() && legacy->total_tokens == 70 && legacy->repository_usage &&
+        legacy->repository_usage->allocations.size() == 1 &&
+        legacy->repository_usage->allocations.front().repository_path == kimi::path_string(repository),
+        "legacy identity and workDir preserve billable history and repository attribution");
+
+    native_session(session, {}, kimi::path_string(repository));
+    const auto migrated = selected.scan(profile, "incremental", context);
+    require(migrated.size() == 2 && migrated[0].total_tokens + migrated[1].total_tokens == 100,
+        "native metadata migration preserves the accepted session identity and counts");
+
+    for (const auto& [field, value] : std::vector<std::pair<std::string, addon::Json_value>>{
+             {"id", addon::Json_value("another-session")}, {"version", addon::Json_value(2)},
+             {"version", addon::Json_value(3)}, {"createdAt", addon::Json_value("2026-02-30T07:59:59.000Z")},
+             {"createdAt", addon::Json_value("2026-09-12T07:59:59")},
+             {"forkedFrom", addon::Json_value("../outside")}, {"forkedFrom", addon::Json_value("missing")}})
+    {
+        auto invalid = state;
+        invalid.set(field, value);
+        write(session / "state.json", addon::serialize_json(invalid));
+        bool rejected = false;
+        try { selected.scan(profile, "reset", context); }
+        catch (const kimi::Usage_ownership_unavailable&) { rejected = true; }
+        require(rejected, "legacy normalization cannot invent identity, time, or ancestry");
+    }
+}
+
+int observe_history(const fs::path& profile)
+{
+    // This opt-in diagnostic reads native history and writes only its disposable cache.
+    // Never include native paths, session identities, or exception text in its output.
+    try {
+        Workspace workspace;
+        Selected_cache selected(workspace.path);
+        Context context;
+        const auto records = selected.scan(profile, "incremental", context);
+        std::uint64_t total = 0;
+        for (const auto& record : records) total += record.total_tokens;
+        std::cout << "history observation: files=" << context.progress_current << ", records=" << records.size()
+            << ", total_tokens=" << total << '\n';
+        return 0;
+    }
+    catch (const kimi::Usage_ownership_unavailable&) { std::cerr << "usage_ownership_unavailable\n"; }
+    catch (const kimi::Usage_observation_unsettled&) { std::cerr << "usage_observation_unsettled\n"; }
+    catch (const std::exception&) { std::cerr << "history observation failed\n"; }
+    return 1;
+}
+
 void accounts_contract()
 {
     Workspace workspace;
@@ -769,6 +844,9 @@ void live_file_count_contract()
 int main(int argc, char** argv)
 {
     try {
+        if (argc == 3 && std::string_view(argv[1]) == "--observe-history") {
+            return observe_history(addon::path_from_utf8(argv[2]));
+        }
         if (argc == 2) {
             const std::string_view selected = argv[1];
             if (selected == "--large-data") {
@@ -790,6 +868,7 @@ int main(int argc, char** argv)
         fork_ownership_contract();
         fork_chains_contract();
         raw_fork_mode_contract();
+        legacy_metadata_contract();
         accounts_contract();
         scan_contract();
         timestamp_cache_identity_contract();

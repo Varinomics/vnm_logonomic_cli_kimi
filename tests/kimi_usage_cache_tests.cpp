@@ -827,6 +827,18 @@ void owned_event_contract(const fs::path& package, const fs::path& fixture)
             write(session / "state.json", addon::serialize_json(state));
         }
     }
+    // The native legacy schema binds its session ID through the directory and
+    // stores ISO dates. It remains a valid ancestor for current forked sessions.
+    for (const auto& session : {parent, zero}) {
+        auto legacy = addon::Json_value::object();
+        legacy.set("createdAt", addon::Json_value("2026-09-12T07:59:59.000Z"));
+        legacy.set("updatedAt", addon::Json_value("2026-09-12T08:00:00.000Z"));
+        legacy.set("workDir", addon::Json_value(addon::path_to_utf8(repository / "")));
+        legacy.set("agents", addon::Json_value::object());
+        legacy.set("custom", addon::Json_value::object());
+        if (session == zero) legacy.set("forkedFrom", addon::Json_value("parent"));
+        write(session / "state.json", addon::serialize_json(legacy));
+    }
     write(wire_path(parent), inherited);
     write(wire_path(child), inherited + marker + usage(300, 1789200002000ull));
     write(wire_path(zero), inherited + marker);
