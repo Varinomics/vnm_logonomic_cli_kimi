@@ -8,6 +8,7 @@
 #include <iterator>
 #include <map>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -149,7 +150,9 @@ std::string hook_entry(std::string_view event, int timeout)
         "\ncommand = " + toml_string(command) + "\ntimeout = " + std::to_string(timeout) + "\n";
 }
 
-std::string updated_config(std::string config)
+namespace {
+
+std::string updated_hooks(std::string config, bool start_only)
 {
     const auto document = toml::parse(config);
     const Source_offsets offsets(config);
@@ -172,6 +175,9 @@ std::string updated_config(std::string config)
             std::pair{"SessionStart", 18}, {"SessionEnd", 13}, {"UserPromptSubmit", 23},
             {"PermissionRequest", 13}, {"PermissionResult", 13}})
     {
+        if (start_only && std::string_view(event) != "SessionStart") {
+            continue;
+        }
         const auto marker = std::string("# Logonomic managed Kimi hook: ") + event;
         bool found = false;
         std::size_t cursor = config.starts_with("\xEF\xBB\xBF") ? 3 : 0;
@@ -240,10 +246,17 @@ std::string updated_config(std::string config)
     return config;
 }
 
+} // namespace
+
+std::string updated_config(std::string config)
+{
+    return updated_hooks(std::move(config), false);
+}
+
 bool has_start_hook(const std::string& home)
 {
     const auto config = read_config(addon::path_from_utf8(home) / "config.toml");
-    return updated_config(config) == config;
+    return updated_hooks(config, true) == config;
 }
 
 } // namespace kimi

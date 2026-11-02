@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -280,7 +281,94 @@ void launch_disposition()
         "an inline profile assignment remains unchanged and cannot claim an integrated account switch");
 }
 
-void resume_policy(const char* executable, const char* help, bool admitted = true)
+std::string three_hook_configuration()
+{
+    // Frozen profile syntax preceding the permission-hook addition, from
+    // 7bc7f64b245a57d9f394ec36262b722c66300ab9. updated_config would repair the
+    // exact upgrade condition under test before preparation could inspect it.
+#ifdef _WIN32
+    const std::string command = R"toml(command = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { & (Join-Path $env:LOGONOMIC_PROVIDER_HELPERS_DIR 'kimi_helper.exe') }\"")toml";
+#else
+    const std::string command = R"toml(command = "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then \"$LOGONOMIC_PROVIDER_HELPERS_DIR/kimi_helper\"; fi")toml";
+#endif
+    return "\n# Logonomic managed Kimi hook: SessionStart\n[[hooks]]\nevent = \"SessionStart\"\n" +
+        command + "\ntimeout = 18\n" +
+        "\n# Logonomic managed Kimi hook: SessionEnd\n[[hooks]]\nevent = \"SessionEnd\"\n" +
+        command + "\ntimeout = 13\n" +
+        "\n# Logonomic managed Kimi hook: UserPromptSubmit\n[[hooks]]\nevent = \"UserPromptSubmit\"\n" +
+        command + "\ntimeout = 23\n";
+}
+
+void start_hook_validation()
+{
+    namespace fs = std::filesystem;
+    const auto scratch = fs::temp_directory_path() / ("kimi-start-hook-" + addon::random_nonce_hex());
+    fs::create_directories(scratch);
+    class Cleanup
+    {
+    public:
+        fs::path path;
+        ~Cleanup()
+        {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } cleanup{scratch};
+    const auto home = addon::path_to_utf8(scratch);
+    const auto check = [
+            &scratch, &home
+        ](
+            const std::string& config, bool expected, const char* description)
+        {
+            {
+                std::ofstream output(scratch / "config.toml", std::ios::binary);
+                output << config;
+                output.close();
+                require(output.good(), "start-hook fixture must be completely written");
+            }
+            require(kimi::has_start_hook(home) == expected, description);
+        };
+
+    const auto three_hooks = three_hook_configuration();
+    const auto start = three_hooks.substr(0, three_hooks.find("\n# Logonomic managed Kimi hook: SessionEnd"));
+    check({}, false, "a missing SessionStart hook must remain unavailable");
+    check(start, true, "SessionStart admission does not depend on unrelated lifecycle hooks");
+    check(three_hooks, true, "the installed three-hook profile must remain resumable");
+    check(kimi::updated_config(three_hooks), true, "complete managed installation must remain resumable");
+    std::string crlf;
+    for (const char character : start) {
+        if (character == '\n') {
+            crlf += '\r';
+        }
+        crlf += character;
+    }
+    check("description = '作業設定'\r\n" + crlf, true,
+        "CRLF and user Unicode text must not change installed hook admission");
+    check(three_hooks + kimi::hook_entry("PermissionRequest", 13) + "matcher = 'Shell'\n", true,
+        "unrelated permission-hook modifications must not veto an intact SessionStart route");
+    check(start + start, false, "duplicate managed SessionStart hooks still require repair");
+    check("description = '''\n" + start + "'''\n", false,
+        "a marker inside a string cannot establish an installed hook");
+
+    auto wrong_command = start;
+    wrong_command.replace(wrong_command.find("kimi_helper"), std::string("kimi_helper").size(), "other_helper");
+    check(wrong_command, false, "a different helper command must not establish the required route");
+    auto wrong_timeout = start;
+    wrong_timeout.replace(wrong_timeout.find("timeout = 18"), std::string("timeout = 18").size(), "timeout = 1");
+    check(wrong_timeout, false, "the SessionStart delivery budget must remain validated");
+    bool modified_refused = false;
+    try {
+        check(start + "matcher = 'Shell'\n", false, "modified SessionStart must not be admitted");
+    }
+    catch (const std::runtime_error& error) {
+        modified_refused = std::string(error.what()) == "managed_hook_modified";
+    }
+    require(modified_refused, "extra fields on the required managed hook must retain explicit refusal");
+}
+
+void resume_policy(
+    const char* executable, const char* help, bool admitted = true,
+    const std::optional<std::string>& configuration = std::nullopt)
 {
     namespace fs = std::filesystem;
     const auto scratch = fs::temp_directory_path() / ("kimi-resume-" + addon::random_nonce_hex());
@@ -294,9 +382,10 @@ void resume_policy(const char* executable, const char* help, bool admitted = tru
     const auto fake = root / "kimi";
 #endif
     fs::copy_file(fs::absolute(executable), fake);
+    const auto original_configuration = configuration ? *configuration : kimi::updated_config("");
     {
         std::ofstream config(root / "selected" / "config.toml", std::ios::binary);
-        config << kimi::updated_config("");
+        config << original_configuration;
         require(bool(config), "resume fixture configuration must be written");
     }
     addon::Resume_prepare_request request;
@@ -343,6 +432,9 @@ void resume_policy(const char* executable, const char* help, bool admitted = tru
     require(result->process.argv.back() == "session-selected" &&
         addon::validate_resume_acknowledgment(request.resume_record, result->acknowledgment, &failure),
         "resume must preserve the selected native session identity");
+    std::ifstream persisted(root / "selected" / "config.toml", std::ios::binary);
+    const std::string unchanged{std::istreambuf_iterator<char>(persisted), std::istreambuf_iterator<char>()};
+    require(unchanged == original_configuration, "resume admission must not rewrite the selected profile");
 }
 
 } // namespace
@@ -370,6 +462,8 @@ int main(int argc, char** argv)
         for (const auto* help : {"  --session id\n", "  --session [id]suffix\n", "  --help\n"}) {
             resume_policy(argv[0], help, false);
         }
+        resume_policy(argv[0], "  --session [id]\n", true, three_hook_configuration());
+        start_hook_validation();
         return 0;
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
