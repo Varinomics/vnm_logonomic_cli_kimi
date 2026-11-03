@@ -5,6 +5,7 @@
 
 #include <logonomic_cli_addon_test/invocation_context.h>
 
+#include <logonomic_cli_addon/json.h>
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
@@ -304,8 +305,10 @@ void profile_selector_consistency()
 #else
     const char* home_name = "HOME";
 #endif
+    int selector_case = 0;
     const auto check = [&](addon::Launch_environment environment, const std::string& fallback,
                            const fs::path& expected, bool prepare_original_selector) {
+        ++selector_case;
         addon::Accounts_launcher_request accounts_request;
         accounts_request.launcher = {"kimi", addon::k_runner_direct, ""};
         accounts_request.launch_environment = environment;
@@ -318,9 +321,23 @@ void profile_selector_consistency()
         addon::Contract_failure failure;
         const auto accounts = discovery.m_result ? addon::decode_accounts_result(*discovery.m_result, &failure) : std::nullopt;
         const auto expected_text = addon::path_to_utf8(expected);
-        require(accounts && !accounts->empty() && accounts->front().profile_path == expected_text &&
-            accounts->front().adapter_account_key == kimi::account_key(expected),
-            "discovery must resolve the managed-configuration v1 selector");
+        const auto expected_key  = kimi::account_key(expected);
+        const bool matches =
+            accounts && !accounts->empty()                  &&
+            accounts->front().profile_path == expected_text &&
+            accounts->front().adapter_account_key == expected_key;
+        if (!matches) {
+            std::cerr
+                << "selector_case=" << selector_case
+                << "\nexpected_profile_path=" << addon::serialize_json(addon::Json_value(expected_text))
+                << "\nnormalized_expected_profile_path="
+                << addon::serialize_json(addon::Json_value(addon::path_to_utf8(expected.lexically_normal())))
+                << "\nexpected_account_key=" << expected_key
+                << "\ndecode_failure=" << failure.reason_code << ": " << failure.detail
+                << "\ndiscovery="
+                << (discovery.m_result ? addon::serialize_json(*discovery.m_result) : "no result") << '\n';
+        }
+        require(matches, "discovery must resolve the managed-configuration v1 selector");
         if (expected == selected) {
             require(accounts->size() == 2 && accounts->at(1).profile_path == addon::path_to_utf8(sibling),
                 "discovery must keep internal spaces and omit siblings that v1 would trim into another path");
@@ -370,7 +387,7 @@ void profile_selector_consistency()
     environment.effective_environment.set(home_name, addon::Json_value(""));
     check(environment, addon::path_to_utf8(root / "fallback"), selected, true);
     environment.effective_environment.erase(home_name);
-    check(environment, addon::path_to_utf8(root / "fallback"), root / "fallback/.kimi-code", false);
+    check(environment, addon::path_to_utf8(root / "fallback"), root / "fallback" / ".kimi-code", false);
 #ifndef _WIN32
     require(fs::is_directory(unselectable), "discovery must not rename or remove an unselectable sibling");
 #endif
