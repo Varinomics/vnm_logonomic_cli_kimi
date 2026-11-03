@@ -24,7 +24,7 @@ foreach(entry RANGE 0 ${last})
 endforeach()
 
 foreach(executable IN ITEMS
-        adapter/kimi_adapter helpers/kimi_helper helpers/kimi_launch_bridge helpers/kimi_quota_probe)
+        adapter/kimi_adapter adapter/kimi_helper adapter/kimi_launch_bridge adapter/kimi_quota_probe)
     file(GET_RUNTIME_DEPENDENCIES EXECUTABLES "${package}/${executable}"
         PRE_EXCLUDE_REGEXES "^/System/Library/" "^/usr/lib/"
         RESOLVED_DEPENDENCIES_VAR resolved UNRESOLVED_DEPENDENCIES_VAR unresolved

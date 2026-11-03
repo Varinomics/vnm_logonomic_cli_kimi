@@ -287,9 +287,9 @@ std::string three_hook_configuration()
     // 7bc7f64b245a57d9f394ec36262b722c66300ab9. updated_config would repair the
     // exact upgrade condition under test before preparation could inspect it.
 #ifdef _WIN32
-    const std::string command = R"toml(command = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { & (Join-Path $env:LOGONOMIC_PROVIDER_HELPERS_DIR 'kimi_helper.exe') }\"")toml";
+    const std::string command = R"toml(command = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { & (Join-Path (Split-Path -LiteralPath $env:LOGONOMIC_PROVIDER_HELPERS_DIR) 'adapter/kimi_helper.exe') }\"")toml";
 #else
-    const std::string command = R"toml(command = "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then \"$LOGONOMIC_PROVIDER_HELPERS_DIR/kimi_helper\"; fi")toml";
+    const std::string command = R"toml(command = "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then \"${LOGONOMIC_PROVIDER_HELPERS_DIR%/*}/adapter/kimi_helper\"; fi")toml";
 #endif
     return "\n# Logonomic managed Kimi hook: SessionStart\n[[hooks]]\nevent = \"SessionStart\"\n" +
         command + "\ntimeout = 18\n" +

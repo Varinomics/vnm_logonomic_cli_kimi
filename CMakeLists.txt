@@ -161,7 +161,7 @@ target_link_libraries(kimi_contract_tests PRIVATE kimi_provider)
 kimi_target(kimi_contract_tests)
 add_test(NAME kimi_contract_tests COMMAND kimi_contract_tests)
 add_executable(kimi_permission_tests tests/kimi_permission_tests.cpp)
-target_link_libraries(kimi_permission_tests PRIVATE kimi_provider)
+target_link_libraries(kimi_permission_tests PRIVATE kimi_provider tomlplusplus::tomlplusplus)
 kimi_target(kimi_permission_tests)
 add_dependencies(kimi_permission_tests kimi_package)
 add_test(NAME kimi_permission_tests COMMAND kimi_permission_tests "${KIMI_PACKAGE_DIRECTORY}")
@@ -191,6 +191,10 @@ kimi_target(kimi_usage_correction_tests)
 add_test(NAME kimi_usage_correction_tests COMMAND kimi_usage_correction_tests)
 add_test(NAME kimi_package_validation COMMAND logonomic_cli_addon_validate "${KIMI_PACKAGE_DIRECTORY}" --platform "${KIMI_PLATFORM}")
 add_test(NAME kimi_package_conformance COMMAND logonomic_cli_addon_conformance "${KIMI_PACKAGE_DIRECTORY}")
+add_test(NAME kimi_package_runtime_layout
+    COMMAND "${CMAKE_COMMAND}" "-DPACKAGE=${KIMI_PACKAGE_DIRECTORY}"
+        "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_runtime_layout_tests.cmake")
 set_tests_properties(kimi_contract_tests kimi_package_validation kimi_package_conformance PROPERTIES TIMEOUT 120)
 if(MSVC OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     add_test(NAME kimi_package_runtime_closure
@@ -237,6 +241,7 @@ if(WIN32)
     # These executables run from the build tree, outside the assembled package.
     # Clean copied-package qualification supplies its own runtime environment.
     set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests kimi_permission_tests
+        kimi_quota_startup_tests kimi_quota_output_tests
         kimi_usage_tests kimi_usage_correction_tests ${KIMI_USAGE_CACHE_PHASE_TESTS} kimi_acp_causal_tests kimi_quota_direct_tests
         kimi_continuation_tests
         kimi_wire_cancellation_tests PROPERTIES

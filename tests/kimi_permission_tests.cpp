@@ -1,5 +1,6 @@
 #include "kimi_json.h"
 #include "kimi_interactions.h"
+#include "kimi_config.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/helper_client.h>
@@ -10,6 +11,7 @@
 #include <logonomic_cli_addon/lifecycle_events.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <toml++/toml.hpp>
 
 #include <QByteArray>
 #include <QChar>
@@ -130,13 +132,19 @@ addon::Provider_event relay(
     environment.insert(QStringLiteral("KIMI_CODE_HOME"), QString::fromStdString(addon::path_to_utf8(home)));
     environment.insert(QStringLiteral("KIMI_TEST_EVENT_CAPTURE"), QString::fromStdString(addon::path_to_utf8(capture)));
 
-    auto helper = package / "helpers/kimi_helper";
-#ifdef _WIN32
-    helper += ".exe";
-#endif
+    const auto hooks = toml::parse(kimi::hook_entry("PermissionRequest", 13));
+    const auto command = hooks["hooks"][0]["command"].value<std::string>();
+    require(command.has_value(), "managed hook command is missing");
     QProcess process;
     process.setProcessEnvironment(environment);
-    process.setProgram(QString::fromStdString(addon::path_to_utf8(helper)));
+#ifdef _WIN32
+    auto arguments = QProcess::splitCommand(QString::fromStdString(*command));
+    process.setProgram(arguments.takeFirst());
+    process.setArguments(arguments);
+#else
+    process.setProgram(QStringLiteral("/bin/sh"));
+    process.setArguments({QStringLiteral("-c"), QString::fromStdString(*command)});
+#endif
     process.start();
     require(process.waitForStarted(5000), "packaged helper did not start");
     const auto bytes = QByteArray::fromStdString(addon::serialize_json(payload));

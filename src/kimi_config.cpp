@@ -142,9 +142,12 @@ std::string code_home(const Environment& environment, std::string_view working_d
 std::string hook_entry(std::string_view event, int timeout)
 {
 #ifdef _WIN32
-    const std::string command = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { & (Join-Path $env:LOGONOMIC_PROVIDER_HELPERS_DIR 'kimi_helper.exe') }\"";
+    const std::string command = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \""
+        "if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { "
+        "& (Join-Path (Split-Path -LiteralPath $env:LOGONOMIC_PROVIDER_HELPERS_DIR) 'adapter/kimi_helper.exe') }\"";
 #else
-    const std::string command = "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then \"$LOGONOMIC_PROVIDER_HELPERS_DIR/kimi_helper\"; fi";
+    const std::string command = "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then "
+        "\"${LOGONOMIC_PROVIDER_HELPERS_DIR%/*}/adapter/kimi_helper\"; fi";
 #endif
     return "# Logonomic managed Kimi hook: " + std::string(event) + "\n[[hooks]]\nevent = " + toml_string(event) +
         "\ncommand = " + toml_string(command) + "\ntimeout = " + std::to_string(timeout) + "\n";

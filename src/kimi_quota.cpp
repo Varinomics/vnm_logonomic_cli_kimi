@@ -250,9 +250,9 @@ void handle_quota(addon::Invocation_context& context)
         set_environment(environment, "KIMI_CODE_HOME", home);
         addon::Structured_prepare_result result;
 #ifdef _WIN32
-        result.process.executable = "helpers/kimi_quota_probe.exe";
+        result.process.executable = "adapter/kimi_quota_probe.exe";
 #else
-        result.process.executable = "helpers/kimi_quota_probe";
+        result.process.executable = "adapter/kimi_quota_probe";
 #endif
         result.process.argv = {"--kimi-program", path_string(*program), "--kimi-code-home", home};
         result.process.environment = std::move(environment);

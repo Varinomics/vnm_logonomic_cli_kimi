@@ -23,9 +23,9 @@ namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 
 #ifdef _WIN32
-constexpr const char* k_bridge = "helpers/kimi_launch_bridge.exe";
+constexpr const char* k_bridge = "adapter/kimi_launch_bridge.exe";
 #else
-constexpr const char* k_bridge = "helpers/kimi_launch_bridge";
+constexpr const char* k_bridge = "adapter/kimi_launch_bridge";
 #endif
 
 void unavailable(addon::Invocation_context& context)
