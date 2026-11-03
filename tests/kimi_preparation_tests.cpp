@@ -281,6 +281,101 @@ void launch_disposition()
         "an inline profile assignment remains unchanged and cannot claim an integrated account switch");
 }
 
+void profile_selector_consistency()
+{
+    namespace fs = std::filesystem;
+    const auto scratch = fs::temp_directory_path() / ("kimi-profiles-" + addon::random_nonce_hex());
+    fs::create_directories(scratch / ".kimi-code");
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{scratch};
+    const auto root = fs::canonical(scratch);
+    const auto selected = root / ".kimi-code";
+    const auto sibling = root / ".kimi-code work";
+    fs::create_directories(sibling / "credentials");
+    std::ofstream(sibling / "credentials/kimi-code.json") << "{}";
+#ifndef _WIN32
+    const auto unselectable = root / ".kimi-code ";
+    fs::create_directories(unselectable / "credentials");
+    std::ofstream(unselectable / "credentials/kimi-code.json") << "{}";
+#endif
+    const auto root_text = addon::path_to_utf8(root);
+    const auto selected_text = addon::path_to_utf8(selected);
+#ifdef _WIN32
+    const char* home_name = "USERPROFILE";
+#else
+    const char* home_name = "HOME";
+#endif
+    const auto check = [&](addon::Launch_environment environment, const std::string& fallback,
+                           const fs::path& expected, bool prepare_original_selector) {
+        addon::Accounts_launcher_request accounts_request;
+        accounts_request.launcher = {"kimi", addon::k_runner_direct, ""};
+        accounts_request.launch_environment = environment;
+        accounts_request.default_home_fallback = fallback;
+        accounts_request.normalization_directory = root_text;
+        Context discovery;
+        discovery.m_request = {"discover", {"accounts", 2}, "discover",
+            addon::encode_accounts_launcher_request(accounts_request)};
+        kimi::handle_accounts(discovery);
+        addon::Contract_failure failure;
+        const auto accounts = discovery.m_result ? addon::decode_accounts_result(*discovery.m_result, &failure) : std::nullopt;
+        const auto expected_text = addon::path_to_utf8(expected);
+        require(accounts && !accounts->empty() && accounts->front().profile_path == expected_text &&
+            accounts->front().adapter_account_key == kimi::account_key(expected),
+            "discovery must resolve the managed-configuration v1 selector");
+        if (expected == selected) {
+            require(accounts->size() == 2 && accounts->at(1).profile_path == addon::path_to_utf8(sibling),
+                "discovery must keep internal spaces and omit siblings that v1 would trim into another path");
+        }
+        Context resolution;
+        resolution.m_request = discovery.m_request;
+        resolution.m_request.operation = "resolve";
+        kimi::handle_accounts(resolution);
+        const auto resolved = resolution.m_result
+            ? addon::decode_account_resolution_result(*resolution.m_result, &failure) : std::nullopt;
+        require(resolved && resolved->adapter_account_key == accounts->front().adapter_account_key,
+            "resolve must identify the same profile as discovery");
+        addon::Prepare_request prepare;
+        prepare.launcher = accounts_request.launcher;
+        prepare.launcher_argv = {"kimi"};
+        prepare.working_directory = root_text;
+        prepare.account_context = addon::Account_context{2,
+            accounts->front().adapter_account_key, accounts->front().profile_path};
+        // The host binds the discovered path before preparing a selected
+        // account. Also exercise the inherited selector where it is complete.
+        for (const bool bind : {false, true}) {
+            if (!bind && !prepare_original_selector) continue;
+            if (bind) environment.effective_environment.set("KIMI_CODE_HOME", addon::Json_value(expected_text));
+            prepare.launch_environment = environment;
+            Context preparation;
+            preparation.m_request = {"prepare", {"launch-preparation", 3}, "prepare",
+                addon::encode_prepare_request(prepare, 3)};
+            kimi::handle_preparation(preparation);
+            const auto patch = preparation.m_result
+                ? addon::decode_launch_patch(*preparation.m_result, &failure, 3) : std::nullopt;
+            require(patch && patch->apply_managed_configuration && patch->account_context &&
+                patch->account_context->adapter_account_key == accounts->front().adapter_account_key &&
+                patch->account_context->profile_path == accounts->front().profile_path,
+                "preparation must retain and accept the resolved account");
+        }
+    };
+    for (const auto& selector : {" \t" + selected_text + " \n", std::string(" .kimi-code\t"),
+            std::string("\xc2\xa0") + selected_text + "\xe2\x80\x83"})
+    {
+        check(native_environment(selector), {}, selected, true);
+    }
+    auto environment = native_environment(" \t\n");
+    environment.effective_environment.set(home_name, addon::Json_value(root_text));
+    check(environment, {}, selected, true);
+    environment.effective_environment.erase("KIMI_CODE_HOME");
+    check(environment, {}, selected, true);
+    environment.effective_environment.set(home_name, addon::Json_value(""));
+    check(environment, addon::path_to_utf8(root / "fallback"), selected, true);
+    environment.effective_environment.erase(home_name);
+    check(environment, addon::path_to_utf8(root / "fallback"), root / "fallback/.kimi-code", false);
+#ifndef _WIN32
+    require(fs::is_directory(unselectable), "discovery must not rename or remove an unselectable sibling");
+#endif
+}
+
 std::string three_hook_configuration()
 {
     // Frozen profile syntax preceding the permission-hook addition, from
@@ -454,6 +549,7 @@ int main(int argc, char** argv)
         required_control_reaches_native_admission(argv[0]);
         kimi_tool_names();
         launch_disposition();
+        profile_selector_consistency();
         for (const auto* help : {"  --session [id]\n", "  --session [id]\r\n",
                 "  --session [id]", "  --session [id]  Resume a session\n"})
         {

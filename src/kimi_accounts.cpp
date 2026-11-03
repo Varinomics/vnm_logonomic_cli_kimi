@@ -27,23 +27,6 @@ fs::path normalize(const fs::path& profile)
     return fs::absolute(profile).lexically_normal();
 }
 
-fs::path selected_profile(const addon::Launch_environment& launch, std::string_view fallback, std::string_view normalization_directory)
-{
-    const auto environment = environment_pairs(launch.effective_environment);
-    auto profile = environment_value(environment, "KIMI_CODE_HOME");
-    if (profile.empty()) {
-        auto home = environment_value(environment, launch.platform_id == "windows-x86_64" ? "USERPROFILE" : "HOME");
-        if (home.empty()) home = environment_value(environment, "HOME");
-        if (home.empty()) home = std::string(fallback);
-        if (home.empty()) throw std::runtime_error("profile_unavailable");
-        profile = path_string(addon::path_from_utf8(home) / ".kimi-code");
-    }
-    const auto path = addon::path_from_utf8(profile);
-    const auto resolved = path.is_absolute() ? path : addon::path_from_utf8(normalization_directory) / path;
-    if (!resolved.is_absolute()) throw std::runtime_error("profile_normalization_unavailable");
-    return normalize(resolved);
-}
-
 addon::Account_record account(const fs::path& profile)
 {
     addon::Account_record result;
@@ -60,6 +43,32 @@ addon::Account_record account(const fs::path& profile)
 }
 
 } // namespace
+
+fs::path profile_for_environment(const addon::Launch_environment& launch,
+    std::string_view normalization_directory, std::string_view default_home_fallback)
+{
+    const bool windows = launch.platform_id.starts_with("windows-");
+    const auto value = [&](std::string_view name) -> const addon::Json_value* {
+        for (const auto& entry : launch.effective_environment.as_object()) {
+            if (windows ? lower(entry.name) == lower(std::string(name)) : entry.name == name) {
+                return &entry.value;
+            }
+        }
+        return nullptr;
+    };
+    // Match the declared managed-configuration@1 selector, including the
+    // distinction between an absent platform home and a present empty home.
+    const auto* configured = value("KIMI_CODE_HOME");
+    auto profile = configured ? trim(configured->as_string()) : std::string{};
+    if (profile.empty()) {
+        const auto* home = value(windows ? "USERPROFILE" : "HOME");
+        profile = path_string(addon::path_from_utf8(home ? home->as_string() : default_home_fallback) / ".kimi-code");
+    }
+    const auto path = addon::path_from_utf8(profile);
+    const auto resolved = path.is_absolute() ? path : addon::path_from_utf8(normalization_directory) / path;
+    if (!resolved.is_absolute()) throw std::runtime_error("profile_normalization_unavailable");
+    return normalize(resolved);
+}
 
 std::string account_key(const fs::path& profile)
 {
@@ -89,7 +98,7 @@ fs::path profile_for_context(const addon::Session_launch_context& context)
         return profile;
     }
     if (!context.launch_environment) throw std::runtime_error("launch_environment_unavailable");
-    return selected_profile(*context.launch_environment, {}, context.working_directory);
+    return profile_for_environment(*context.launch_environment, context.working_directory);
 }
 
 void handle_accounts(addon::Invocation_context& context)
@@ -105,7 +114,8 @@ void handle_accounts(addon::Invocation_context& context)
             : addon::encode_account_resolution({std::nullopt}));
         return;
     }
-    const auto selected = selected_profile(input->launch_environment, input->default_home_fallback, input->normalization_directory);
+    const auto selected = profile_for_environment(input->launch_environment,
+        input->normalization_directory, input->default_home_fallback);
     if (context.request().operation == "resolve") {
         context.succeed(addon::encode_account_resolution({account_key(selected)}));
         return;
@@ -133,6 +143,10 @@ void handle_accounts(addon::Invocation_context& context)
         }
         std::sort(candidates.begin(), candidates.end());
         for (const auto& candidate : candidates) {
+            // The host overlays this exact path as the v1 selector. A sibling
+            // whose path changes under trimming cannot be selected faithfully.
+            const auto selector = path_string(candidate);
+            if (trim(selector) != selector) continue;
             if (account_key(candidate) == account_key(selected)) continue;
             if (accounts.size() == 64) throw std::runtime_error("account_inventory_capacity");
             accounts.push_back(account(candidate));

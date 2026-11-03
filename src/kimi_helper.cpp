@@ -1,4 +1,4 @@
-#include "kimi_config.h"
+#include "kimi_accounts.h"
 #include "kimi_guidance.h"
 #include "kimi_interactions.h"
 #include "kimi_json.h"
@@ -88,11 +88,13 @@ int main()
     }
     std::filesystem::path guidance;
     try {
-        kimi::Environment runtime;
+        addon::Launch_environment runtime;
+        runtime.platform_id = addon::host_platform_id();
         for (const auto key : {"KIMI_CODE_HOME", "HOME", "USERPROFILE"}) {
-            if (const auto* value = std::getenv(key)) runtime.emplace_back(key, value);
+            if (const auto* value = std::getenv(key)) runtime.effective_environment.set(key, Json(value));
         }
-        const auto home = kimi::code_home(runtime, kimi::path_string(std::filesystem::current_path()));
+        const auto home = kimi::path_string(kimi::profile_for_environment(
+            runtime, kimi::path_string(std::filesystem::current_path())));
         body.set("kimi_code_home", Json(home));
         if (name == "SessionStart") {
             try {
