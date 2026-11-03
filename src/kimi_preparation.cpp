@@ -34,10 +34,10 @@ void unavailable(addon::Invocation_context& context)
         context.cancel_requested() ? "cancelled" : "launcher_program_unavailable");
 }
 
-std::string bound_home(const Environment& environment, std::string_view working_directory,
+std::string bound_home(const addon::Launch_environment& environment, std::string_view working_directory,
     const std::optional<addon::Account_context>& account)
 {
-    const auto home = code_home(environment, working_directory);
+    const auto home = path_string(profile_for_environment(environment, working_directory));
     if (account && (!account->profile_path ||
         account_key(addon::path_from_utf8(*account->profile_path)) != account->adapter_account_key ||
         account_key(addon::path_from_utf8(home)) != account->adapter_account_key))
@@ -60,8 +60,7 @@ void prepare_launch(addon::Invocation_context& context)
         context.succeed(addon::encode_launch_patch(patch, 3));
         return;
     }
-    const auto environment = environment_pairs(request->launch_environment->effective_environment);
-    try { (void)bound_home(environment, request->working_directory, request->account_context); }
+    try { (void)bound_home(*request->launch_environment, request->working_directory, request->account_context); }
     catch (const std::runtime_error&) {
         context.fail(addon::Result_status::FAILED, "account_context_mismatch"); return;
     }
@@ -98,7 +97,7 @@ void prepare_delegated(addon::Invocation_context& context)
         return;
     }
     auto environment = environment_pairs(request->context.launch_environment->effective_environment);
-    (void)bound_home(environment, request->context.working_directory, request->context.account_context);
+    (void)bound_home(*request->context.launch_environment, request->context.working_directory, request->context.account_context);
     const auto program = verified_program(request->context.launcher, request->context.launcher_argv,
         environment, request->context.working_directory, false, context);
     if (!program) { unavailable(context); return; }
@@ -143,7 +142,7 @@ void prepare_resume(addon::Invocation_context& context)
         return;
     }
     auto environment = environment_pairs(request->context.launch_environment->effective_environment);
-    const auto home = bound_home(environment, request->context.working_directory, request->context.account_context);
+    const auto home = bound_home(*request->context.launch_environment, request->context.working_directory, request->context.account_context);
     const auto program = verified_program(request->context.launcher, request->context.launcher_argv,
         environment, request->context.working_directory, true, context);
     if (!program) { unavailable(context); return; }

@@ -121,24 +121,6 @@ std::string read_config(const fs::path& path)
 
 } // namespace
 
-std::string code_home(const Environment& environment, std::string_view working_directory)
-{
-    auto home = trim(environment_value(environment, "KIMI_CODE_HOME"));
-    if (home.empty()) {
-#ifdef _WIN32
-        home = environment_value(environment, "USERPROFILE");
-#else
-        home = environment_value(environment, "HOME");
-#endif
-        if (home.empty()) throw std::runtime_error("home_unavailable");
-        home = path_string(addon::path_from_utf8(home) / ".kimi-code");
-    }
-    auto path = addon::path_from_utf8(home);
-    if (!path.is_absolute()) path = addon::path_from_utf8(working_directory) / path;
-    if (!path.is_absolute()) throw std::runtime_error("home_not_absolute");
-    return path_string(path.lexically_normal());
-}
-
 std::string hook_entry(std::string_view event, int timeout)
 {
 #ifdef _WIN32
