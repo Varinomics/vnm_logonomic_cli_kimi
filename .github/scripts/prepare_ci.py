@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -80,6 +81,7 @@ def prepare_qt(root, platform):
 def prepare_icu_notices(prefix, destination):
     destination.mkdir(parents=True, exist_ok=True)
     licenses = {}
+    inputs = {}
     for runtime in sorted((prefix / "lib").glob("libicu*.so*")):
         match = re.fullmatch(r"libicu\w+\.so\.(\d+)\.(\d+)", runtime.resolve().name)
         if not match:
@@ -93,6 +95,32 @@ def prepare_icu_notices(prefix, destination):
                     notice.write_bytes(response.read())
             licenses[version] = notice.read_bytes()
         (destination / (runtime.name + ".txt")).write_bytes(licenses[version])
+        real_runtime = runtime.resolve(strict=True)
+        inputs[real_runtime] = (version.replace("-", "."), destination / (runtime.name + ".txt"))
+    return inputs
+
+
+def prepare_linux_runtime_material(prefix, qt_notices, icu_inputs, destination):
+    # This route installs qtbase and ICU from Qt's selected online-installer
+    # kit. Record those acquisition inputs explicitly, before package copying.
+    qt_core = (prefix / "lib/libQt6Core.so.6").resolve(strict=True)
+    selected = [(qt_core, "qtbase", QT_VERSION,
+                 f"https://code.qt.io/cgit/qt/qtbase.git/tag/?h=v{QT_VERSION}",
+                 qt_notices / "LICENSES/LGPL-3.0-only.txt")]
+    for runtime, (version, notice) in sorted(icu_inputs.items()):
+        release = version.replace(".", "-")
+        selected.append((runtime, "icu", version,
+                         f"https://github.com/unicode-org/icu/tree/release-{release}", notice))
+    rows = []
+    for runtime, archive, version, source_url, notice in selected:
+        rows.append({"source": str(runtime), "source_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+                     "binary_package": f"Qt online installer {QT_VERSION} linux_gcc_64 {archive}",
+                     "binary_version": version, "source_package": archive, "source_version": version,
+                     "source_url": source_url, "notice": str(notice.resolve(strict=True)),
+                     "notice_sha256": hashlib.sha256(notice.read_bytes()).hexdigest(),
+                     "acquisition": {"provider": "qt-online-installer", "host": "linux", "target": "desktop",
+                                     "version": QT_VERSION, "architecture": "linux_gcc_64", "archive": archive}})
+    destination.write_text(json.dumps({"schema_version": 1, "inputs": rows}, indent=2) + "\n", encoding="utf-8")
 
 
 def main():
@@ -119,8 +147,11 @@ def main():
     ]
     if args.platform == "linux-x86_64":
         runtime_notices = root / "runtime-notices"
-        prepare_icu_notices(prefix, runtime_notices)
+        icu_inputs = prepare_icu_notices(prefix, runtime_notices)
+        material = root / "linux-runtime-material.json"
+        prepare_linux_runtime_material(prefix, qt_notices, icu_inputs, material)
         cmake_args.append(f"-DKIMI_RUNTIME_NOTICES_DIRECTORY={runtime_notices.as_posix()}")
+        cmake_args.append(f"-DKIMI_LINUX_RUNTIME_MATERIAL={material.as_posix()}")
     with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as output:
         output.write(str(prefix / "bin") + "\n")
     args.output.write_text(json.dumps(cmake_args) + "\n", encoding="utf-8")

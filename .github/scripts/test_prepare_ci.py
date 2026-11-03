@@ -1,6 +1,7 @@
 """Check Kimi's CI dependency preparation without downloading or compiling."""
 
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -81,6 +82,33 @@ class Preparation_tests(unittest.TestCase):
             self.assertIn("-DVNM_FILESYSTEM_OBSERVATION_BUILD_TESTS=OFF", cmake_args)
             self.assertEqual(github_path.read_text(encoding="utf-8"), str(root / "qt/bin") + "\n")
             self.assertNotIn("private-read-token", output.read_text(encoding="utf-8"))
+
+    def test_linux_acquisition_material_binds_qt_and_icu_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix, notices = root / "qt", root / "qtbase"
+            (prefix / "lib").mkdir(parents=True)
+            (notices / "LICENSES").mkdir(parents=True)
+            qt = prefix / "lib/libQt6Core.so.6"
+            icu = prefix / "lib/libicuuc.so.73.2"
+            qt.write_bytes(b"supplied QtCore")
+            icu.write_bytes(b"supplied ICU")
+            (notices / "LICENSES/LGPL-3.0-only.txt").write_text("Qt license")
+            icu_notice = root / "icu-LICENSE"
+            icu_notice.write_text("ICU license")
+            output = root / "material.json"
+            PREPARE.prepare_linux_runtime_material(prefix, notices, {icu: ("73.2", icu_notice)}, output)
+            facts = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(facts["schema_version"], 1)
+            qt_row, icu_row = facts["inputs"]
+            self.assertEqual(qt_row["source"], str(qt.resolve()))
+            self.assertEqual(qt_row["source_sha256"], hashlib.sha256(qt.read_bytes()).hexdigest())
+            self.assertEqual(icu_row["source_version"], "73.2")
+            self.assertEqual(icu_row["source_url"], "https://github.com/unicode-org/icu/tree/release-73-2")
+            self.assertEqual(icu_row["notice_sha256"], hashlib.sha256(icu_notice.read_bytes()).hexdigest())
+            self.assertEqual(icu_row["acquisition"], {"provider": "qt-online-installer", "host": "linux",
+                                                    "target": "desktop", "version": PREPARE.QT_VERSION,
+                                                    "architecture": "linux_gcc_64", "archive": "icu"})
 
 
 if __name__ == "__main__":

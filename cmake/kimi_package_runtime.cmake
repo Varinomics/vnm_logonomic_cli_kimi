@@ -69,6 +69,10 @@ if(MSVC)
     endforeach()
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
+    logonomic_cli_addon_linux_runtime_deployer(KIMI_LINUX_RUNTIME_DEPLOYER)
+    set(KIMI_LINUX_RUNTIME_MATERIAL "" CACHE FILEPATH
+        "Exact prebuilt input provenance from the selected Qt/ICU acquisition")
     find_program(KIMI_PATCHELF_EXECUTABLE patchelf REQUIRED)
     foreach(target kimi_adapter kimi_helper kimi_launch_bridge kimi_quota_probe)
         # Keep the build tree runnable and give the package an exactly known

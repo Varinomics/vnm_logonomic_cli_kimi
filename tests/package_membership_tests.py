@@ -42,7 +42,8 @@ def main() -> int:
     parser.add_argument('--tomlplusplus-source', required=True,
                         help='Already selected local toml++ source; never fetch a second copy')
     for name in ('framework-source', 'dispatch-source', 'vnm-cmake-source',
-                 'observation-prefix', 'dispatch-prefix', 'qtbase-source', 'runtime-notices', 'patchelf'):
+                 'observation-prefix', 'dispatch-prefix', 'qtbase-source', 'runtime-notices',
+                 'linux-runtime-material', 'patchelf'):
         parser.add_argument('--' + name, default='')
     args = parser.parse_args()
     source, sdk = Path(args.source).resolve(), Path(args.sdk).resolve()
@@ -59,7 +60,7 @@ def main() -> int:
         protected_inputs = [source, sdk]
         protected_inputs.append(tomlplusplus)
         for value in (args.framework_source, args.dispatch_source, args.vnm_cmake_source,
-                      args.qtbase_source, args.runtime_notices):
+                      args.qtbase_source, args.runtime_notices, args.linux_runtime_material):
             if value:
                 protected_inputs.append(Path(value).resolve(strict=True))
         for protected in protected_inputs:
@@ -114,6 +115,7 @@ def main() -> int:
                            ('dispatch_prefix', 'vnm_qt_dispatch_DIR'),
                            ('qtbase_source', 'KIMI_QTBASE_SOURCE'),
                            ('runtime_notices', 'KIMI_RUNTIME_NOTICES_DIRECTORY'),
+                           ('linux_runtime_material', 'KIMI_LINUX_RUNTIME_MATERIAL'),
                            ('patchelf', 'KIMI_PATCHELF_EXECUTABLE')):
             value = getattr(args, field)
             if value:
@@ -167,7 +169,8 @@ def main() -> int:
                     require(entries[0]['sha256'].lower() == hashlib.sha256(expected_bytes).hexdigest(),
                             'indexed digest differs from exact source and payload bytes')
             runtime_entries = [entry for entry in index['files']
-                               if entry['resource'].get('provenance') == 'provenance/runtime.txt'
+                               if entry['resource'].get('provenance') in (
+                                   'provenance/runtime.txt', 'provenance/linux-runtime.json')
                                and entry['path'].startswith(('adapter/', 'helpers/'))]
             require(any('Qt6Core' in entry['path'] or Path(entry['path']).name == 'QtCore'
                         for entry in runtime_entries),

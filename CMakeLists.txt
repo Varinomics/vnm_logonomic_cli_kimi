@@ -207,6 +207,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
             "${KIMI_MACOS_RUNTIME_DEPLOYER}")
     set_tests_properties(kimi_macos_runtime_tests PROPERTIES TIMEOUT 30)
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME kimi_linux_runtime_provenance_tests
+        COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_runtime_provenance_tests.py"
+            "${KIMI_LINUX_RUNTIME_DEPLOYER}" "${CMAKE_COMMAND}")
+    set_tests_properties(kimi_linux_runtime_provenance_tests PROPERTIES TIMEOUT 30)
+endif()
 set_tests_properties(kimi_usage_tests PROPERTIES TIMEOUT 180)
 add_executable(kimi_usage_cache_tests tests/kimi_usage_cache_tests.cpp)
 target_link_libraries(kimi_usage_cache_tests PRIVATE
@@ -279,6 +285,7 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
             "--dispatch-prefix=${vnm_qt_dispatch_DIR}"
             "--qtbase-source=${KIMI_QTBASE_SOURCE}"
             "--runtime-notices=${KIMI_RUNTIME_NOTICES_DIRECTORY}"
+            "--linux-runtime-material=${KIMI_LINUX_RUNTIME_MATERIAL}"
             "--patchelf=${KIMI_PATCHELF_EXECUTABLE}"
             "--cmake=${CMAKE_COMMAND}" "--target=kimi_package" "--package-id=logonomic.cli.kimi"
             "--generator=${CMAKE_GENERATOR}" "--config=$<CONFIG>" "--build-type=${CMAKE_BUILD_TYPE}"
