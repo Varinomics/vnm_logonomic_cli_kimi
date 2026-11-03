@@ -1445,7 +1445,7 @@ void reader_cache_contract(const fs::path& package, const fs::path& fixture)
     const auto rows = cache_rows(*accepted.cache_candidate);
     const auto file = std::find_if(rows.begin(), rows.end(), [&](const auto& row) {
         const auto* path = row.find("path");
-        return path && path->as_string() == addon::path_to_utf8(wire);
+        return path && addon::path_from_utf8(path->as_string()).lexically_normal() == wire.lexically_normal();
     });
     check(file != rows.end(), "reader fixture retains one exact physical wire");
     const auto* ownership = file->find("usage-fork-ownership");

@@ -835,7 +835,7 @@ addon::Json_value cached_wire(const Selected_cache& selected, const fs::path& wi
     for (const auto& line : lines_of(selected.path())) {
         const auto row = json_util::parse(line);
         require(row.has_value(), "selected reader cache contains valid JSON rows");
-        if (json_util::text(*row, "path") == kimi::path_string(wire)) {
+        if (addon::path_from_utf8(json_util::text(*row, "path")).lexically_normal() == wire.lexically_normal()) {
             return *row;
         }
     }
