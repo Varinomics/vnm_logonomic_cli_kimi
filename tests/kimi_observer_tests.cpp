@@ -1,5 +1,6 @@
 #include "kimi_observer.h"
 #include "kimi_json.h"
+#include "kimi_interactions.h"
 #include "kimi_launcher.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
@@ -19,6 +20,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -194,6 +196,47 @@ void write_bytes(const fs::path& path, const std::string& bytes, bool append = f
     output << bytes;
     output.close();
     require(static_cast<bool>(output), "wire fixture write must complete");
+}
+
+void investigate_admitted_inventory_growth()
+{
+    // Diagnostic only: report the shared observer's outcome without asserting
+    // that losing lifecycle observation is the desired capacity policy.
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    const auto agents = workspace.m_root / "sessions/workspace/session/agents";
+    const auto wire   = agents / "main/wire.jsonl";
+    fs::create_directories(wire.parent_path());
+    write_bytes(wire, {});
+    const auto service = std::make_shared<observation::Service>();
+    observation::Configuration configuration;
+    configuration.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, configuration);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve inventory diagnostic owner");
+    auto start = start_request(workspace, nonce);
+    start.event.body.set("interaction_frontier",
+        kimi::capture_interaction_frontier(kimi::path_string(workspace.m_root), "session"));
+    observer.classify(start);
+    Observe_window window(observer, workspace, nonce);
+    require(wait_until([&] {
+        const auto statistics = service->statistics();
+        return statistics.dispatches > 0 && statistics.outstanding == 0 &&
+            statistics.pending_registrations == 0 && statistics.retained_events == 0;
+    }), "initial admitted inventory must be acquired before it grows");
+    for (int index = 0; index < 256; ++index) {
+        fs::create_directories(agents / ("child-" + std::to_string(index)));
+    }
+    write_bytes(wire, call_record("child_after_inventory_growth"), true);
+    const bool finished = wait_until([&] {
+        return window.worker.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+    });
+    window.stop();
+    std::cout << "post_admission_inventory=257; observation="
+        << (finished ? (window.context.m_failure.empty() ? "success" : window.context.m_failure)
+                     : "still_active_before_cancellation") << '\n';
+    require(retire(observer, nonce), "diagnostic observation loss must still permit abandoned retirement");
+    require(!poll(observer, nonce), "retirement must release the diagnostic correlation");
 }
 
 void native_wire_reconciliation_preserves_records_and_final_drain()
@@ -666,6 +709,10 @@ int main(int argc, char** argv)
         return 2;
     }
     try {
+        if (std::string_view(argv[1]) == "--investigate-inventory") {
+            investigate_admitted_inventory_growth();
+            return 0;
+        }
         declared_profile_admits_every_shape(addon::path_from_utf8(argv[1]));
         candidates_reclaim_without_tombstones();
         retirement_releases_only_its_owner();

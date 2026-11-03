@@ -573,6 +573,113 @@ void frontier_failures_are_explicit()
     require(refused, "oversized native agent inventory must fail before historical prompts can be replayed");
 }
 
+void investigate_interaction_records()
+{
+    // Kimi's llm.tools_snapshot schema permits arbitrary descriptions and
+    // parameter values. Report these constructed extremes without treating
+    // rejection as the desired contract or claiming an observed native log.
+    const std::string prefix = R"({"type":"llm.tools_snapshot","agentId":"main","hash":"probe-tools","tools":[{"name":"probe","description":")";
+    const std::string suffix = R"(","parameters":{}}],"time":1789200000500})";
+    const std::string large  = prefix + std::string(4 * 1024 * 1024 + 1, 'x') +
+        " interaction.request" + suffix;
+    const std::string deep = R"({"agentId":"main","hash":"probe-tools","tools":[{"name":"probe","description":"ordinary","parameters":{"nested":)" +
+        std::string(40, '[') + "0" + std::string(40, ']') +
+        R"(}}],"time":1789200000500,"type":"llm.tools_snapshot"})";
+    const std::pair<std::string, std::string> cases[] = {
+        {"small_irrelevant",     prefix + "ordinary description" + suffix},
+        {"oversized_irrelevant", large},
+        {"deep_irrelevant",      deep},
+    };
+    for (const auto& [name, record] : cases) {
+        addon::Json_parse_limits fixture_limits;
+        fixture_limits.max_bytes        = record.size();
+        fixture_limits.max_string_bytes = record.size();
+        fixture_limits.max_depth        = 64;
+        require(addon::parse_json(record, fixture_limits, nullptr).has_value(),
+            "the diagnostic input must be valid JSON outside the consumed parser bounds");
+        Workspace workspace;
+        const auto wire = workspace.m_path / "sessions/workspace/session-permission/agents/main/wire.jsonl";
+        append_wire(wire, Json::object());
+        kimi::Interaction_reader reader("session-permission",
+            kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission"));
+        append_wire(wire, interaction("question_diagnostic", "main"));
+        {
+            std::ofstream output(wire, std::ios::binary | std::ios::app);
+            output << record << '\n';
+            output.close();
+            require(output.good(), "diagnostic payload must be completely written");
+        }
+        append_wire(wire, interaction("question_diagnostic", "main", true));
+        std::vector<addon::Lifecycle_observation> observations;
+        std::string outcome;
+        try {
+            const auto inventory = kimi::discover_interaction_wires(
+                addon::path_to_utf8(workspace.m_path), "session-permission");
+            outcome = reader.acquire(inventory, observations, [] { return false; })
+                ? "complete" : "incomplete";
+        }
+        catch (const std::runtime_error& error) {
+            outcome = error.what();
+        }
+        std::cout << name << ": " << outcome << "; observations=" << observations.size() << '\n';
+    }
+}
+
+void interaction_provenance_and_required_records_remain_strict()
+{
+    const std::string records[] = {
+        R"({"type":"interaction.request","id":"question_malformed")",
+        R"({"type":"context.append_loop_event","type":"interaction.request"})",
+    };
+    for (const auto& record : records) {
+        Workspace workspace;
+        const auto wire = workspace.m_path / "sessions/workspace/session-permission/agents/main/wire.jsonl";
+        append_wire(wire, Json::object());
+        kimi::Interaction_reader reader("session-permission",
+            kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission"));
+        {
+            std::ofstream output(wire, std::ios::binary | std::ios::app);
+            output << record << '\n';
+            output.close();
+            require(output.good(), "malformed required record fixture must be written");
+        }
+        std::vector<addon::Lifecycle_observation> observations;
+        bool refused = false;
+        try {
+            reader.acquire(kimi::discover_interaction_wires(addon::path_to_utf8(workspace.m_path),
+                "session-permission"), observations, [] { return false; });
+        }
+        catch (const std::runtime_error& error) {
+            refused = std::string_view(error.what()) == "invalid_interaction_wire_record";
+        }
+        require(refused && observations.empty(), "malformed or ambiguous interaction records remain explicit failures");
+    }
+
+    Workspace workspace;
+    const auto wire = workspace.m_path / "sessions/workspace/session-permission/agents/main/wire.jsonl";
+    append_wire(wire, interaction("question_before", "main"));
+    kimi::Interaction_reader reader("session-permission",
+        kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission"));
+    const auto previous_size = fs::file_size(wire);
+    {
+        std::ofstream output(wire, std::ios::binary);
+        output << addon::serialize_json(interaction("question_after_", "main")) << '\n';
+        output.close();
+        require(output.good(), "changed history fixture must be written");
+    }
+    require(fs::file_size(wire) == previous_size, "history replacement must preserve the captured file size");
+    std::vector<addon::Lifecycle_observation> observations;
+    bool refused = false;
+    try {
+        reader.acquire(kimi::discover_interaction_wires(addon::path_to_utf8(workspace.m_path),
+            "session-permission"), observations, [] { return false; });
+    }
+    catch (const std::runtime_error& error) {
+        refused = std::string_view(error.what()) == "interaction_wire_changed";
+    }
+    require(refused && observations.empty(), "same-size rewritten history cannot establish current-process attention");
+}
+
 void frontier_failure_preserves_admission(const fs::path& package, const fs::path& executable, bool oversized)
 {
     Workspace workspace;
@@ -654,11 +761,16 @@ void frontier_failure_preserves_admission(const fs::path& package, const fs::pat
 int main(int argc, char** argv)
 {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--investigate-records") {
+            investigate_interaction_records();
+            return 0;
+        }
         if (argc > 2) {
             return capture_delivery(argc, argv);
         }
         require(argc == 2, "usage: kimi_permission_tests <package directory>");
         interaction_acquisition_retries_missing_wire();
+        interaction_provenance_and_required_records_remain_strict();
         permission_pair(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
         native_interactions(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
         frontier_failures_are_explicit();

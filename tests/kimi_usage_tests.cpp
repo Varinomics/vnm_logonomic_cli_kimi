@@ -19,6 +19,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -734,6 +735,91 @@ std::vector<std::string> lines_of(const fs::path& path)
     return lines;
 }
 
+int wire_envelope_probe()
+{
+    // Investigation only: the native llm.tools_snapshot schema permits arbitrary
+    // descriptions and parameter values. These generated extremes are not an
+    // observation of an installed producer's output.
+    const addon::Json_parse_limits limits;
+    const std::string long_text((std::size_t)limits.max_string_bytes + 1, 'x');
+    const std::string large_text((std::size_t)limits.max_bytes + 1, 'x');
+    const auto depth = limits.max_depth + 8;
+    const auto nested = std::string(depth, '[') + "0" + std::string(depth, ']');
+    const auto snapshot = [](
+            std::string_view description,
+            const std::string& parameters,
+            bool type_last = false)
+        {
+            const std::string type = "\"type\":\"llm.tools_snapshot\"";
+            std::string record = "{";
+            if (!type_last) {
+                record += type + ',';
+            }
+            record += "\"agentId\":\"main\",\"hash\":\"probe-tools\",\"tools\":[{"
+                "\"name\":\"probe\",\"description\":\"" + std::string(description) +
+                "\",\"parameters\":" + parameters + "}],\"time\":1789200000500";
+            if (type_last) {
+                record += ',' + type;
+            }
+            return record + "}\n";
+        };
+    const std::string metadata =
+        "{\"type\":\"metadata\",\"protocol_version\":\"1.5\",\"created_at\":1789199999000}\n";
+    const std::string before =
+        "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200000000,"
+        "\"usage\":{\"output\":7}}\n";
+    const std::string after =
+        "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200001000,"
+        "\"usage\":{\"output\":11}}\n";
+    for (const auto& [name, record] : std::vector<std::pair<std::string, std::string>>{
+            {"small-irrelevant", snapshot("ordinary description", "{}")},
+            {"string-bound", snapshot(long_text, "{}")},
+            {"document-bound", snapshot(large_text, "{}")},
+            {"document-bound-type-last", snapshot(large_text, "{}", true)},
+            {"depth-bound-type-last", snapshot("ordinary description", "{\"nested\":" + nested + "}", true)}})
+    {
+        auto fixture_limits = limits;
+        fixture_limits.max_bytes        = record.size();
+        fixture_limits.max_string_bytes = record.size();
+        fixture_limits.max_depth        = depth + 5;
+        const auto fixture = addon::parse_json(record, fixture_limits, nullptr);
+        require(fixture && json_util::text(*fixture, "type") == "llm.tools_snapshot",
+            "probe record must be valid nonusage JSON independent of the production parser bound");
+
+        Workspace workspace;
+        const auto profile = workspace.path / "profile";
+        const auto storage = workspace.path / "storage";
+        const auto session = profile / "sessions/workspace/probed-session";
+        const auto wire    = session / "agents/main/wire.jsonl";
+        fs::create_directories(storage);
+        native_session(session);
+        write(wire, metadata + before);
+        Selected_cache selected(storage);
+        Context context;
+        const auto baseline = selected.scan(profile, "incremental", context);
+        require(baseline.size() == 1 && baseline.front().total_tokens == 7,
+            "native metadata and usage baseline must be admitted before probing limits");
+        const auto accepted = selected.path();
+        const auto retained = lines_of(accepted);
+        write(wire, metadata + before + record + after);
+        std::optional<std::vector<addon::Usage_record>> observed;
+        try {
+            observed = selected.scan(profile, "incremental", context);
+        }
+        catch (const std::runtime_error& error) {
+            require(selected.path() == accepted && lines_of(accepted) == retained,
+                "a failed probe must preserve the previously accepted cache bytes");
+            std::cout << name << ": " << error.what() << ", accepted_total_tokens=7 retained\n";
+        }
+        if (observed) {
+            require(observed->size() == 1 && observed->front().total_tokens == 18,
+                "a successful probe must retain both required usage records");
+            std::cout << name << ": success, total_tokens=18\n";
+        }
+    }
+    return 0;
+}
+
 void line_cache_contract()
 {
     // Current cache records and retained opaque metadata are streamed.
@@ -849,6 +935,9 @@ int main(int argc, char** argv)
         }
         if (argc == 2) {
             const std::string_view selected = argv[1];
+            if (selected == "--wire-envelope-probe") {
+                return wire_envelope_probe();
+            }
             if (selected == "--large-data") {
                 large_history_contract();
                 large_log_contract();
