@@ -328,6 +328,141 @@ Json interaction(std::string_view id, std::string_view agent, bool resolved = fa
     return result;
 }
 
+void append_wire_bytes(const fs::path& path, std::string_view bytes)
+{
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    output.close();
+    require(output.good(), "native record bytes must be completely written");
+}
+
+std::string irrelevant_tools_snapshot(std::size_t description_size, std::size_t depth = 0)
+{
+    // Native llm.tools_snapshot descriptions and parameter values have no
+    // provider-reader DOM bound. Put the escaped discriminator last, after
+    // payload text containing strings that must never classify a record.
+    return R"({"agentId":"main","tools":[{"name":"probe","description":")" +
+        std::string(description_size, 'x') +
+        R"( interaction.request \"type\":\"interaction.resolved\" \\ } ] ","parameters":{"nested":)" +
+        std::string(depth, '[') + "0" + std::string(depth, ']') +
+        R"(}}],"hash":"tools","time":1789200000500,"\u0074ype":"llm.tools_\u0073napshot"})";
+}
+
+void interaction_record_isolation()
+{
+    Workspace workspace;
+    const auto agents = workspace.m_path / "sessions/workspace/session-permission/agents";
+    const auto main_wire = agents / "main/wire.jsonl";
+    const auto child_wire = agents / "reviewer/wire.jsonl";
+    append_wire(main_wire, Json::object());
+    append_wire(child_wire, Json::object());
+    kimi::Interaction_reader reader("session-permission",
+        kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission"));
+    const auto inventory = [&] {
+        return kimi::discover_interaction_wires(addon::path_to_utf8(workspace.m_path), "session-permission");
+    };
+    std::vector<addon::Lifecycle_observation> observations;
+    const auto acquire = [&] {
+        require(reader.acquire(inventory(), observations, [] { return false; }),
+            "an irrelevant partial record must not make wire acquisition fail");
+    };
+    append_wire(main_wire, interaction("question_before_large", "main"));
+    append_wire(child_wire, interaction("question_interleaved", "reviewer"));
+    const auto large = irrelevant_tools_snapshot(4 * 1024 * 1024 + 73);
+    const auto split = large.find("\\u0074ype") + 3;
+    require(split > 4 * 1024 * 1024, "type-last fixture must exceed the raw record bound");
+    append_wire_bytes(main_wire, std::string_view(large).substr(0, 65535));
+    acquire();
+    require(observations.size() == 2, "requests before an unfinished irrelevant record must survive");
+    append_wire_bytes(main_wire, std::string_view(large).substr(65535, split - 65535));
+    append_wire(child_wire, interaction("question_interleaved", "reviewer", true));
+    acquire();
+    require(observations.size() == 3 && observations.back().agent_id == "reviewer" &&
+        observations.back().attention_transition == addon::Attention_transition::RESOLVED,
+        "another wire must progress while a giant type-last record is unfinished");
+    append_wire_bytes(main_wire, std::string_view(large).substr(split));
+    append_wire_bytes(main_wire, "\r\n" + irrelevant_tools_snapshot(19, 80) + "\n");
+    append_wire(main_wire, interaction("question_before_large", "main", true));
+    acquire();
+    require(observations.size() == 4 && observations.back().attention_request_id == "question_before_large" &&
+        observations.back().attention_transition == addon::Attention_transition::RESOLVED,
+        "oversized and deep irrelevant records must preserve adjacent request/resolution order");
+    acquire();
+    require(observations.size() == 4, "physical offsets must not replay the skipped record or accepted attention");
+    auto escaped_request = addon::serialize_json(interaction("question_after_large", "main"));
+    escaped_request.replace(escaped_request.find("\"type\""), 6, R"("\u0074ype")");
+    escaped_request.replace(escaped_request.find("interaction.request"), std::string("interaction.request").size(),
+        R"(interaction.\u0072equest)");
+    append_wire_bytes(main_wire, escaped_request + '\n');
+    acquire();
+    require(observations.size() == 5 && observations.back().attention_request_id == "question_after_large",
+        "escaped required types after ignored bytes retain their original physical position and semantics");
+
+    // Rewrite only ignored payload inside the actual last-4096-byte anchor.
+    // A filtered/re-encoded anchor would miss this same-size history change.
+    const auto size = fs::file_size(main_wire);
+    {
+        std::fstream rewrite(main_wire, std::ios::binary | std::ios::in | std::ios::out);
+        rewrite.seekp(static_cast<std::streamoff>(size - 3000));
+        rewrite.put('y');
+        rewrite.close();
+        require(rewrite.good(), "ignored raw payload rewrite must complete");
+    }
+    require(fs::file_size(main_wire) == size, "history rewrite preserves the physical file size");
+    bool refused = false;
+    try { acquire(); }
+    catch (const std::runtime_error& error) { refused = std::string_view(error.what()) == "interaction_wire_changed"; }
+    require(refused && observations.size() == 5,
+        "ignored bytes remain in the raw anchor and cannot establish current-process attention after rewrite");
+}
+
+void interaction_required_records_remain_strict()
+{
+    auto oversized = addon::serialize_json(interaction("question_bad", "main"));
+    oversized.pop_back();
+    oversized += ",\"extra\":\"" + std::string(4 * 1024 * 1024, 'x') + "\"}";
+    auto deep = addon::serialize_json(interaction("question_bad", "main"));
+    deep.pop_back();
+    deep += ",\"extra\":" + std::string(40, '[') + "0" + std::string(40, ']') + "}";
+    auto duplicate_after_large = irrelevant_tools_snapshot(4 * 1024 * 1024 + 1);
+    duplicate_after_large.pop_back();
+    duplicate_after_large += R"(,"type":"interaction.request"})";
+    const auto oversized_type_last = "{\"extra\":\"" + std::string(4 * 1024 * 1024, 'x') +
+        R"(","type":"interaction.request","agentId":"main","id":"question_bad","kind":"question","toolCallId":"call","request":{}})";
+    const std::vector<std::pair<std::string, std::string>> cases{
+        {R"({"type":"interaction.request","id":"question_bad")", "invalid_interaction_wire_record"},
+        {R"({"type":"llm.tools_snapshot","type":"interaction.request"})", "invalid_interaction_wire_record"},
+        {R"({"type":"interaction.request","\u0074ype":"llm.tools_snapshot"})", "invalid_interaction_wire_record"},
+        {R"({"type":"interaction.request","request":{"x":1,"x":2}})", "invalid_interaction_wire_record"},
+        {R"({"type":"interaction.request","id":"\uD800"})", "invalid_interaction_wire_record"},
+        {R"({"type":"interaction.request","time":1e+})", "invalid_interaction_wire_record"},
+        {std::move(deep), "invalid_interaction_wire_record"},
+        {std::move(duplicate_after_large), "invalid_interaction_wire_record"},
+        {std::move(oversized), "interaction_record_capacity_exhausted"},
+        {oversized_type_last, "interaction_record_capacity_exhausted"},
+    };
+    for (const auto& [record, expected] : cases) {
+        Workspace workspace;
+        const auto wire = workspace.m_path / "sessions/workspace/session-permission/agents/main/wire.jsonl";
+        append_wire(wire, Json::object());
+        kimi::Interaction_reader reader("session-permission",
+            kimi::capture_interaction_frontier(addon::path_to_utf8(workspace.m_path), "session-permission"));
+        append_wire(wire, interaction("question_accepted", "main"));
+        append_wire_bytes(wire, record + '\n');
+        append_wire(wire, interaction("question_accepted", "main", true));
+        std::vector<addon::Lifecycle_observation> observations;
+        std::string failure;
+        try {
+            reader.acquire(kimi::discover_interaction_wires(addon::path_to_utf8(workspace.m_path),
+                "session-permission"), observations, [] { return false; });
+        }
+        catch (const std::runtime_error& error) { failure = error.what(); }
+        require(failure == expected && observations.size() == 1 &&
+            observations.front().attention_request_id == "question_accepted",
+            "malformed/oversized required records remain strict without losing previously accepted attention: " + failure);
+    }
+}
+
 std::string observe(addon::Host_simulator& host, const fs::path& home, const std::string& nonce)
 {
     addon::Observe_request request;
@@ -765,12 +900,19 @@ int main(int argc, char** argv)
             investigate_interaction_records();
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--reader-isolation") {
+            interaction_record_isolation();
+            interaction_required_records_remain_strict();
+            return 0;
+        }
         if (argc > 2) {
             return capture_delivery(argc, argv);
         }
         require(argc == 2, "usage: kimi_permission_tests <package directory>");
         interaction_acquisition_retries_missing_wire();
         interaction_provenance_and_required_records_remain_strict();
+        interaction_record_isolation();
+        interaction_required_records_remain_strict();
         permission_pair(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
         native_interactions(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
         frontier_failures_are_explicit();
