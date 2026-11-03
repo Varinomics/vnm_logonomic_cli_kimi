@@ -719,11 +719,12 @@ void large_log_contract()
 
     const auto oversized = profile / "sessions" / "Workspace-A" / "Session-Oversized" / "agents" / "main" / "wire.jsonl";
     native_session(oversized.parent_path().parent_path().parent_path());
-    write(oversized, "{\"type\":\"content.part\",\"text\":\"" + std::string(5 * 1000 * 1000, 'x') + "\"}\n");
+    write(oversized, "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":1},\"text\":\"" +
+        std::string(5 * 1000 * 1000, 'x') + "\"}\n");
     bool rejected = false;
     try { (void)selected.scan(profile, "repair", context); }
     catch (const std::runtime_error&) { rejected = true; }
-    require(rejected, "a line past the parser's document bound still fails the scan");
+    require(rejected, "a consumed line past the parser's document bound still fails the scan");
 }
 
 std::vector<std::string> lines_of(const fs::path& path)
@@ -818,6 +819,204 @@ int wire_envelope_probe()
         }
     }
     return 0;
+}
+
+std::string tools_snapshot(std::string_view description, std::string_view parameters = "{}", bool type_last = false)
+{
+    const std::string type = R"("\u0074ype":"llm.tools\u005fsnapshot")";
+    return std::string("{") + (type_last ? "" : type + ',') +
+        R"("agentId":"main","hash":"reader-fixture","tools":[{"name":"probe","description":")" +
+        std::string(description) + R"(","parameters":)" + std::string(parameters) +
+        R"(}],"time":1789200000500)" + (type_last ? ',' + type : "") + "}\n";
+}
+
+addon::Json_value cached_wire(const Selected_cache& selected, const fs::path& wire)
+{
+    for (const auto& line : lines_of(selected.path())) {
+        const auto row = json_util::parse(line);
+        require(row.has_value(), "selected reader cache contains valid JSON rows");
+        if (addon::path_from_utf8(json_util::text(*row, "path")).lexically_normal() == wire.lexically_normal()) {
+            return *row;
+        }
+    }
+    require(false, "selected reader cache preserves the physical wire identity");
+    return {};
+}
+
+void irrelevant_wire_records_contract()
+{
+    const addon::Json_parse_limits limits;
+    const auto deep = std::string(48, '[') + "0" + std::string(48, ']');
+    const std::string metadata =
+        "{\"type\":\"metadata\",\"protocol_version\":\"1.5\",\"created_at\":1789199999000}\n";
+    const std::string before =
+        "{\"type\":\"usage.record\",\"agentId\":\"main\",\"time\":1789200000000,\"usage\":{\"output\":7}}\n";
+    const std::string after =
+        R"({"\u0074ype":"usage\u002erecord","agentId":"main","time":1789200001000,"usage":{"output":11}})" "\n";
+    const auto large = std::string(limits.max_bytes + 1, 'x');
+    const auto description = std::string(limits.max_string_bytes + 1, 'x');
+    for (const auto& record : {
+            tools_snapshot("ordinary"), tools_snapshot(description), tools_snapshot(large),
+            tools_snapshot(large, "{}", true), tools_snapshot("ordinary", deep, true),
+            R"({"type":"metadata","extra":")" + large + "\"}\n",
+            R"({"extra":)" + deep + R"(,"type":"metadata"})" "\n",
+            tools_snapshot(R"(quoted \"type\":\"usage.record\", braces } ] { [ and \\ Unicode \ud83d\ude42)", deep, true)})
+    {
+        Workspace workspace;
+        const auto profile = workspace.path / "profile";
+        const auto storage = workspace.path / "storage";
+        const auto session = profile / "sessions/workspace/reader-records";
+        const auto wire = session / "agents/main/wire.jsonl";
+        fs::create_directories(storage);
+        native_session(session);
+        Selected_cache selected(storage);
+        Context context;
+        write(wire, metadata + before);
+        require(selected.scan(profile, "incremental", context).front().total_tokens == 7,
+            "reader isolation starts with accepted accounting");
+        const auto accepted = selected.path();
+        const auto retained = lines_of(accepted);
+        // Both the raw hash and the physical size include leading NUL bytes,
+        // ignored records and a final unterminated usage record.
+        const auto partial = after.substr(0, after.size() - 1);
+        const auto bytes = metadata + before + std::string(2, '\0') + record + after + partial;
+        write(wire, bytes);
+        for (const auto* mode : {"incremental", "repair"}) {
+            const auto records = selected.scan(profile, mode, context);
+            require(records.size() == 1 && records.front().total_tokens == 18,
+                "irrelevant oversized/deep native records cannot hide later usage");
+            const auto row = cached_wire(selected, wire);
+            const auto& evidence = json_util::member(json_util::member(row, "usage-fork-ownership"), "evidence");
+            require(json_util::member(row, "size").as_integer() == static_cast<std::int64_t>(bytes.size()) &&
+                json_util::text(evidence, "native_prefix_sha256_hex") == addon::to_hex(addon::Sha256::digest(bytes)) &&
+                json_util::member(evidence, "event_count").as_integer() == 2,
+                "the cache records exact physical bytes and only complete consumed events");
+        }
+        require(lines_of(accepted) == retained, "a successful refresh leaves prior accepted cache bytes intact");
+    }
+
+    // Split the escaped discriminator across the scanner's 1 MiB chunks at
+    // its key, escape and value. The preceding payload has no retained DOM.
+    for (const std::size_t edge : {0u, 1u, 5u, 11u, 24u}) {
+        Workspace workspace;
+        const auto profile = workspace.path / "profile";
+        const auto storage = workspace.path / "storage";
+        const auto session = profile / "sessions/workspace/chunk-boundary";
+        const auto wire = session / "agents/main/wire.jsonl";
+        fs::create_directories(storage);
+        native_session(session);
+        const std::string prefix = R"({"payload":")";
+        const auto padding = 1024 * 1024 - metadata.size() - before.size() - prefix.size() - 2 - edge;
+        std::string record = prefix + std::string(padding, 'x') +
+            R"(","\u0074ype":"llm.tools\u005fsnapshot"})" + '\n';
+        write(wire, metadata + before + record + after);
+        Selected_cache selected(storage);
+        Context context;
+        require(selected.scan(profile, "incremental", context).front().total_tokens == 18,
+            "escaped discriminator recognition survives physical chunk boundaries");
+    }
+}
+
+void required_wire_records_contract()
+{
+    Workspace workspace;
+    const auto profile = workspace.path / "profile";
+    const auto storage = workspace.path / "storage";
+    const auto session = profile / "sessions/workspace/strict-records";
+    const auto wire = session / "agents/main/wire.jsonl";
+    fs::create_directories(storage);
+    native_session(session);
+    const std::string before = R"({"type":"usage.record","agentId":"main","time":1789200000000,"usage":{"output":7}})" "\n";
+    const auto deep = std::string(48, '[') + "0" + std::string(48, ']');
+    Selected_cache selected(storage);
+    Context context;
+    write(wire, before);
+    require(selected.scan(profile, "incremental", context).front().total_tokens == 7,
+        "required-record refusal starts with accepted accounting");
+    const auto accepted = selected.path();
+    const auto retained = lines_of(accepted);
+    const auto manifest = lines_of(accepted.parent_path() / "cache-manifest.json");
+    for (const auto& [record, reason] : std::vector<std::pair<std::string, std::string>>{
+            {R"({"type":"usage.record","usage":{"output":11})" "\n", "usage_record_invalid"},
+            {R"({"type":"llm.tools_snapshot","\u0074ype":"usage.record"})" "\n", "usage_record_invalid"},
+            {R"({"type":"usage.record","type":"llm.tools_snapshot"})" "\n", "usage_record_invalid"},
+            {R"({"type":"usage.record","usage":{"output":11,"output":12}})" "\n", "usage_record_invalid"},
+            {R"({"type":"usage.record","time":1789200001000,"usage":{"output":-1}})" "\n", "usage_counter_invalid"},
+            {R"({"type":"usage.record","time":1789200001000,"usage":{"output":1.5}})" "\n", "usage_counter_invalid"},
+            {R"({"type":"usage.record","time":1789200001000,"usage":{"output":9007199254740992}})" "\n", "usage_counter_invalid"},
+            {R"({"type":"usage.record","usage":{"output":11},"extra":)" + deep + "}\n", "usage_record_invalid"},
+            {R"({"extra":")" + std::string(4 * 1024 * 1024 + 1, 'x') +
+                R"(","type":"usage.record","usage":{"output":11}})" "\n", "usage_record_invalid"},
+            {R"({"type":"usage.record","extra":")" + std::string(1024 * 1024 + 1, 'x') +
+                R"(","usage":{"output":11}})" "\n", "usage_record_invalid"},
+            {R"({"type":"llm.tools_snapshot","extra":")" + std::string(4 * 1024 * 1024 + 1, 'x') +
+                R"(","\u0074ype":"usage.record","usage":{"output":11}})" "\n", "usage_record_invalid"},
+            {R"({"type":"forked","agentId":"main")" "\n", "usage_record_invalid"},
+            {R"({"type":"forked","agentId":"main","extra":)" + deep + "}\n", "usage_record_invalid"}})
+    {
+        write(wire, before + tools_snapshot("ordinary", deep, true) + record);
+        std::string observed;
+        try {
+            (void)selected.scan(profile, "repair", context);
+        }
+        catch (const std::runtime_error& error) {
+            observed = error.what();
+        }
+        if (observed != reason) {
+            std::cerr << "required record expected " << reason << ", observed " << observed << '\n';
+        }
+        require(observed == reason, "consumed and ambiguous native records retain strict refusal");
+        require(selected.path() == accepted && lines_of(accepted) == retained &&
+            lines_of(accepted.parent_path() / "cache-manifest.json") == manifest,
+            "failed reader candidates cannot alter accepted accounting or its manifest");
+    }
+}
+
+void first_wire_record_contract()
+{
+    Workspace workspace;
+    const auto profile = workspace.path / "profile";
+    const auto storage = workspace.path / "storage";
+    const auto session = profile / "sessions/workspace/created-here";
+    const auto wire = session / "agents/main/wire.jsonl";
+    fs::create_directories(storage);
+    native_session(session, "missing-ancestor");
+    const std::string metadata = R"({"\u0074ype":"metadata","protocol_version":"1.5","created_at":1789199999000,"creator_session_id":"created-here"})" "\r\n";
+    const std::string usage = R"({"type":"usage.record","agentId":"main","time":1789200000000,"usage":{"output":7}})" "\n";
+    Selected_cache selected(storage);
+    Context context;
+    write(wire, std::string(2, '\0') + metadata + usage);
+    require(selected.scan(profile, "incremental", context).front().total_tokens == 7,
+        "leading NUL bytes and CRLF retain the first metadata witness");
+    const auto accepted = selected.path();
+    const auto retained = lines_of(accepted);
+    write(wire, tools_snapshot(std::string(4 * 1024 * 1024 + 1, 'x'), "{}", true) + metadata + usage);
+    bool refused = false;
+    try {
+        (void)selected.scan(profile, "reset", context);
+    }
+    catch (const kimi::Usage_ownership_unavailable&) {
+        refused = true;
+    }
+    require(refused && selected.path() == accepted && lines_of(accepted) == retained,
+        "an ignored first physical record cannot promote later metadata into ownership evidence");
+    for (const auto& first : {
+            R"({"type":"metadata","protocol_version":"1.5","created_at":1789199999000,"extra":)" +
+                std::string(48, '[') + "0" + std::string(48, ']') + "}\n",
+            R"({"type":"metadata","extra":")" + std::string(4 * 1024 * 1024 + 1, 'x') + "\"}\n",
+            std::string(R"({"type":"metadata","protocol_version":"1.5")") + '\n'})
+    {
+        write(wire, first + usage);
+        std::string reason;
+        try {
+            (void)selected.scan(profile, "reset", context);
+        }
+        catch (const std::runtime_error& error) {
+            reason = error.what();
+        }
+        require(reason == "usage_record_invalid" && selected.path() == accepted && lines_of(accepted) == retained,
+            "first-record metadata remains strictly parsed before ownership admission");
+    }
 }
 
 void line_cache_contract()
@@ -938,6 +1137,12 @@ int main(int argc, char** argv)
             if (selected == "--wire-envelope-probe") {
                 return wire_envelope_probe();
             }
+            if (selected == "--reader-records") {
+                irrelevant_wire_records_contract();
+                required_wire_records_contract();
+                first_wire_record_contract();
+                return 0;
+            }
             if (selected == "--large-data") {
                 large_history_contract();
                 large_log_contract();
@@ -963,6 +1168,9 @@ int main(int argc, char** argv)
         timestamp_cache_identity_contract();
         missing_sessions_contract();
         line_cache_contract();
+        irrelevant_wire_records_contract();
+        required_wire_records_contract();
+        first_wire_record_contract();
         return 0;
     }
     catch (const std::exception& error) {

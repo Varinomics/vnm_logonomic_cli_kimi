@@ -3,6 +3,7 @@
 #include "kimi_accounts.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
+#include "kimi_wire_record.h"
 
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/sha256.h>
@@ -316,13 +317,10 @@ enum class Wire_read
     CHANGED,
 };
 
-// Passes each complete line of a wire log to `consume`, buffering at most one
-// line of the parser's document bound; a final unterminated line is still being
-// written and is skipped. A changing native log can settle on another read;
-// neither that observation nor an unreadable log replaces previous evidence.
-Wire_read read_stable_lines(const fs::path& path, File_record& fingerprint, addon::Invocation_context& context,
-    const std::function<void(std::string_view line)>& consume,
-    const std::function<void(std::string_view bytes)>& observe_bytes = {})
+// Both native wires and strict host predecessor streams use the same stable
+// acquisition boundary. A changed or unreadable file cannot replace evidence.
+Wire_read read_stable_chunks(const fs::path& path, File_record& fingerprint,
+    addon::Invocation_context& context, const std::function<void(std::string_view)>& consume)
 {
     std::error_code error;
     const auto before_size = fs::file_size(path, error);
@@ -349,30 +347,18 @@ Wire_read read_stable_lines(const fs::path& path, File_record& fingerprint, addo
     };
     std::ifstream stream(path, std::ios::binary);
     if (!stream) return Wire_read::UNAVAILABLE;
-    const auto line_limit = static_cast<std::size_t>(addon::Json_parse_limits{}.max_bytes);
-    std::string buffer;
-    std::size_t begin = 0;
+    std::string buffer(k_read_bytes, '\0');
     std::uint64_t consumed = 0;
     try {
         for (;;) {
-            const auto newline = buffer.find('\n', begin);
-            if (newline != std::string::npos) {
-                consume(std::string_view(buffer).substr(begin, newline - begin));
-                consumed += newline + 1 - begin;
-                begin = newline + 1;
-                continue;
-            }
-            if (buffer.size() - begin > line_limit) throw std::runtime_error("usage_record_invalid");
-            buffer.erase(0, begin);
-            begin = 0;
             check_cancel(context);
-            const auto kept = buffer.size();
-            buffer.resize(kept + k_read_bytes);
-            stream.read(buffer.data() + kept, static_cast<std::streamsize>(k_read_bytes));
+            stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
             const auto received = static_cast<std::size_t>(stream.gcount());
-            buffer.resize(kept + received);
-            if (received == 0) break;
-            if (observe_bytes) observe_bytes(std::string_view(buffer).substr(kept, received));
+            if (received == 0) {
+                break;
+            }
+            consumed += received;
+            consume(std::string_view(buffer).substr(0, received));
         }
     }
     catch (...) {
@@ -385,10 +371,117 @@ Wire_read read_stable_lines(const fs::path& path, File_record& fingerprint, addo
     }
     const auto observed = observation();
     if (observed != Wire_read::STABLE) return observed;
-    if (consumed + buffer.size() != before_size) {
+    if (consumed != before_size) {
         return Wire_read::CHANGED;
     }
     return Wire_read::STABLE;
+}
+
+Wire_read read_stable_lines(const fs::path& path, File_record& fingerprint,
+    addon::Invocation_context& context,
+    const std::function<void(std::string_view)>& consume,
+    const std::function<void(std::string_view)>& observe_bytes)
+{
+    const auto limit = static_cast<std::size_t>(addon::Json_parse_limits{}.max_bytes);
+    std::string pending;
+    return read_stable_chunks(path, fingerprint, context, [&](std::string_view bytes) {
+        observe_bytes(bytes);
+        while (!bytes.empty()) {
+            const auto newline = bytes.find('\n');
+            const auto part = bytes.substr(0, newline);
+            if (part.size() > limit - pending.size()) {
+                throw std::runtime_error("usage_record_invalid");
+            }
+            pending.append(part);
+            if (newline == std::string_view::npos) {
+                break;
+            }
+            consume(pending);
+            pending.clear();
+            bytes.remove_prefix(newline + 1);
+        }
+    });
+}
+
+// Native payloads that accounting does not consume need only an unambiguous,
+// valid envelope. Required records keep their original bytes and SDK limits.
+// Every complete physical record is delivered, including an ignored one, so
+// filtering cannot change first-record ownership or accepted-event offsets.
+Wire_read read_native_usage_lines(const fs::path& path, File_record& fingerprint,
+    addon::Invocation_context& context,
+    const std::function<void(const std::optional<Json>&, std::uint64_t)>& consume,
+    const std::function<void(std::string_view)>& observe_bytes)
+{
+    const auto limit = static_cast<std::size_t>(addon::Json_parse_limits{}.max_bytes);
+    Wire_record_envelope envelope;
+    std::string pending;
+    std::uint64_t physical_bytes = 0;
+    bool leading_nul = true;
+    bool oversized = false;
+    bool first_record = true;
+    const auto required = [&] {
+        const auto kind = envelope.kind();
+        return kind == Wire_record_kind::USAGE || kind == Wire_record_kind::FORKED ||
+            (first_record && kind == Wire_record_kind::METADATA);
+    };
+    return read_stable_chunks(path, fingerprint, context, [&](std::string_view bytes) {
+        observe_bytes(bytes);
+        while (!bytes.empty()) {
+            const auto newline = bytes.find('\n');
+            const auto part = bytes.substr(0, newline);
+            physical_bytes += part.size();
+            auto content = part;
+            while (leading_nul && !content.empty() && content.front() == '\0') {
+                content.remove_prefix(1);
+            }
+            if (!content.empty()) {
+                leading_nul = false;
+                envelope.append(content);
+            }
+            if (!envelope.type_known() || required()) {
+                if (!oversized && part.size() <= limit - pending.size()) {
+                    pending.append(part);
+                }
+                else {
+                    oversized = true;
+                    pending.clear();
+                }
+            }
+            else {
+                pending.clear();
+            }
+            if (oversized && required()) {
+                throw std::runtime_error("usage_record_invalid");
+            }
+            if (newline == std::string_view::npos) {
+                break;
+            }
+            if (!envelope.finish()) {
+                throw std::runtime_error("usage_record_invalid");
+            }
+            std::optional<Json> event;
+            if (required()) {
+                auto line = std::string_view(pending);
+                while (!line.empty() && line.front() == '\0') {
+                    line.remove_prefix(1);
+                }
+                if (!oversized) {
+                    event = json_util::parse(line);
+                }
+                if (!event || !event->is_object()) {
+                    throw std::runtime_error("usage_record_invalid");
+                }
+            }
+            consume(event, physical_bytes + 1);
+            first_record = false;
+            envelope.reset();
+            pending.clear();
+            physical_bytes = 0;
+            leading_nul = true;
+            oversized = false;
+            bytes.remove_prefix(newline + 1);
+        }
+    });
 }
 
 Json optional_document(const fs::path& path, bool* missing = nullptr)
@@ -1185,41 +1278,44 @@ std::optional<File_record> refresh_file(const fs::path& path, const std::optiona
     addon::Sha256 native_digest, prefix_digest, event_digest;
     std::uint64_t bytes = 0, line_end = 0, event_count = 0, boundary = 0;
     bool forked = false;
-    bool first_record = true;
     std::string creator_session_id;
     auto read = Wire_read::UNAVAILABLE;
     try {
-        read = read_stable_lines(path, current, context, [&](std::string_view line) {
-            line_end += line.size() + 1;
-            while (!line.empty() && line.front() == '\0') line.remove_prefix(1);
-            const auto event = json_util::parse(line);
-            if (!event || !event->is_object()) throw std::runtime_error("usage_record_invalid");
-            const auto type = json_util::text(*event, "type");
-            if (first_record && type == "metadata" && json_util::member(*event, "protocol_version").is_string() &&
-                json_util::member(*event, "created_at").is_number())
-            {
-                creator_session_id = json_util::text(*event, "creator_session_id");
-            }
-            first_record = false;
-            if (type == "forked") {
-                if (json_util::text(*event, "agentId") != json_util::text(*identity, "agent_id")) throw Usage_ownership_unavailable();
-                boundary = event_count;
-                forked = true;
-            }
-            if (type != "usage.record") return;
-            if (event->find("agentId") && json_util::text(*event, "agentId") != json_util::text(*identity, "agent_id")) {
-                throw Usage_ownership_unavailable();
-            }
-            wire.consume_event(*event, context);
-            if (previous && line_end <= previous->size) {
-                prefix.consume_event(*event, context);
-                ++current.accepted_event_count;
-            }
-            const auto canonical = addon::serialize_json_canonical(*event);
-            write_line(output, canonical);
-            event_digest.update(canonical);
-            event_digest.update("\n");
-            ++event_count;
+        read = read_native_usage_lines(path, current, context,
+            [&](const std::optional<Json>& event, std::uint64_t physical_bytes) {
+                line_end += physical_bytes;
+                if (!event) {
+                    return;
+                }
+                const auto type = json_util::text(*event, "type");
+                if (type == "metadata" && json_util::member(*event, "protocol_version").is_string() &&
+                    json_util::member(*event, "created_at").is_number())
+                {
+                    creator_session_id = json_util::text(*event, "creator_session_id");
+                }
+                if (type == "forked") {
+                    if (json_util::text(*event, "agentId") != json_util::text(*identity, "agent_id")) {
+                        throw Usage_ownership_unavailable();
+                    }
+                    boundary = event_count;
+                    forked = true;
+                }
+                if (type != "usage.record") {
+                    return;
+                }
+                if (event->find("agentId") && json_util::text(*event, "agentId") != json_util::text(*identity, "agent_id")) {
+                    throw Usage_ownership_unavailable();
+                }
+                wire.consume_event(*event, context);
+                if (previous && line_end <= previous->size) {
+                    prefix.consume_event(*event, context);
+                    ++current.accepted_event_count;
+                }
+                const auto canonical = addon::serialize_json_canonical(*event);
+                write_line(output, canonical);
+                event_digest.update(canonical);
+                event_digest.update("\n");
+                ++event_count;
         }, [&](std::string_view chunk) {
             native_digest.update(chunk);
             if (previous && bytes < previous->size) {

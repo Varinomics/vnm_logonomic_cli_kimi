@@ -465,6 +465,48 @@ public:
         return *reference;
     }
 
+    auto outcome()
+    {
+        return test::usage_scan_outcome(host, request, 3);
+    }
+
+    auto correction_outcome(const std::vector<addon::Usage_record>& records, const std::string& suffix = {})
+    {
+        addon::Usage_owned_event_correction_request correction;
+        correction.scan = request;
+        const addon::Usage_owned_event_predecessor_header header{
+            "logonomic.cli.kimi", request.context.account_context, request.context.profile_storage->root,
+            request.cache_selection->accepted};
+        std::string bytes = addon::serialize_json(addon::encode_usage_owned_event_predecessor_header(header)) + '\n';
+        for (const auto& record : records) {
+            addon::Usage_owned_event_predecessor predecessor;
+            predecessor.record = record;
+            predecessor.predecessor_sha256_hex = addon::to_hex(addon::Sha256::digest(
+                addon::serialize_json_canonical(addon::encode_usage_record(record, 3))));
+            bytes += addon::serialize_json(addon::encode_usage_owned_event_predecessor(predecessor)) + '\n';
+        }
+        bytes += suffix;
+        const auto path = storage / "reader-predecessors.jsonl";
+        write(path, bytes);
+        correction.predecessors = {addon::path_to_utf8(path), addon::to_hex(addon::Sha256::digest(bytes))};
+        const auto id = host.invoke({addon::k_usage_owned_event_correction_capability_id, 1}, "scan",
+            addon::encode_usage_owned_event_correction_request(correction), 30000);
+        const auto observed = host.wait_outcome(id, 31000);
+        check(observed.has_value(), "reader correction returns a packaged adapter outcome");
+        return *observed;
+    }
+
+    addon::Usage_scan_page correct(const std::vector<addon::Usage_record>& records)
+    {
+        const auto observed = correction_outcome(records);
+        check(observed.status == addon::Host_status::SUCCESS,
+            "reader correction succeeds: " + observed.reason_code);
+        const auto page = addon::decode_usage_scan_result(observed.payload, nullptr, 3);
+        check(page && page->complete && page->cache_candidate,
+            "reader correction supplies one sealed complete candidate");
+        return *page;
+    }
+
     fs::path profile;
     fs::path storage;
     addon::Usage_scan_request request;
@@ -1372,6 +1414,107 @@ void unsettled_observation_contract(const fs::path& package, const fs::path& fix
         "the first-observation replacement gap must be distinguishable from invalid ownership");
 }
 
+void reader_cache_contract(const fs::path& package, const fs::path& fixture)
+{
+    Temporal_host host(package, fixture);
+    const auto session = host.profile / "sessions/workspace/reader-session";
+    const auto wire = session / "agents/main/wire.jsonl";
+    native_session(session);
+    const std::string metadata = R"({"type":"metadata","protocol_version":"1.5","created_at":1789199999000})" "\n";
+    const auto snapshot = R"({"tools":[{"name":"probe","description":")" +
+        std::string(4 * 1024 * 1024 + 1, 'x') +
+        R"(","parameters":{}}],"type":"llm.tools_snapshot"})" "\r\n";
+    const auto deep = R"({"tools":[{"parameters":)" + std::string(48, '[') + "0" + std::string(48, ']') +
+        R"(}],"\u0074ype":"llm.tools\u005fsnapshot"})" "\n";
+    const auto partial = native_event(1789200001000, 11);
+    const auto original = metadata + native_event(1789200000000, 7) + snapshot +
+        std::string(2, '\0') + deep + partial.substr(0, partial.size() - 1);
+    write(wire, original);
+    host.select("reader-accepted");
+    const auto accepted = host.scan();
+    check(accepted.records.size() == 1 && accepted.records.front().total_tokens == 7 && accepted.cache_candidate,
+        "packaged reader isolates oversized/deep records and retains only complete usage");
+    const auto cache = addon::path_from_utf8(accepted.cache_candidate->root) / "files.json";
+    const auto read_bytes = [](const fs::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        check(static_cast<bool>(input), "reader fixture opens accepted cache bytes");
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    const auto accepted_bytes = read_bytes(cache);
+    const auto accepted_manifest = read_bytes(cache.parent_path() / "cache-manifest.json");
+    const auto rows = cache_rows(*accepted.cache_candidate);
+    const auto file = std::find_if(rows.begin(), rows.end(), [&](const auto& row) {
+        const auto* path = row.find("path");
+        return path && addon::path_from_utf8(path->as_string()).lexically_normal() == wire.lexically_normal();
+    });
+    check(file != rows.end(), "reader fixture retains one exact physical wire");
+    const auto* ownership = file->find("usage-fork-ownership");
+    check(ownership && ownership->find("evidence"), "reader fixture retains ownership proof");
+    const auto& evidence = *ownership->find("evidence");
+    check(file->find("size")->as_integer() == static_cast<std::int64_t>(original.size()) &&
+        evidence.find("native_prefix_sha256_hex")->as_string() == addon::to_hex(addon::Sha256::digest(original)) &&
+        evidence.find("event_count")->as_integer() == 1,
+        "packaged cache hashes every physical byte including ignored and unterminated content");
+
+    const auto appended = original + '\n' + native_event(1789200002000, 13);
+    write(wire, appended);
+    host.select("reader-appended", accepted.cache_candidate);
+    const auto grown = host.correct(accepted.records);
+    check(grown.records.size() == 1 && grown.records.front().total_tokens == 31,
+        "physical line ends count a newly completed record and later append after a large ignored prefix");
+
+    // A retained accounting mode is a supported cache input. Its previous raw
+    // bytes may authorize append growth only when the whole prefix still matches.
+    auto retained_rows = rows;
+    for (auto& row : retained_rows) {
+        if (auto* carrier = row.find("usage-fork-ownership")) {
+            auto* proof = carrier->find("evidence");
+            check(proof != nullptr, "retained reader proof exists");
+            proof->set("accounting", addon::Json_value("retained"));
+            proof->set("unresolved_event_count", addon::Json_value(1));
+        }
+    }
+    const auto retained = host.sealed("reader-retained", retained_rows);
+    auto rewritten = appended;
+    const auto changed_byte = rewritten.find(std::string(32, 'x'));
+    check(changed_byte != std::string::npos, "reader rewrite targets ignored payload bytes");
+    rewritten[changed_byte] = 'y';
+    write(wire, rewritten);
+    host.select("reader-rewritten-prefix", retained);
+    const auto refused_growth = host.correct(accepted.records);
+    check(refused_growth.records.size() == 1 && refused_growth.records.front().total_tokens == 7,
+        "rewriting ignored bytes cannot authorize growth from a retained accepted prefix");
+
+    for (const auto& [name, suffix] : std::vector<std::pair<std::string, std::string>>{
+            {"malformed-usage", R"({"type":"usage.record","usage":{"output":19})" "\n"},
+            {"duplicate-type", R"({"type":"llm.tools_snapshot","type":"usage.record"})" "\n"},
+            {"malformed-fork", R"({"type":"forked","agentId":"main")" "\n"}})
+    {
+        write(wire, appended + suffix);
+        host.select(name, grown.cache_candidate);
+        const auto outcome = host.outcome();
+        check(outcome.status == addon::Host_status::FAILED && outcome.reason_code == "usage_record_invalid",
+            "packaged required-record failure keeps its exact reason: " + outcome.reason_code);
+        check(!fs::exists(addon::path_from_utf8(host.request.cache_selection->candidate_root) / "cache-manifest.json"),
+            "a malformed required record cannot seal a replacement candidate");
+    }
+    write(wire, appended);
+    host.select("reader-strict-predecessor", grown.cache_candidate);
+    const auto predecessor = host.correction_outcome(grown.records, snapshot);
+    check(predecessor.status == addon::Host_status::UNAVAILABLE &&
+        predecessor.reason_code == "usage_ownership_unavailable",
+        "host predecessor streams do not inherit native irrelevant-record isolation");
+
+    check(read_bytes(cache) == accepted_bytes &&
+        read_bytes(cache.parent_path() / "cache-manifest.json") == accepted_manifest,
+        "all reader refresh, refusal and correction paths leave accepted cache bytes unchanged");
+    fs::remove(wire);
+    host.select("reader-native-disappeared", grown.cache_candidate);
+    const auto recovered = host.scan();
+    check(recovered.records.size() == 1 && recovered.records.front().total_tokens == 31,
+        "accepted accounting survives later native file disappearance");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -1381,7 +1524,7 @@ int main(int argc, char** argv)
         const std::string phase = argc == 3 ? argv[2] : "";
         check(phase.empty() || phase == "cache" || phase == "temporal" ||
             phase == "refresh" || phase == "capacity" || phase == "owned" ||
-            phase == "observation", "unknown usage cache test phase");
+            phase == "observation" || phase == "reader", "unknown usage cache test phase");
         Workspace workspace;
         const auto run_phase = [&](const char* name, const auto& contract, const fs::path& fixture) {
             if (!phase.empty() && phase != name) {
@@ -1400,6 +1543,7 @@ int main(int argc, char** argv)
         run_phase("capacity", temporal_capacity_contract, workspace.m_path / "capacity");
         run_phase("owned", owned_event_contract, workspace.m_path / "owned");
         run_phase("observation", unsettled_observation_contract, workspace.m_path / "observation");
+        run_phase("reader", reader_cache_contract, workspace.m_path / "reader");
         return 0;
     }
     catch (const std::exception& error) {

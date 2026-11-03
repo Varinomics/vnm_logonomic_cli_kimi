@@ -74,7 +74,8 @@ endfunction()
 set(kimi_provider_sources
     src/kimi_accounts.cpp src/kimi_usage.cpp src/kimi_usage_correction.cpp
     src/kimi_acp.cpp src/kimi_config.cpp src/kimi_guidance.cpp src/kimi_interactions.cpp src/kimi_launcher.cpp
-    src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_quota_direct.cpp src/kimi_wire.cpp)
+    src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_quota_direct.cpp
+    src/kimi_wire.cpp src/kimi_wire_record.cpp)
 function(kimi_add_provider target)
     add_library(${target} STATIC ${kimi_provider_sources})
     kimi_target(${target})
@@ -209,7 +210,7 @@ target_link_libraries(kimi_usage_cache_tests PRIVATE
 kimi_target(kimi_usage_cache_tests)
 add_dependencies(kimi_usage_cache_tests kimi_package)
 set(KIMI_USAGE_CACHE_PHASE_TESTS)
-foreach(phase IN ITEMS cache temporal refresh capacity owned observation)
+foreach(phase IN ITEMS cache temporal refresh capacity owned observation reader)
     set(test_name kimi_usage_cache_tests_${phase})
     add_test(NAME ${test_name}
         COMMAND kimi_usage_cache_tests "${KIMI_PACKAGE_DIRECTORY}" ${phase})

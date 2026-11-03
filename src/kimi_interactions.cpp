@@ -1,4 +1,5 @@
 #include "kimi_interactions.h"
+#include "kimi_wire_record.h"
 
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/sha256.h>
@@ -69,11 +70,41 @@ std::uint64_t wire_size(std::ifstream& input)
     return static_cast<std::uint64_t>(length);
 }
 
+std::string read_consumed_record(
+    std::ifstream& input,
+    std::uint64_t begin,
+    std::uint64_t size,
+    std::uint64_t resume,
+    const addon::Sha256_digest& observed)
+{
+    // A partial type-last record must not reserve another agent's raw-byte
+    // budget. Materialize only a completed consumed record, and bind the
+    // reread to the exact bytes already inspected before parsing or accepting.
+    std::string bytes(static_cast<std::size_t>(size), '\0');
+    input.clear();
+    input.seekg(static_cast<std::streamoff>(begin));
+    input.read(bytes.data(), static_cast<std::streamsize>(size));
+    if (!input || input.gcount() != static_cast<std::streamsize>(size)) {
+        throw std::runtime_error("interaction_wire_unavailable");
+    }
+    if (addon::Sha256::digest(bytes) != observed) {
+        throw std::runtime_error("interaction_wire_changed");
+    }
+    input.clear();
+    input.seekg(static_cast<std::streamoff>(resume));
+    if (!input) {
+        throw std::runtime_error("interaction_wire_unavailable");
+    }
+    return bytes;
+}
+
 struct Stream
 {
     std::uint64_t offset = 0;
     std::string anchor = addon::to_hex(addon::Sha256::digest({}));
-    std::string pending;
+    Wire_record_envelope envelope;
+    std::uint64_t record_bytes = 0;
+    addon::Sha256 record_digest;
     bool discarding = false;
 };
 
@@ -195,7 +226,6 @@ struct Interaction_reader::State
     std::string root;
     std::map<std::string, Stream> streams;
     std::map<std::string, Request> requests;
-    std::size_t pending_bytes = 0;
 
     void accept(const Json& record, const std::string& agent,
         std::vector<addon::Lifecycle_observation>& observations)
@@ -318,6 +348,43 @@ bool Interaction_reader::acquire(const Interaction_inventory& inventory,
         }
         input.clear();
         input.seekg(static_cast<std::streamoff>(stream.offset));
+        const auto append_record = [&](std::string_view part) {
+            if (stream.discarding || part.empty()) {
+                return;
+            }
+            stream.record_bytes += part.size();
+            stream.envelope.append(part);
+            if (!stream.envelope.type_known() || stream.envelope.kind() == Wire_record_kind::INTERACTION) {
+                stream.record_digest.update(part);
+            }
+        };
+        const auto finish_record = [&](std::uint64_t newline_offset) {
+            if (!stream.discarding && stream.record_bytes) {
+                if (!stream.envelope.finish()) {
+                    throw std::runtime_error("invalid_interaction_wire_record");
+                }
+                if (stream.envelope.kind() == Wire_record_kind::INTERACTION) {
+                    if (stream.record_bytes > k_record_bound) {
+                        throw std::runtime_error("interaction_record_capacity_exhausted");
+                    }
+                    const auto bytes = read_consumed_record(input,
+                        newline_offset - stream.record_bytes, stream.record_bytes,
+                        stream.offset, stream.record_digest.finish());
+                    addon::Json_parse_limits limits;
+                    limits.max_bytes = k_record_bound;
+                    limits.max_string_bytes = k_record_bound;
+                    const auto record = addon::parse_json(bytes, limits, nullptr);
+                    if (!record || !record->is_object()) {
+                        throw std::runtime_error("invalid_interaction_wire_record");
+                    }
+                    m_state->accept(*record, wire.agent_id, observations);
+                }
+            }
+            stream.envelope.reset();
+            stream.record_bytes = 0;
+            stream.record_digest = addon::Sha256{};
+            stream.discarding = false;
+        };
         std::array<char, 65536> bytes{};
         while (stream.offset < end && !cancelled()) {
             const auto remaining = std::min<std::uint64_t>(bytes.size(), end - stream.offset);
@@ -327,29 +394,15 @@ bool Interaction_reader::acquire(const Interaction_inventory& inventory,
                 throw std::runtime_error("interaction_wire_unavailable");
             }
             stream.offset += count;
-            for (std::size_t index = 0; index < count; ++index) {
-                if (bytes[index] == '\n') {
-                    if (!stream.discarding && !stream.pending.empty()) {
-                        addon::Json_parse_limits limits;
-                        limits.max_bytes = k_record_bound;
-                        limits.max_string_bytes = k_record_bound;
-                        const auto record = addon::parse_json(stream.pending, limits, nullptr);
-                        if (!record || !record->is_object()) {
-                            throw std::runtime_error("invalid_interaction_wire_record");
-                        }
-                        m_state->accept(*record, wire.agent_id, observations);
-                    }
-                    m_state->pending_bytes -= stream.pending.size();
-                    stream.pending.clear();
-                    stream.discarding = false;
+            auto chunk = std::string_view(bytes.data(), count);
+            while (!chunk.empty()) {
+                const auto newline = chunk.find('\n');
+                append_record(chunk.substr(0, newline));
+                if (newline == std::string_view::npos) {
+                    break;
                 }
-                else if (!stream.discarding) {
-                    if (m_state->pending_bytes == k_record_bound) {
-                        throw std::runtime_error("interaction_record_capacity_exhausted");
-                    }
-                    stream.pending += bytes[index];
-                    ++m_state->pending_bytes;
-                }
+                finish_record(stream.offset - chunk.size() + newline);
+                chunk.remove_prefix(newline + 1);
             }
         }
         stream.anchor = addon::to_hex(addon::Sha256::digest(read_anchor(input, stream.offset)));

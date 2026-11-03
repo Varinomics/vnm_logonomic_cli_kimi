@@ -1,6 +1,6 @@
 #include "kimi_observer.h"
-#include "kimi_json.h"
 #include "kimi_interactions.h"
+#include "kimi_json.h"
 #include "kimi_launcher.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
@@ -196,6 +196,86 @@ void write_bytes(const fs::path& path, const std::string& bytes, bool append = f
     output << bytes;
     output.close();
     require(static_cast<bool>(output), "wire fixture write must complete");
+}
+
+void irrelevant_interaction_records_preserve_observation()
+{
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    const auto path = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+    fs::create_directories(path.parent_path());
+    write_bytes(path, "{}\n");
+    const auto service = std::make_shared<observation::Service>();
+    observation::Configuration configuration;
+    configuration.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, configuration);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve native interaction reader owner");
+    auto start = start_request(workspace, nonce);
+    start.event.body.set("interaction_frontier",
+        kimi::capture_interaction_frontier(kimi::path_string(workspace.m_root), "session"));
+    observer.classify(start);
+    Observe_window window(observer, workspace, nonce);
+    const auto settled = [&] {
+        const auto statistics = service->statistics();
+        return statistics.dispatches > 0 && statistics.outstanding == 0 &&
+            statistics.pending_registrations == 0 && statistics.retained_events == 0;
+    };
+    require(wait_until(settled), "initial attention frontier must reach the actual receiver");
+    const auto wait_observations = [&](std::size_t count) {
+        const bool acquired = wait_until([&] {
+            const auto page = poll(observer, nonce);
+            return (page && page->observations.size() == count) ||
+                window.worker.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+        });
+        if (window.worker.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            window.stop();
+            throw std::runtime_error("reader isolation ended observation: " + window.context.m_failure);
+        }
+        const auto page = poll(observer, nonce);
+        require(acquired && page && page->observations.size() == count,
+            "native interaction observations must survive irrelevant records");
+    };
+    write_bytes(path,
+        R"({"type":"interaction.request","id":"question_reader","agentId":"main","kind":"question","toolCallId":"question_call","request":{}})" "\n", true);
+    wait_observations(1);
+    require(wait_until(settled), "request application must finish before the partial append");
+    const auto large = R"({"tools":[{"name":"probe","description":")" +
+        std::string(4 * 1024 * 1024 + 17, 'x') +
+        R"(","parameters":{}}],"type":"llm.tools_snapshot"})";
+    const auto split = large.size() - 12;
+    const auto dispatches = service->statistics().dispatches;
+    write_bytes(path, large.substr(0, split), true);
+    require(wait_until([&] {
+        return (service->statistics().dispatches > dispatches && settled()) ||
+            window.worker.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+    }), "an oversized partial record must reach the actual native receiver");
+    wait_observations(1);
+    const auto deep = R"({"tools":[{"name":"probe","parameters":{"nested":)" +
+        std::string(80, '[') + "0" + std::string(80, ']') +
+        R"(}}],"type":"llm.tools_snapshot"})";
+    write_bytes(path, large.substr(split) + '\n' + deep + '\n' +
+        R"({"type":"interaction.resolved","id":"question_reader","agentId":"main","response":{"cancelled":true}})" "\n" +
+        call_record("child_after_ignored_records"), true);
+    wait_observations(3);
+    window.stop();
+    require(window.context.m_failure.empty() && window.context.m_result.has_value(),
+        "the real observer must remain successful after reading ignored records");
+    const auto page = poll(observer, nonce);
+    require(page && page->observations.size() == 3, "all accepted observer facts remain available");
+    std::vector<addon::Attention_transition> attention;
+    bool child_started = false;
+    for (const auto& item : page->observations) {
+        if (item.attention_request_id == "question_reader") attention.push_back(item.attention_transition);
+        if (item.agent_id == "child_after_ignored_records" &&
+            item.subagent_transition == addon::Subagent_transition::STARTED) child_started = true;
+    }
+    require(attention == std::vector{addon::Attention_transition::REQUESTED, addon::Attention_transition::RESOLVED} &&
+        child_started, "attention order and shared subagent observation both survive irrelevant wire records");
+    const auto replay = poll(observer, nonce);
+    require(replay && replay->resume_cursor == page->resume_cursor && replay->observations.size() == 3,
+        "accepted observer facts remain replayable at their original cursor");
+    require(retire(observer, nonce), "reader fixture retires its native observation owner");
 }
 
 void investigate_admitted_inventory_growth()
@@ -713,6 +793,11 @@ int main(int argc, char** argv)
             investigate_admitted_inventory_growth();
             return 0;
         }
+        if (std::string_view(argv[1]) == "--reader-isolation") {
+            irrelevant_interaction_records_preserve_observation();
+            return 0;
+        }
+        irrelevant_interaction_records_preserve_observation();
         declared_profile_admits_every_shape(addon::path_from_utf8(argv[1]));
         candidates_reclaim_without_tombstones();
         retirement_releases_only_its_owner();
