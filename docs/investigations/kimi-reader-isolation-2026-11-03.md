@@ -10,8 +10,12 @@ selected CTests and every original usage probe. Independent review then found
 an additional cross-wire buffer-pressure case, which has also been reproduced
 against that exact implementation. The refinement now removes shared pending
 record buffers, rereads only completed consumed records, and checks their
-first-pass digest before parsing. Its focused final gates are pending; the
-earlier passing selection does not close this gap.
+first-pass digest before parsing. It was published as
+[implementation checkpoint 256b2ad](https://github.com/Varinomics/vnm_logonomic_cli_kimi/commit/256b2ad2b52f9b398fcfcbf94015a4fcf01d10c9)
+while final gates were pending. The refined snapshot has now passed all seven
+affected normal CTest registrations and all five usage-probe variants.
+Independent code, fixture and execution review found no blocking defect and
+confirmed closure of the reproduced cross-wire capacity case.
 
 The sections below preserve the early evidence and identify the later inputs
 and results separately. Resume configuration, 257-agent coverage and Windows
@@ -205,7 +209,7 @@ and linked-library hashes, complete commands and output are retained as
 This is a reproduced defect in the first candidate, not a timeout or an
 inference from the earlier baseline.
 
-### Refined interaction implementation awaiting final gates
+### Refined interaction implementation
 
 The refinement retains only the per-stream envelope state, physical byte count
 and digest for an unfinished record. It does not reserve a shared raw-record
@@ -221,7 +225,85 @@ and a consumed record split across acquisitions. It checks both unchanged
 bytes and a same-size rewrite before the final 4096-byte anchor; the latter
 must produce `interaction_wire_changed` before accepting the reread record.
 These run through the normal permission registration as well as its focused
-`--reader-isolation` mode. Final execution remains pending at this publication.
+`--reader-isolation` mode. The normal registration passed on the final snapshot
+as recorded below; the focused mode was not repeated merely to duplicate it.
+
+## Final integrated snapshot and focused validation
+
+The final compilation used the immutable `refined-source` snapshot with 96
+provider files and the same 633 selected dependency blobs. Every file matched
+its recorded digest before configuration and after all tests. The nine changed
+build, production and test files exactly match implementation checkpoint
+`256b2ad2b52f9b398fcfcbf94015a4fcf01d10c9`. The frozen report predates that
+checkpoint's prose update; this later evidence update changes only the mutable
+repository report and does not mutate the compilation snapshot.
+
+Relative to the first passing candidate, executable changes comprise the
+interaction reread/digest refinement, its permission fixtures, inherited
+upstream PR #9 configuration, and preserved diagnostic fixtures in the normal
+observer and permission registrations. The usage test entry-point adjustment
+is formatting only. The scanner, usage reader, packaged cache fixtures and
+usage-correction production source are unchanged from the first candidate.
+The inherited PR #9 preparation test and investigation report are also present
+in the final source tree. Relative to the merged upstream base, the reader-only
+diff remains ten paths: nine build/code/test files listed below and this report.
+Resume configuration, preparation tests, the older PR #9 report, the 257-agent
+issue and Windows quota cleanup have no changes in this PR.
+
+The final Release configure and build passed, including normal package assembly
+with 85 indexed files. Compilation used the same queued slots and compiler
+cache; 108 cacheable calls comprised 82 hits and 26 misses, excluding configure
+probes. The seven focused CTests passed **7/7 in 54.84 seconds** with unchanged
+registration timeouts and native request budgets:
+
+| Registration | Result | Elapsed time |
+|---|---|---:|
+| `kimi_observer_tests` | Passed. | 2.91 s |
+| `kimi_contract_tests` | Passed. | 0.56 s |
+| `kimi_permission_tests` | Passed. | 35.40 s |
+| `kimi_wire_cancellation_tests` | Passed. | 0.00 s |
+| `kimi_usage_tests` | Passed. | 1.74 s |
+| `kimi_usage_cache_tests_observation` | Passed. | 5.78 s |
+| `kimi_usage_cache_tests_reader` | Passed. | 8.43 s |
+
+The final usage probe completed in 0.279 seconds and again printed success with
+`total_tokens=18` for all five variants. Its diagnostic exit code remains
+separate from the asserting normal usage test. The final permission run covers
+the formerly failing near-limit cross-wire case, unchanged consumed bytes
+across acquisitions, and rejection of a same-size rewrite before the history
+anchor. Observer, usage, and packaged reader runs repeat the actual receiver,
+physical-offset/hash, strict-required-record and accepted-accounting checks on
+the final package. The observation phase again reports temporary unsettled
+state followed by total 150 in the same generation and process.
+
+The remaining six registrations from the first 13/13 selection were not
+repeated because their reader/accounting implementation and fixture inputs
+were unchanged. Their results remain attributed to that first snapshot, not
+credited as final-snapshot executions. The final selected gates cover the
+interaction refinement, reconciled normal entry points and packaged consumers.
+
+Independent review inspected the refined source, exact near-limit regression,
+both consumed-record reread variants, raw CTest and probe output, and immutable
+input verification. It found no blocking defect in reader isolation and
+confirmed that the prior shared pending-byte interference is closed. This is
+a scoped code/fixture/execution verdict; the environment limits below still
+apply.
+
+The complete frozen manifest `gate-logs/refined-source-inputs.json` has SHA-256
+`b48e3796217cf26fdf3e165073a8462d1823b435260e10b1e3d3992a1ad1f6de`.
+Changed build, production and test input SHA-256 values are:
+
+| File | SHA-256 |
+|---|---|
+| `CMakeLists.txt` | `aca010b9a934836604333f28190c4ae92c40e8ff16339b36254a7c37364c433f` |
+| `src/kimi_interactions.cpp` | `7b74c1e0a0f1ef94c4f040ccfd7baaeb0f6b0145c5bec1118a637fd2b5de486e` |
+| `src/kimi_usage.cpp` | `e85bdade467b95a4b0c12ffc812dd656e9ac5dfd0b2026fad6d8cee685492a20` |
+| `src/kimi_wire_record.cpp` | `5b1867c52ad65778be1604dba4a195ccd16de27a58d5fba42c9144a66e4ca745` |
+| `src/kimi_wire_record.h` | `4b4276d9eef9c9d2691875fc752f6a2f305e3469af00c1760139127b57623d45` |
+| `tests/kimi_observer_tests.cpp` | `c9ed7b6c9fe882114f7b5617b6847ad14c1b314e72031cb862527a64f509bc02` |
+| `tests/kimi_permission_tests.cpp` | `c58abdd572972edfb7b77caa5e04319676e079a7df33cb33a7bc13a058c494c9` |
+| `tests/kimi_usage_cache_tests.cpp` | `1b26d75735e3502aec9c885fdc9379850615b104790d0a36dce70a576bd9612f` |
+| `tests/kimi_usage_tests.cpp` | `44e5627e6af1e90253a469569319a4ed84547badedb0d16629c529bde095543e` |
 
 ## Source and toolchain attribution
 
@@ -237,12 +319,13 @@ was published on that updated base after reconciling its pre-existing
 diagnostic fixtures. The upstream merge owns the resume/configuration change;
 it is not a reader-PR correction. The original baseline and first candidate
 results above retain their actual immutable-snapshot attribution. The final
-integrated snapshot and its necessary follow-up gates will be recorded
-separately after the cross-wire correction.
+integrated snapshot and its focused gates are recorded separately above.
 
 | Source input | Revision |
 |---|---|
 | Kimi provider production base | `567363dd2450deb3265141a6be485f379ed99d86` |
+| Merged upstream base of published reader PR | `d135e0c` |
+| Final compiled reader implementation checkpoint | `256b2ad2b52f9b398fcfcbf94015a4fcf01d10c9` |
 | Logonomic add-on SDK source | `25db6999238a1cf3de907d3b844e6b6ee81dc35e` |
 | Framework filesystem observation source | `75c8db7fb1cd2b01f161894e31e3188052e88dc2` |
 | Qt dispatch source | `9244c66fa483830269e98dd37fc842c960253809` |
@@ -324,14 +407,43 @@ workspace under `gate-logs/baseline-source-inputs.json`,
 the corresponding `baseline-*.log` / `baseline-*.status.json` files. The result
 tables, diagnostic output and commands here provide the durable checkpoint.
 
-## Remaining work and evidence limits
+For the first implementation selection, configure a separate immutable
+candidate source/build pair using the same options above, then build and run:
 
-Validate the refined integrated reader snapshot through the affected actual
-C++ fixtures, including the new cross-wire and digest-preservation cases.
-Preserve the already demonstrated usage/first-record/raw-prefix and accepted
-cache contracts; reopen only gates affected by the final source changes.
+```bash
+queued-build --slots 4 -- cmake --build "$kimi_build" --parallel 4 --target \
+  kimi_permission_tests kimi_observer_tests kimi_usage_tests kimi_usage_cache_tests \
+  kimi_usage_correction_tests kimi_contract_tests kimi_wire_cancellation_tests
+sdk-run-headless "$kimi_build/kimi_usage_tests" --wire-envelope-probe
+sdk-run-headless ctest --test-dir "$kimi_build" --output-on-failure \
+  --no-tests=error -V -j 1 \
+  -R '^kimi_(observer_tests|permission_tests|usage_tests|usage_cache_tests_(cache|temporal|refresh|capacity|owned|observation|reader)|usage_correction_tests|contract_tests|wire_cancellation_tests)$'
+```
+
+The final refined snapshot used another separate source/build pair, the same
+configure and build commands, and the same probe. Its focused CTest command was:
+
+```bash
+sdk-run-headless ctest --test-dir "$kimi_build" --output-on-failure \
+  --no-tests=error -V -j 1 \
+  -R '^kimi_(observer_tests|permission_tests|usage_tests|wire_cancellation_tests|contract_tests|usage_cache_tests_(reader|observation))$'
+```
+
+The task workspace retains `candidate-*.log` and `refined-*.log`, exact commands
+and exit statuses in their matching `.status.json` files, per-registration
+results in `candidate-ctest-results.json` and `refined-ctest-results.json`, and
+the before/after source-verification JSON files. The diagnostic probe runs were
+recorded independently from each CTest selection. No test timeout override was
+used.
+
+## Evidence limits
+
+The reproduced reader failures and additional cross-wire case are closed by
+the final source and executed component/package fixtures. Generated records
+exercise the relevant native shapes and chunk boundaries; they are not an
+observation of an installed Kimi process producing these particular extremes.
 
 No private hosted CI, authenticated native account campaign, live-user UI,
-Windows execution or release qualification was performed. This checkpoint
-does not yet close the reader findings. The separate inventory-coverage issue
-remains excluded.
+Windows execution or release qualification was performed. The separate
+inventory-coverage issue remains excluded, as do resume configuration changes
+and Windows quota cleanup.
