@@ -437,8 +437,8 @@ Json run(const std::string& program, const std::string& home)
     const auto executable = kimi::regular_file(addon::path_from_utf8(program));
     const auto directory = addon::path_from_utf8(home);
     if (!executable || !kimi::native_image(*executable) || !directory.is_absolute()) throw std::runtime_error("invalid_quota_request");
-    if (const auto direct = direct_quota(directory, operation_deadline)) {
-        return *direct;
+    if (auto direct = direct_quota(directory, operation_deadline)) {
+        return std::move(*direct);
     }
     if (Clock::now() >= operation_deadline) {
         throw std::runtime_error("quota_http_timeout");

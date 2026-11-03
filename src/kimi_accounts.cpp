@@ -74,7 +74,7 @@ std::string account_key(const fs::path& profile)
 {
     auto normalized = normalize(profile);
 #ifdef _WIN32
-    const auto source = normalized.native();
+    const auto& source = normalized.native();
     const int count = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, source.data(),
         static_cast<int>(source.size()), nullptr, 0, nullptr, nullptr, 0);
     if (count <= 0) throw std::runtime_error("profile_normalization_failed");
