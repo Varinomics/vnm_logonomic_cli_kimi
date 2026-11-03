@@ -855,9 +855,9 @@ public:
     const std::string& key() const { return m_key; }
     Json value() const
     {
-        const auto value = json_util::parse(std::string_view(m_line).substr(m_key.size() + 1));
+        auto value = json_util::parse(std::string_view(m_line).substr(m_key.size() + 1));
         if (!value) throw std::runtime_error("usage_cache_record_invalid");
-        return *value;
+        return std::move(*value);
     }
     void next()
     {
@@ -1104,9 +1104,9 @@ private:
             else if (byte == '}' || byte == ']') --depth;
             if (!quoted && depth == 0 && (byte == '"' || byte == '}' || byte == ']')) break;
         }
-        const auto parsed = json_util::parse(bytes);
+        auto parsed = json_util::parse(bytes);
         if (!parsed) invalid();
-        return *parsed;
+        return std::move(*parsed);
     }
     std::ifstream m_input;
     addon::Invocation_context& m_context;

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string_view>
 
 namespace json_util = logonomic::cli_addon::json;
 
@@ -130,14 +131,14 @@ std::optional<Quota_route> direct_quota_route(std::string_view config, const Env
         const auto oauth    = provider["oauth"];
         // An explicit managed provider gives us a source-defined configuration
         // shape. Provider environment overlays and other credential forms stay native.
-        if (!provider.is_table() || provider["type"].value<std::string>() != "kimi" || provider["api_key_env"] ||
-            !provider["api_key"].value_or(std::string{}).empty() || !oauth.is_table())
+        if (!provider.is_table() || provider["type"].value<std::string_view>() != "kimi" || provider["api_key_env"] ||
+            !provider["api_key"].value_or(std::string_view{}).empty() || !oauth.is_table())
         {
             return std::nullopt;
         }
         const auto configured_base = provider["base_url"].value<std::string>();
-        const auto configured_key  = oauth["key"].value<std::string>();
-        const auto storage         = oauth["storage"].value<std::string>();
+        const auto configured_key  = oauth["key"].value<std::string_view>();
+        const auto storage         = oauth["storage"].value<std::string_view>();
         if (!configured_base || !configured_key || !storage) {
             return std::nullopt;
         }

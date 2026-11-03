@@ -212,7 +212,7 @@ bool notification(const Json& value, std::string_view stage, std::string_view se
     }
     if (type == "agent_message_chunk" && stage == "await_admission") {
         if (!status_outstanding || !valid_text(update)) return false;
-        status += json_util::text(json_util::member(update, "content"), "text");
+        status += json_util::member(json_util::member(update, "content"), "text").as_string();
         return status.size() <= k_status_limit;
     }
     if (type == "current_mode_update") {
@@ -224,7 +224,9 @@ bool notification(const Json& value, std::string_view stage, std::string_view se
     }
     if (type == "agent_message_chunk" || type == "agent_thought_chunk") {
         if (stage != "await_prompt" || !valid_text(update)) return false;
-        if (type == "agent_message_chunk") output += json_util::text(json_util::member(update, "content"), "text");
+        if (type == "agent_message_chunk") {
+            output += json_util::member(json_util::member(update, "content"), "text").as_string();
+        }
         return output.size() <= k_result_limit;
     }
     if (type == "tool_call" || type == "tool_call_update") return stage == "await_prompt" && valid_tool(update);
