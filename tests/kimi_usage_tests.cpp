@@ -17,6 +17,7 @@
 #include <iostream>
 #include <iterator>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -141,6 +142,62 @@ void native_session(const fs::path& session, std::string_view parent = {}, std::
     if (!parent.empty()) state.set("forkedFrom", addon::Json_value(parent));
     if (!cwd.empty()) state.set("cwd", addon::Json_value(cwd));
     write(session / "state.json", addon::serialize_json(state));
+}
+
+void paged_temporal_capacity_contract()
+{
+    Workspace workspace;
+    const auto profile = workspace.path / "native-profile";
+    const auto storage = workspace.path / "storage";
+    const auto candidate = storage / "candidate";
+    fs::create_directories(candidate);
+    std::string history;
+    for (unsigned index = 0; index < 4096; ++index) {
+        history += "{\"type\":\"usage.record\",\"time\":" + std::to_string(1791503999999ull + index) +
+            ",\"usage\":{\"inputOther\":1,\"output\":0,\"inputCacheRead\":0,\"inputCacheCreation\":0}}\n";
+    }
+    for (unsigned index = 0; index < 16; ++index) {
+        const auto session = profile / "sessions/workspace" / ("bounded-" + std::to_string(index));
+        native_session(session);
+        write(session / "agents/a/wire.jsonl", history);
+    }
+    addon::Usage_scan_request request;
+    request.context.launcher = {"kimi", addon::k_runner_direct, {}};
+    request.context.launcher_argv = {"kimi"};
+    request.context.profile_storage = addon::Profile_storage_context{1, kimi::path_string(storage)};
+    request.context.account_context = addon::Account_context{2, kimi::account_key(profile), kimi::path_string(profile)};
+    request.context.launch_environment = addon::Launch_environment{addon::host_platform_id(),
+        addon::Json_value::object(), addon::Environment_bootstrap_evidence{kimi::path_string(profile)}};
+    request.cache_selection = addon::Usage_cache_selection{std::nullopt, kimi::path_string(candidate)};
+    std::set<std::string> identifiers;
+    std::uint64_t total = 0;
+    unsigned pages = 0;
+    while (true) {
+        Context context;
+        context.invocation.capability = {"usage-scan", 3};
+        context.invocation.operation = "scan";
+        context.invocation.payload = addon::encode_usage_scan_request(request, 3);
+        kimi::handle_usage(context);
+        const auto serialized = addon::serialize_json(context.payload);
+        require(serialized.size() <= addon::limits::k_max_frame_bytes - 65536,
+            "actual pages retain the provider's payload reserve");
+        const auto parsed = addon::parse_json(serialized, {}, nullptr);
+        const auto page = parsed ? addon::decode_usage_scan_result(*parsed, nullptr, 3) : std::nullopt;
+        require(page.has_value() && !page->records.empty(), "every bounded page passes the complete wire codec");
+        for (const auto& record : page->records) {
+            require(identifiers.insert(record.record_id).second && record.total_tokens == 4096 &&
+                record.temporal && record.temporal->portions.size() == 4096 &&
+                record.temporal->parent.snapshot_id == page->snapshot_id,
+                "byte refusal preserves each record and its full temporal proof for the next page");
+            total += record.total_tokens;
+        }
+        require(++pages <= 16, "every continuation advances the accounting cursor");
+        if (page->complete) break;
+        request.snapshot_id = page->snapshot_id;
+        request.cursor = page->next_cursor;
+    }
+    require(pages > 1 && identifiers.size() == 16 && total == 16 * 4096,
+        "optional bytes split pages without skipping or repeating original accounting");
 }
 
 void legacy_metadata_contract()
@@ -1171,6 +1228,7 @@ int main(int argc, char** argv)
         irrelevant_wire_records_contract();
         required_wire_records_contract();
         first_wire_record_contract();
+        paged_temporal_capacity_contract();
         return 0;
     }
     catch (const std::exception& error) {
