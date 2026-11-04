@@ -15,6 +15,7 @@
 
 #include <QByteArray>
 #include <QChar>
+#include <QCoreApplication>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QString>
@@ -68,27 +69,61 @@ public:
     fs::path m_path;
 };
 
+void trace_fixture_phase(std::string_view operation, std::string_view phase)
+{
+    const auto* path = std::getenv("KIMI_TEST_WRAPPER_TRACE");
+    require(path != nullptr, "helper fixture trace path is missing");
+    std::ofstream trace(addon::path_from_utf8(path), std::ios::binary | std::ios::app);
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    trace << "monotonic_ms=" << now << " pid=" << QCoreApplication::applicationPid()
+        << " operation=" << operation << " phase=" << phase << '\n';
+    trace.flush();
+    require(trace.good(), "helper fixture trace failed");
+}
+
 int capture_delivery(int argc, char** argv)
 {
     if (argc == 3 && std::string_view(argv[1]) == "request-title-instruction") {
+        trace_fixture_phase("request-title-instruction", "entry");
         std::cout << R"({"accepted":true,"instruction_required":false,"instruction":""})" << '\n';
+        std::cout.flush();
+        trace_fixture_phase("request-title-instruction", "response-flushed");
+        trace_fixture_phase("request-title-instruction", "return");
         return 0;
     }
     require(argc == 4 && std::string_view(argv[1]) == "provider-event", "unexpected helper command");
     if (std::string_view(argv[2]) == "acknowledge") {
+        trace_fixture_phase("acknowledge", "entry");
+        trace_fixture_phase("acknowledge", "return");
         return 0;
     }
     require(std::string_view(argv[2]) == "deliver" && std::string_view(argv[3]) == "--args-stdin",
         "helper delivery must use stdin");
+    trace_fixture_phase("deliver", "entry");
     const auto* path = std::getenv("KIMI_TEST_EVENT_CAPTURE");
     require(path != nullptr, "helper fixture capture path is missing");
     const std::string bytes{std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>()};
+    trace_fixture_phase("deliver", "stdin-eof");
     std::ofstream output(addon::path_from_utf8(path), std::ios::binary);
     output << bytes;
     output.close();
     require(output.good(), "helper fixture capture failed");
+    trace_fixture_phase("deliver", "capture-committed");
     std::cout << R"({"accepted":true,"epoch":1})" << '\n';
+    std::cout.flush();
+    trace_fixture_phase("deliver", "response-flushed");
+    trace_fixture_phase("deliver", "return");
     return 0;
+}
+
+void print_relay_bytes(std::string_view name, const QByteArray& bytes)
+{
+    constexpr qsizetype limit = 4096;
+    const auto visible = bytes.left(limit);
+    std::cerr << name << " bytes=" << bytes.size() << " truncated=" << (bytes.size() > limit) << '\n';
+    std::cerr.write(visible.constData(), static_cast<std::streamsize>(visible.size()));
+    std::cerr << '\n';
 }
 
 Json native_permission(std::string_view name, std::string_view id, std::string_view agent)
@@ -117,9 +152,23 @@ addon::Provider_event relay(
     const fs::path& home,
     const addon::Host_simulator& host,
     const Json& payload,
+    std::string_view scenario,
     std::string* diagnostic = nullptr)
 {
+    static std::uint64_t relay_ordinal = 0;
+    const auto ordinal = ++relay_ordinal;
+    const auto began = std::chrono::steady_clock::now();
+    const auto elapsed_ms = [&] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - began).count();
+    };
     const auto capture = home / "captured-event.json";
+    const auto trace = home / ("wrapper-trace-" + std::to_string(ordinal) + ".log");
+    // The SDK consumes wrapper stderr, so keep fixture phases for the relay's failure report.
+    {
+        std::ofstream output(trace, std::ios::binary);
+        require(output.good(), "helper fixture trace could not be created");
+    }
     fs::remove(capture);
     auto environment = QProcessEnvironment::systemEnvironment();
     environment.insert(addon::k_helper_env_vnmctl_path, QString::fromStdString(addon::path_to_utf8(executable)));
@@ -131,6 +180,7 @@ addon::Provider_event relay(
         QString::fromStdString(addon::path_to_utf8(package / "helpers")));
     environment.insert(QStringLiteral("KIMI_CODE_HOME"), QString::fromStdString(addon::path_to_utf8(home)));
     environment.insert(QStringLiteral("KIMI_TEST_EVENT_CAPTURE"), QString::fromStdString(addon::path_to_utf8(capture)));
+    environment.insert(QStringLiteral("KIMI_TEST_WRAPPER_TRACE"), QString::fromStdString(addon::path_to_utf8(trace)));
 
     const auto hooks = toml::parse(kimi::hook_entry("PermissionRequest", 13));
     const auto command = hooks["hooks"][0]["command"].value<std::string>();
@@ -147,10 +197,39 @@ addon::Provider_event relay(
 #endif
     process.start();
     require(process.waitForStarted(5000), "packaged helper did not start");
+    const auto started_ms = elapsed_ms();
+    const auto started_pid = process.processId();
     const auto bytes = QByteArray::fromStdString(addon::serialize_json(payload));
-    require(process.write(bytes) == bytes.size(), "native hook input was not written");
+    const auto queued_bytes = process.write(bytes);
+    require(queued_bytes == bytes.size(), "native hook input was not written");
     process.closeWriteChannel();
-    require(process.waitForFinished(10000), "packaged helper did not finish");
+    const auto wait_began_ms = elapsed_ms();
+    const bool finished = process.waitForFinished(10000);
+    if (!finished) {
+        const auto finished_ms = elapsed_ms();
+        std::cerr << "packaged relay scenario=" << scenario << " ordinal=" << ordinal
+            << " event=" << json_util::text(payload, "hook_event_name")
+            << " elapsed_ms=" << finished_ms << " started_ms=" << started_ms
+            << " finish_wait_ms=" << (finished_ms - wait_began_ms) << '\n';
+        std::cerr << "qprocess started_pid=" << started_pid << " current_pid=" << process.processId()
+            << " state=" << process.state() << " error=" << process.error()
+            << " error_string=" << process.errorString().toStdString()
+            << " input_bytes=" << bytes.size() << " queued_bytes=" << queued_bytes
+            << " pending_bytes=" << process.bytesToWrite() << '\n';
+        print_relay_bytes("stdout", process.readAllStandardOutput());
+        print_relay_bytes("stderr", process.readAllStandardError());
+        std::error_code capture_error;
+        const auto capture_size = fs::file_size(capture, capture_error);
+        std::cerr << "capture status=" << (capture_error ? capture_error.message() : "present")
+            << " bytes=" << (capture_error ? 0 : capture_size) << '\n';
+        std::ifstream trace_input(trace, std::ios::binary);
+        QByteArray trace_bytes(4097, '\0');
+        trace_input.read(trace_bytes.data(), static_cast<std::streamsize>(trace_bytes.size()));
+        trace_bytes.resize(static_cast<qsizetype>(trace_input.gcount()));
+        std::cerr << "wrapper_trace open=" << trace_input.is_open() << " read_error=" << trace_input.bad() << '\n';
+        print_relay_bytes("wrapper_trace", trace_bytes);
+    }
+    require(finished, "packaged helper did not finish");
     if (diagnostic) {
         *diagnostic = process.readAllStandardError().replace("\r\n", "\n").toStdString();
     }
@@ -207,7 +286,8 @@ void permission_pair(const fs::path& package, const fs::path& executable)
     request.transition_nonce = nonce;
     request.event = relay(package, executable, workspace.m_path, host,
         json_util::object({{"hook_event_name", Json("SessionStart")},
-            {"session_id", Json("session-permission")}, {"source", Json("new")}}));
+            {"session_id", Json("session-permission")}, {"source", Json("new")}}),
+        "permission_pair/admission");
     const auto started = classify(host, request);
     require(started.base.classification == addon::Classification::TRANSITION && !started.attention_kind,
         "session admission remains the shared classification path");
@@ -215,14 +295,15 @@ void permission_pair(const fs::path& package, const fs::path& executable)
     const std::string first_id  = "approval_2eb0b40f-75e5-4880-8b6b-c1305f6294f1";
     const std::string second_id = "approval_b590bd4c-78da-4d18-a319-b06c5a7f6453";
     request.event = relay(package, executable, workspace.m_path, host,
-        native_permission("PermissionRequest", first_id, "main"));
+        native_permission("PermissionRequest", first_id, "main"), "permission_pair/unbound");
     require(classify(host, request).base.classification == addon::Classification::IGNORED,
         "permission cannot open a host epoch");
     request.ledger = {1, addon::Ledger_transition{addon::Transition_kind::START, "session-permission", nonce}};
 
     for (const auto* event : {"PermissionRequest", "PermissionResult"}) {
         for (const auto& [id, agent] : {std::pair{first_id, "main"}, {second_id, "agent-review"}}) {
-            request.event = relay(package, executable, workspace.m_path, host, native_permission(event, id, agent));
+            request.event = relay(package, executable, workspace.m_path, host,
+                native_permission(event, id, agent), "permission_pair/paired");
             require(json_util::text(request.event.body, "id") == id &&
                 json_util::text(request.event.body, "agent_id") == agent &&
                 json_util::text(request.event.body, "tool_call_id") == "call_deploy_preview",
@@ -260,7 +341,8 @@ void permission_pair(const fs::path& package, const fs::path& executable)
     // Kimi starts each hook process independently. A result may arrive first;
     // the host's existing request tombstone owns suppression of a late request.
     request.event = relay(package, executable, workspace.m_path, host,
-        native_permission("PermissionResult", "approval_86b6d226-b30e-41a2-af43-a1cc925d7cd7", "agent-test"));
+        native_permission("PermissionResult", "approval_86b6d226-b30e-41a2-af43-a1cc925d7cd7", "agent-test"),
+        "permission_pair/early-result");
     require(classify(host, request).base.observations.size() == 1,
         "an early native result must reach the host's per-request tombstone");
     const auto admitted = request;
@@ -658,7 +740,7 @@ void native_interactions(const fs::path& package, const fs::path& executable)
     start.event = relay(package, executable, workspace.m_path, host,
         json_util::object({{"hook_event_name", Json("SessionStart")},
             {"session_id", Json("session-permission")}, {"source", Json("resume")},
-            {"interaction_frontier", Json("untrusted native input")}}));
+            {"interaction_frontier", Json("untrusted native input")}}), "native_interactions/admission");
 
     // The helper has returned, but adapter admission has not run. A native first
     // prompt in this interval must remain after the helper's frozen frontier.
@@ -740,7 +822,8 @@ void native_interactions(const fs::path& package, const fs::path& executable)
     start.transition_nonce = nonce;
     start.event = relay(package, executable, workspace.m_path, host,
         json_util::object({{"hook_event_name", Json("SessionStart")},
-            {"session_id", Json("session-permission")}, {"source", Json("resume")}}));
+            {"session_id", Json("session-permission")}, {"source", Json("resume")}}),
+        "native_interactions/readmission");
     classify(host, start);
     append_wire(main_wire, interaction("question_next_process", "main"));
     window = observe(host, workspace.m_path, nonce);
@@ -977,7 +1060,8 @@ void frontier_failure_preserves_admission(const fs::path& package, const fs::pat
     request.event = relay(package, executable, workspace.m_path, host,
         json_util::object({{"hook_event_name", Json("SessionStart")},
             {"session_id", Json("session-permission")}, {"source", Json("resume")},
-            {"interaction_frontier", Json("untrusted native input")}}), &diagnostic);
+            {"interaction_frontier", Json("untrusted native input")}}),
+        oversized ? "frontier_capacity/admission" : "frontier_unavailable/admission", &diagnostic);
     const auto* frontier = request.event.body.find("interaction_frontier");
     require(frontier && frontier->is_null(),
         "failed optional capture must explicitly disable interaction observation for this admission");
@@ -988,7 +1072,8 @@ void frontier_failure_preserves_admission(const fs::path& package, const fs::pat
     request.ledger = {1, addon::Ledger_transition{addon::Transition_kind::RESUME, "session-permission", nonce}};
     for (const auto* event : {"PermissionRequest", "PermissionResult"}) {
         request.event = relay(package, executable, workspace.m_path, host,
-            native_permission(event, "approval_degraded_reader", "reviewer"));
+            native_permission(event, "approval_degraded_reader", "reviewer"),
+            oversized ? "frontier_capacity/permission" : "frontier_unavailable/permission");
         const auto result = classify(host, request);
         require(result.base.classification == addon::Classification::EVENT &&
             result.base.observations.size() == 1 && result.attention_kind && result.attention_kind->kind == "permission",
