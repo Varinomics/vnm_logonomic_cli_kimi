@@ -2354,13 +2354,9 @@ void handle_usage(addon::Invocation_context& context)
     std::uint64_t end = begin;
     std::size_t encoded_records_bytes = 0;
     const auto append = [&](const addon::Usage_record& record) {
-        const auto previous_bytes = encoded_records_bytes;
-        if (!addon::append_usage_page_record(page, record, encoded_records_bytes, 3)) return false;
-        if (addon::serialize_json(addon::encode_usage_scan_result(page, 3)).size() <=
-            addon::limits::k_max_frame_bytes - 65536) return true;
-        page.records.pop_back();
-        encoded_records_bytes = previous_bytes;
-        return false;
+        constexpr auto reserved_bytes = addon::limits::k_max_exchange_payload_bytes -
+            (addon::limits::k_max_frame_bytes - 65536);
+        return addon::append_usage_page_record(page, record, encoded_records_bytes, 3, reserved_bytes);
     };
     std::string line;
     while (page.records.size() < addon::k_max_usage_page_records && read_line(records, line)) {
