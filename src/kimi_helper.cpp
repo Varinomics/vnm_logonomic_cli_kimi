@@ -1,4 +1,5 @@
 #include "kimi_accounts.h"
+#include "kimi_execution_context.h"
 #include "kimi_guidance.h"
 #include "kimi_interactions.h"
 #include "kimi_json.h"
@@ -76,6 +77,9 @@ int main()
     const auto nonce = addon::random_nonce_hex();
     auto body = json_util::object({{"session_id", Json(json_util::text(*payload, "session_id"))},
         {"source", Json(json_util::text(*payload, "source"))}});
+    if (name == "SessionEnd") {
+        body.set("reason", Json(json_util::text(*payload, "reason")));
+    }
     if (permission) {
         // Approval IDs pair native hooks without relaying commands or approval prose.
         for (const auto key : {"id", "agent_id", "tool_call_id"}) {
@@ -97,6 +101,9 @@ int main()
             runtime, kimi::path_string(std::filesystem::current_path())));
         body.set("kimi_code_home", Json(home));
         if (name == "SessionStart") {
+            addon::encode_execution_updates(body, {kimi::capture_session_start_context(
+                addon::path_from_utf8(home), json_util::text(*payload, "session_id"), nonce,
+                json_util::text(*payload, "cwd"))});
             try {
                 body.set("interaction_frontier", kimi::capture_interaction_frontier(
                     home, json_util::text(*payload, "session_id")));

@@ -153,7 +153,8 @@ addon::Provider_event relay(
     const addon::Host_simulator& host,
     const Json& payload,
     std::string_view scenario,
-    std::string* diagnostic = nullptr)
+    std::string* diagnostic = nullptr,
+    std::string* transition_nonce = nullptr)
 {
     static std::uint64_t relay_ordinal = 0;
     const auto ordinal = ++relay_ordinal;
@@ -245,6 +246,9 @@ addon::Provider_event relay(
     require(captured.find("private-command") == std::string::npos &&
         captured.find("private-feedback") == std::string::npos,
         "approval content must stay in the native process");
+    if (transition_nonce) {
+        *transition_nonce = json_util::text(*envelope, "transition_nonce");
+    }
     return {json_util::text(event, "name"), json_util::member(event, "body")};
 }
 
@@ -268,6 +272,56 @@ addon::Attention_classification_result classify(
     const auto result = addon::decode_attention_classification_result(payload, &failure);
     require(result.has_value(), "packaged adapter returned invalid attention metadata: " + failure.reason_code);
     return *result;
+}
+
+void native_session_context_is_captured_before_delivery(const fs::path& package, const fs::path& executable)
+{
+    Workspace workspace;
+    const auto state = workspace.m_path / "sessions/workspace/session-permission/state.json";
+    fs::create_directories(state.parent_path());
+    const auto cwd = addon::path_to_utf8(workspace.m_path / "native default with spaces/nested");
+    auto metadata = json_util::object({{"id", Json("session-permission")}, {"version", Json(2)},
+        {"createdAt", Json(1)}, {"updatedAt", Json(2)}, {"archived", Json(false)},
+        {"cwd", Json(cwd)}, {"agents", Json::object()}, {"custom", Json::object()}});
+    const auto persist = [&] {
+        std::ofstream output(state, std::ios::binary);
+        output << addon::serialize_json(metadata);
+        output.close();
+        require(output.good(), "native context fixture must be complete");
+    };
+    persist();
+    addon::Simulator_options options;
+    options.package_directory = package;
+    addon::Host_simulator host(options, nullptr);
+    addon::Contract_failure failure;
+    require(host.start(&failure), failure.reason_code + ": " + failure.detail);
+    addon::Classify_event_request request;
+    request.execution_context_version = 1;
+    request.event = relay(package, executable, workspace.m_path, host,
+        json_util::object({{"hook_event_name", Json("SessionStart")},
+            {"session_id", Json("session-permission")}, {"source", Json("resume")}, {"cwd", Json(cwd)},
+            {"execution_context", Json("untrusted native input")}}),
+        "native_session_context/admission", nullptr, &request.transition_nonce);
+    require(addon::is_valid_transition_nonce_hex(request.transition_nonce),
+        "context must carry the source helper's transition nonce");
+    invoke(host, {addon::k_lifecycle_correlation_lifetime_capability_id, 1}, "reserve",
+        addon::encode_lifecycle_correlation_reserve_request({{request.transition_nonce}}));
+
+    // Adapter classification must use the helper's source snapshot. Native
+    // metadata changed after the hook cannot be relabelled as that event.
+    metadata.set("environmentId", Json("remote-after-source"));
+    metadata.set("environmentCwd", Json("/remote/after-source"));
+    persist();
+    const auto classified = classify(host, request);
+    require(classified.base.classification == addon::Classification::TRANSITION &&
+        classified.base.execution_updates.size() == 1 && !classified.base.execution_failure,
+        "the packaged helper publishes identity and requested context together");
+    const auto& update = classified.base.execution_updates.front();
+    require(update.provider_session_id == "session-permission" &&
+        update.transition_nonce == request.transition_nonce && update.sequence == 0 &&
+        update.status == addon::Execution_context_status::CONFIRMED &&
+        update.environment == "local" && update.cwd == cwd,
+        "the packaged adapter must preserve the native local source snapshot verbatim");
 }
 
 void permission_pair(const fs::path& package, const fs::path& executable)
@@ -1137,6 +1191,8 @@ int main(int argc, char** argv)
         interaction_required_records_remain_strict();
         interaction_record_lexical_boundaries();
         permission_pair(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
+        native_session_context_is_captured_before_delivery(fs::absolute(addon::path_from_utf8(argv[1])),
+            fs::absolute(addon::path_from_utf8(argv[0])));
         native_interactions(fs::absolute(addon::path_from_utf8(argv[1])), fs::absolute(addon::path_from_utf8(argv[0])));
         frontier_failures_are_explicit();
         frontier_failure_preserves_admission(fs::absolute(addon::path_from_utf8(argv[1])),

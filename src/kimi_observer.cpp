@@ -1,4 +1,6 @@
 #include "kimi_observer.h"
+#include "kimi_execution_context.h"
+#include "kimi_resume.h"
 #include "kimi_json.h"
 #include "kimi_interactions.h"
 #include "kimi_launcher.h"
@@ -513,6 +515,17 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
             (found->second->home != home || found->second->session != session)) {
             throw std::runtime_error("wire_session_already_bound");
         }
+        const auto& current = request.ledger.current_transition;
+        if (current && current->provider_session_id == session) {
+            const auto active = m_state->sessions.find(current->nonce);
+            if (active != m_state->sessions.end() && active->second && !active->second->closed &&
+                active->second->session == session && active->second->home == home)
+            {
+                // Kimi's same-current resume is a no-op. A repeated notification
+                // must not replace its admitted cursor or interaction frontier.
+                return result;
+            }
+        }
         if (!found->second) {
             auto binding = std::make_shared<Binding>(session, home);
             binding->nonce = request.transition_nonce;
@@ -524,13 +537,27 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
         result.classification = addon::Classification::TRANSITION;
         result.transition = source == "resume" ? addon::Transition_kind::RESUME : addon::Transition_kind::START;
         observation.session_transition = addon::Session_transition::STARTED;
-        observation.resume_record = json_util::object({{"provider_session_id", Json(session)}});
+        try {
+            observation.resume_record = make_resume_record(addon::path_from_utf8(home), session);
+        }
+        catch (const std::exception&) {
+            // Unsupported optional resume evidence cannot suppress native identity.
+        }
+        classify_session_start_context(request, result);
     }
     else {
         const auto key = request.ledger.current_transition ? request.ledger.current_transition->nonce : std::string{};
-        if (const auto found = m_state->sessions.find(key); found != m_state->sessions.end() && found->second && found->second->session == session) {
+        if (const auto found = m_state->sessions.find(key); found != m_state->sessions.end() && found->second &&
+            found->second->session == session && found->second->home == json_util::text(event.body, "kimi_code_home"))
+        {
             auto& binding = *found->second;
+            if (binding.closed) {
+                return result;
+            }
             observation.session_transition = addon::Session_transition::ENDED;
+            if (json_util::bounded_string(json_util::member(event.body, "reason"), 160, true)) {
+                observation.session_end_reason = json_util::text(event.body, "reason");
+            }
             binding.pending_end = observation;
             if (!binding.closed) {
                 try {
@@ -544,10 +571,15 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
                     if (binding.cursor_key.empty() || !binding.failure.empty()) throw;
                 }
             }
-            // The continuous queue retains an unfinished terminal fact until
-            // every final wire byte has been acquired, ahead of its exact cursor.
+            // Retain the terminal fact behind acquisition of the captured wire
+            // snapshot and its exact cursor. Native SessionEnd is not a flush seal.
             if (!binding.cursor_key.empty()) return result;
             if (!binding.closed) throw std::runtime_error("wire_final_drain_incomplete");
+        }
+        else {
+            // Native /new and /resume announce B before closing A. The host
+            // owns A's retirement; its later hook cannot publish through B.
+            return result;
         }
         result.classification = addon::Classification::EVENT;
         observation.session_transition = addon::Session_transition::ENDED;

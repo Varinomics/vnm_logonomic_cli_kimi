@@ -73,8 +73,9 @@ endfunction()
 
 set(kimi_provider_sources
     src/kimi_accounts.cpp src/kimi_usage.cpp src/kimi_usage_correction.cpp
-    src/kimi_acp.cpp src/kimi_config.cpp src/kimi_guidance.cpp src/kimi_interactions.cpp src/kimi_launcher.cpp
-    src/kimi_observer.cpp src/kimi_preparation.cpp src/kimi_quota.cpp src/kimi_quota_direct.cpp
+    src/kimi_acp.cpp src/kimi_config.cpp src/kimi_execution_context.cpp src/kimi_guidance.cpp
+    src/kimi_interactions.cpp src/kimi_launcher.cpp src/kimi_observer.cpp src/kimi_preparation.cpp
+    src/kimi_quota.cpp src/kimi_quota_direct.cpp src/kimi_resume.cpp
     src/kimi_wire.cpp src/kimi_wire_record.cpp)
 function(kimi_add_provider target)
     add_library(${target} STATIC ${kimi_provider_sources})
@@ -156,6 +157,14 @@ target_link_libraries(kimi_preparation_tests PRIVATE
 kimi_target(kimi_preparation_tests)
 add_test(NAME kimi_preparation_tests COMMAND kimi_preparation_tests)
 set_tests_properties(kimi_preparation_tests PROPERTIES TIMEOUT 120)
+add_executable(kimi_resume_tests tests/kimi_resume_tests.cpp)
+target_link_libraries(kimi_resume_tests PRIVATE
+    kimi_provider logonomic_cli_addon_sdk::test_support)
+kimi_target(kimi_resume_tests)
+add_dependencies(kimi_resume_tests kimi_package)
+add_test(NAME kimi_resume_tests COMMAND kimi_resume_tests)
+add_test(NAME kimi_resume_packaged_tests COMMAND kimi_resume_tests "${KIMI_PACKAGE_DIRECTORY}")
+set_tests_properties(kimi_resume_tests kimi_resume_packaged_tests PROPERTIES TIMEOUT 120)
 add_executable(kimi_contract_tests tests/kimi_contract_tests.cpp)
 target_link_libraries(kimi_contract_tests PRIVATE kimi_provider)
 kimi_target(kimi_contract_tests)
@@ -246,7 +255,8 @@ if(WIN32)
     endif()
     # These executables run from the build tree, outside the assembled package.
     # Clean copied-package qualification supplies its own runtime environment.
-    set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_contract_tests kimi_permission_tests
+    set_tests_properties(kimi_observer_tests kimi_preparation_tests kimi_resume_tests kimi_resume_packaged_tests
+        kimi_contract_tests kimi_permission_tests
         kimi_quota_startup_tests kimi_quota_output_tests
         kimi_usage_tests kimi_usage_correction_tests ${KIMI_USAGE_CACHE_PHASE_TESTS} kimi_acp_causal_tests kimi_quota_direct_tests
         kimi_continuation_tests
