@@ -480,7 +480,7 @@ void start_hook_validation()
 
 void resume_policy(
     const char* executable, const char* help, bool admitted = true,
-    const std::optional<std::string>& configuration = std::nullopt)
+    const std::optional<std::string>& configuration = std::nullopt, bool scoped_checks = false)
 {
     namespace fs = std::filesystem;
     const auto scratch = fs::temp_directory_path() / ("kimi-resume-" + addon::random_nonce_hex());
@@ -547,6 +547,74 @@ void resume_policy(
     std::ifstream persisted(root / "selected" / "config.toml", std::ios::binary);
     const std::string unchanged{std::istreambuf_iterator<char>(persisted), std::istreambuf_iterator<char>()};
     require(unchanged == original_configuration, "resume admission must not rewrite the selected profile");
+    if (!scoped_checks) {
+        return;
+    }
+
+    // Native metadata and --session address the same ID inside the original
+    // KIMI_CODE_HOME. Explicit preparation uses the inspection lookup afresh.
+    const auto session = root / "selected/sessions/workspace/session-selected";
+    fs::create_directories(session);
+    const auto write_state = [&](const fs::path& directory) {
+        fs::create_directories(directory);
+        std::ofstream state(directory / "state.json", std::ios::binary | std::ios::trunc);
+        state << R"({"id":"session-selected","version":2,"createdAt":1,"updatedAt":2,"archived":false,"agents":{},"custom":{}})";
+        state.close();
+        require(state.good(), "scoped resume metadata fixture is complete");
+    };
+    write_state(session);
+    auto native_store = addon::Json_value::object();
+    native_store.set("version", addon::Json_value(1));
+    native_store.set("kimi_code_home", addon::Json_value(home));
+    request.resume_record.set("native_store", native_store);
+    const auto scoped_record = request.resume_record;
+    const auto prepare = [&](const addon::Resume_prepare_request& selected, const std::string& reason = {}) {
+        Context invocation;
+        invocation.m_request = {"scoped-resume", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(selected, 2)};
+        if (!reason.empty()) {
+            bool refused = false;
+            try {
+                kimi::handle_preparation(invocation);
+            }
+            catch (const std::runtime_error& error) {
+                refused = error.what() == reason;
+            }
+            require(refused && !invocation.m_result, "unverified or absent native target is not prepared");
+            return;
+        }
+        kimi::handle_preparation(invocation);
+        const auto prepared = invocation.m_result
+            ? addon::decode_resume_prepare_result(*invocation.m_result, &failure, 2) : std::nullopt;
+        require(prepared && addon::validate_resume_process_proposal(prepared->process, &failure) &&
+            addon::validate_resume_acknowledgment(selected.resume_record, prepared->acknowledgment, &failure),
+            "scoped preparation acknowledges the exact original native store and selector");
+        require(prepared->process.argv == std::vector<std::string>{addon::path_to_utf8(fake), "--session", "session-selected"} &&
+            prepared->patch.set.empty() && prepared->patch.unset.empty(),
+            "scoped resume preserves the account selector and native argument semantics");
+    };
+    prepare(request);
+    fs::create_directories(root / "destination/nested");
+    request.context.working_directory = addon::path_to_utf8(root / "destination/nested");
+    prepare(request);
+    require(request.resume_record == scoped_record, "the host-selected launch directory does not rewrite conversation identity");
+
+    auto foreign = request;
+    foreign.resume_record.find("native_store")->set("kimi_code_home", addon::Json_value(addon::path_to_utf8(root / "foreign")));
+    prepare(foreign, "resume_scope_mismatch");
+    auto foreign_environment = request;
+    foreign_environment.context.launch_environment->effective_environment.set("KIMI_CODE_HOME",
+        addon::Json_value(addon::path_to_utf8(root / "foreign")));
+    prepare(foreign_environment, "resume_scope_mismatch");
+    write_state(root / "selected/sessions/second-workspace/session-selected");
+    prepare(request, "native_session_ambiguous");
+    fs::remove_all(root / "selected/sessions/second-workspace");
+    fs::remove(session / "state.json");
+    prepare(request);
+    fs::remove_all(session);
+    prepare(request, "native_session_absent");
+    write_state(session);
+    prepare(request);
 }
 
 } // namespace
@@ -576,6 +644,7 @@ int main(int argc, char** argv)
             resume_policy(argv[0], help, false);
         }
         resume_policy(argv[0], "  --session [id]\n", true, three_hook_configuration());
+        resume_policy(argv[0], "  --session [id]\n", true, std::nullopt, true);
         start_hook_validation();
         return 0;
     }

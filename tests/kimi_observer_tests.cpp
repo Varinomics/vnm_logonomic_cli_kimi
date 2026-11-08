@@ -1,4 +1,5 @@
 #include "kimi_observer.h"
+#include "kimi_execution_context.h"
 #include "kimi_interactions.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
@@ -699,6 +700,260 @@ void final_page_requires_exact_acknowledgment()
     require(!poll(observer, nonce, stop->resume_cursor), "terminal retirement removes cursor ownership");
 }
 
+// Native oracle: KimiTUI creates/resumes B before setSession closes A. The host
+// retires A's continuous correlation when it accepts B's SessionStart.
+void native_start_before_previous_end_preserves_current_session()
+{
+    Workspace workspace;
+    native_call(workspace, "previous");
+    native_call(workspace, "current");
+    kimi::Lifecycle_observer observer;
+    const auto previous = addon::random_nonce_hex();
+    const auto current = addon::random_nonce_hex();
+    require(reserve(observer, previous), "reserve the departing native conversation");
+    observer.classify(start_request(workspace, previous, "previous"));
+    Context previous_window;
+    prepare_observe(previous_window, workspace, previous, "previous");
+    previous_window.m_cancel_on_progress = true;
+    observer.handle(previous_window);
+    require(previous_window.m_result.has_value(), "departing conversation owns its wire cursor");
+    require(reserve(observer, current), "reserve the replacement native conversation");
+    auto start = start_request(workspace, current, "current");
+    start.ledger.current_epoch = 1;
+    start.ledger.current_transition = addon::Ledger_transition{addon::Transition_kind::START, "previous", previous};
+    require(observer.classify(start).classification == addon::Classification::TRANSITION,
+        "native replacement SessionStart activates its own conversation");
+    require(retire(observer, previous), "host replacement retires the departed observation scope");
+    Context current_window;
+    prepare_observe(current_window, workspace, current, "current");
+    current_window.m_cancel_on_progress = true;
+    observer.handle(current_window);
+    const auto before = poll(observer, current);
+    require(current_window.m_result.has_value() && before && before->observations.size() == 1,
+        "replacement conversation has an independent live child");
+    auto end = start_request(workspace, addon::random_nonce_hex(), "previous");
+    end.event.name = "SessionEnd";
+    end.ledger.current_epoch = 2;
+    end.ledger.current_transition = addon::Ledger_transition{addon::Transition_kind::START, "current", current};
+    const auto classified = observer.classify(end);
+    require(classified.classification == addon::Classification::IGNORED && classified.observations.empty(),
+        "late native SessionEnd for departed A must not publish into active B");
+    const auto after = poll(observer, current);
+    require(after && after->resume_cursor == before->resume_cursor && after->observations.size() == 1 &&
+        after->observations.front().subagent_transition == addon::Subagent_transition::STARTED,
+        "late departed end must preserve B's unread wire facts");
+}
+
+void native_end_before_start_retains_departed_terminal_page()
+{
+    Workspace workspace;
+    native_call(workspace, "previous");
+    native_call(workspace, "current");
+    kimi::Lifecycle_observer observer;
+    const auto previous = addon::random_nonce_hex();
+    require(reserve(observer, previous), "reserve the ending conversation");
+    auto end = start_request(workspace, previous, "previous");
+    observer.classify(end);
+    Context previous_window;
+    prepare_observe(previous_window, workspace, previous, "previous");
+    previous_window.m_cancel_on_progress = true;
+    observer.handle(previous_window);
+    end.event.name = "SessionEnd";
+    end.event.body.set("reason", addon::Json_value("exit"));
+    end.ledger = {1, addon::Ledger_transition{addon::Transition_kind::START, "previous", previous}};
+    require(observer.classify(end).observations.empty(), "the ending scope retains its own terminal fact");
+    const auto final = poll(observer, previous);
+    require(final && final->observations.size() == 3 && !final->more &&
+        final->observations[1].subagent_transition == addon::Subagent_transition::STOPPED &&
+        final->observations[2].session_transition == addon::Session_transition::ENDED &&
+        final->observations[2].session_end_reason == "exit",
+        "observed child completion must precede A's final SessionEnd page");
+    for (const auto& observation : final->observations) {
+        require(observation.provider_session_id == "previous" && observation.provider_event_id.starts_with(previous + ':'),
+            "departing observations retain their original identity and nonce");
+    }
+    const auto current = addon::random_nonce_hex();
+    require(reserve(observer, current), "reserve the next conversation while A's page is retained");
+    auto start = start_request(workspace, current, "current");
+    start.ledger = end.ledger;
+    observer.classify(start);
+    Context current_window;
+    prepare_observe(current_window, workspace, current, "current");
+    current_window.m_cancel_on_progress = true;
+    observer.handle(current_window);
+    const auto replay = poll(observer, previous);
+    require(replay && replay->resume_cursor == final->resume_cursor && replay->observations.size() == 3,
+        "B's classification cannot consume or reassign A's retained final page");
+    require(!retire(observer, previous, previous + ":1") && retire(observer, previous, final->resume_cursor),
+        "only A's exact final cursor releases A's terminal evidence");
+    const auto current_page = poll(observer, current);
+    require(current_page && current_page->observations.size() == 1 &&
+        current_page->observations.front().provider_session_id == "current",
+        "consuming A's final page cannot close or discard B's current observations");
+}
+
+void native_resume_round_trip_reuses_identity_with_fresh_correlation()
+{
+    Workspace workspace;
+    native_call(workspace, "first");
+    native_call(workspace, "second");
+    kimi::Lifecycle_observer observer;
+    const auto first = addon::random_nonce_hex();
+    require(reserve(observer, first), "reserve the first native activation");
+    auto request = start_request(workspace, first, "first");
+    request.event.body.set("source", addon::Json_value("startup"));
+    const auto initial = observer.classify(request);
+    require(initial.observations.size() == 1 && initial.observations.front().resume_record,
+        "native activation publishes a scoped exact resume record");
+    const auto record = addon::serialize_json(*initial.observations.front().resume_record);
+    const auto duplicate = addon::random_nonce_hex();
+    require(reserve(observer, duplicate), "reserve a repeated same-current notification");
+    request.transition_nonce = duplicate;
+    request.event.body.set("source", addon::Json_value("resume"));
+    request.ledger = {1, addon::Ledger_transition{addon::Transition_kind::START, "first", first}};
+    const auto repeated = observer.classify(request);
+    require(repeated.classification == addon::Classification::IGNORED && repeated.observations.empty(),
+        "selecting the same current native identity cannot mint another activation");
+    require(retire(observer, duplicate), "ignored same-current delivery releases only its candidate reservation");
+    const auto second = addon::random_nonce_hex();
+    require(reserve(observer, second), "reserve the clear-created native conversation");
+    request = start_request(workspace, second, "second");
+    request.event.body.set("source", addon::Json_value("startup"));
+    request.ledger = {1, addon::Ledger_transition{addon::Transition_kind::START, "first", first}};
+    const auto cleared = observer.classify(request);
+    require(cleared.classification == addon::Classification::TRANSITION &&
+        cleared.transition == addon::Transition_kind::START &&
+        addon::serialize_json(*cleared.observations.front().resume_record) != record,
+        "native clear is a fresh conversation with its own stable resume identity");
+    require(retire(observer, first), "the host releases the departed A observation lane");
+    const auto returned = addon::random_nonce_hex();
+    require(reserve(observer, returned), "reserve the resumed A activation");
+    request = start_request(workspace, returned, "first");
+    request.event.body.set("source", addon::Json_value("resume"));
+    request.ledger = {2, addon::Ledger_transition{addon::Transition_kind::START, "second", second}};
+    const auto resumed = observer.classify(request);
+    require(resumed.classification == addon::Classification::TRANSITION &&
+        resumed.transition == addon::Transition_kind::RESUME &&
+        addon::serialize_json(*resumed.observations.front().resume_record) == record,
+        "A to B to A keeps A's exact history identity while activating a new correlation");
+    require(retire(observer, second), "the host releases B when A returns");
+    Context window;
+    prepare_observe(window, workspace, returned, "first");
+    window.m_cancel_on_progress = true;
+    observer.handle(window);
+    const auto page = poll(observer, returned);
+    require(window.m_result && page && page->observations.size() == 1 &&
+        page->observations.front().provider_event_id.starts_with(returned + ':'),
+        "returning A observes under its fresh nonce rather than reviving its retired cursor");
+    request.event.name = "SessionEnd";
+    request.event.body.set("kimi_code_home", addon::Json_value(kimi::path_string(workspace.m_root / "different-store")));
+    request.ledger = {3, addon::Ledger_transition{addon::Transition_kind::RESUME, "first", returned}};
+    const auto foreign = observer.classify(request);
+    require(foreign.classification == addon::Classification::IGNORED && foreign.observations.empty(),
+        "a native ID from another store cannot end the current conversation");
+    require(poll(observer, returned)->observations.size() == 1,
+        "an ignored foreign end leaves the current source cursor intact");
+}
+
+void native_session_start_context_requires_current_local_evidence()
+{
+    Workspace workspace;
+    const auto session_directory = workspace.m_root / "sessions/workspace/session";
+    const auto state = session_directory / "state.json";
+    fs::create_directories(session_directory);
+    const auto cwd = kimi::path_string(workspace.m_root / "directory with spaces/nested");
+    const auto nonce = addon::random_nonce_hex();
+    auto metadata = json_util::object({{"id", addon::Json_value("session")},
+        {"version", addon::Json_value(2)}, {"createdAt", addon::Json_value(1)},
+        {"updatedAt", addon::Json_value(2)}, {"archived", addon::Json_value(false)},
+        {"cwd", addon::Json_value(cwd)}, {"agents", addon::Json_value::object()},
+        {"custom", addon::Json_value::object()}});
+    const auto capture = [&](std::string_view native_cwd) {
+        return kimi::capture_session_start_context(workspace.m_root, "session", nonce, native_cwd);
+    };
+    require(capture(cwd).status == addon::Execution_context_status::UNKNOWN,
+        "a hook cwd without a verified native environment cannot establish a local default");
+    write_bytes(state, addon::serialize_json(metadata));
+    const auto local = capture(cwd);
+    require(addon::is_valid_execution_context_update(local) &&
+        local.provider_session_id == "session" && local.transition_nonce == nonce && local.sequence == 0 &&
+        local.status == addon::Execution_context_status::CONFIRMED && local.environment == "local" && local.cwd == cwd,
+        "native local SessionStart preserves its exact nested directory and activation");
+    require(capture({}).status == addon::Execution_context_status::UNKNOWN &&
+        capture(kimi::path_string(workspace.m_root)).status == addon::Execution_context_status::UNKNOWN,
+        "metadata or process launch cwd cannot replace the native SessionStart cwd");
+    const auto environment_cwd = kimi::path_string(workspace.m_root / "another local default");
+    metadata.set("environmentId", addon::Json_value("local"));
+    metadata.set("environmentCwd", addon::Json_value(environment_cwd));
+    write_bytes(state, addon::serialize_json(metadata));
+    require(capture(cwd).status == addon::Execution_context_status::UNKNOWN &&
+        capture(environment_cwd).cwd == environment_cwd,
+        "a native local environment binding must agree with the hook's actual default");
+    metadata.set("environmentId", addon::Json_value("remote-environment"));
+    metadata.set("environmentCwd", addon::Json_value("/remote/default"));
+    write_bytes(state, addon::serialize_json(metadata));
+    const auto remote = capture(cwd);
+    require(addon::is_valid_execution_context_update(remote) &&
+        remote.status == addon::Execution_context_status::UNAVAILABLE && remote.environment == "unsupported" &&
+        remote.cwd.empty(), "a remote SessionStart carrier path cannot become a local default");
+    metadata.set("version", addon::Json_value(3));
+    write_bytes(state, addon::serialize_json(metadata));
+    require(capture(cwd).status == addon::Execution_context_status::UNKNOWN,
+        "unrecognized native metadata cannot establish an environment invariant");
+}
+
+void session_start_context_rejects_foreign_activations()
+{
+    Workspace workspace;
+    auto request = start_request(workspace, addon::random_nonce_hex());
+    request.execution_context_version = 1;
+    addon::Execution_context_update update;
+    update.provider_session_id = "session";
+    update.transition_nonce = request.transition_nonce;
+    update.source = "SessionStart:session-environment";
+    addon::encode_execution_updates(request.event.body, {update});
+    addon::Classify_event_result result;
+    kimi::classify_session_start_context(request, result);
+    require(result.execution_updates.size() == 1 && !result.execution_failure,
+        "a joint unknown snapshot remains attributed to its exact native activation");
+    request.execution_context_version = 0;
+    result = {};
+    kimi::classify_session_start_context(request, result);
+    require(result.execution_updates.empty() && !result.execution_failure,
+        "context is omitted when its capability was not requested");
+    request.execution_context_version = 1;
+    request.transition_nonce = addon::random_nonce_hex();
+    result = {};
+    kimi::classify_session_start_context(request, result);
+    require(result.execution_updates.empty() && result.execution_failure,
+        "an old A snapshot cannot acquire a new A activation's nonce at delivery");
+    request.transition_nonce = update.transition_nonce;
+    update.sequence = 1;
+    addon::encode_execution_updates(request.event.body, {update});
+    result = {};
+    kimi::classify_session_start_context(request, result);
+    require(result.execution_updates.empty() && result.execution_failure,
+        "a one-shot native SessionStart snapshot cannot assert a later source sequence");
+    request.event.body.set("execution_context", json_util::object({{"version", addon::Json_value(99)}}));
+    result = {};
+    kimi::classify_session_start_context(request, result);
+    require(result.execution_updates.empty() && result.execution_failure,
+        "unsupported optional context fails without invalidating native lifecycle classification");
+    kimi::Lifecycle_observer observer;
+    require(reserve(observer, request.transition_nonce), "reserve identity beside malformed optional context");
+    const auto classified = observer.classify(request);
+    const auto decoded = addon::decode_classify_event_result(addon::encode_classify_event_result(classified), nullptr);
+    require(decoded && decoded->classification == addon::Classification::TRANSITION &&
+        decoded->observations.size() == 1 && decoded->execution_failure && decoded->execution_updates.empty(),
+        "malformed optional context must leave the native identity admissible through the shared codec");
+    request = start_request(workspace, addon::random_nonce_hex(), "native.id.outside-resume-selector");
+    require(reserve(observer, request.transition_nonce), "reserve identity outside the existing resume-selector grammar");
+    const auto unsupported_resume = observer.classify(request);
+    require(unsupported_resume.classification == addon::Classification::TRANSITION &&
+        unsupported_resume.observations.size() == 1 && !unsupported_resume.observations.front().resume_record,
+        "optional resume-record limits cannot suppress an otherwise valid native identity");
+}
+
 // Oracle: the host's feature gate. It rejects an observation carrying a fact
 // the package's own declaration leaves unsupported. The observer reports no
 // native turn hook; session and permission hooks and wire children retain their own facts.
@@ -797,11 +1052,22 @@ int main(int argc, char** argv)
             irrelevant_interaction_records_preserve_observation();
             return 0;
         }
+        if (std::string_view(argv[1]) == "--live-switch") {
+            native_start_before_previous_end_preserves_current_session();
+            native_end_before_start_retains_departed_terminal_page();
+            native_resume_round_trip_reuses_identity_with_fresh_correlation();
+            return 0;
+        }
         irrelevant_interaction_records_preserve_observation();
         declared_profile_admits_every_shape(addon::path_from_utf8(argv[1]));
         candidates_reclaim_without_tombstones();
         retirement_releases_only_its_owner();
         final_page_requires_exact_acknowledgment();
+        native_start_before_previous_end_preserves_current_session();
+        native_end_before_start_retains_departed_terminal_page();
+        native_resume_round_trip_reuses_identity_with_fresh_correlation();
+        native_session_start_context_requires_current_local_evidence();
+        session_start_context_rejects_foreign_activations();
         in_flight_watch_stops_on_retirement();
         native_wire_reconciliation_preserves_records_and_final_drain();
         native_cancellation_is_published_before_session_end();

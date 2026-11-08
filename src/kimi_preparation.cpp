@@ -4,6 +4,7 @@
 #include "kimi_config.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
+#include "kimi_resume.h"
 
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/package_source.h>
@@ -11,7 +12,6 @@
 #include <logonomic_cli_addon/launcher_utilities.h>
 
 #include <filesystem>
-#include <regex>
 #include <stdexcept>
 
 namespace json_util = logonomic::cli_addon::json;
@@ -129,10 +129,13 @@ void prepare_resume(addon::Invocation_context& context)
     addon::Contract_failure error;
     const auto request = addon::decode_resume_prepare_request(context.request().payload, &error, 2);
     if (!request) { context.fail(addon::Result_status::FAILED, error.reason_code, error.detail); return; }
-    const auto session = json_util::text(request->resume_record, "provider_session_id");
-    static const std::regex identity("[A-Za-z0-9][A-Za-z0-9_-]{0,255}");
-    if (!json_util::exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, identity)) {
+    const auto record = decode_kimi_resume_record(request->resume_record);
+    if (!record) {
         context.fail(addon::Result_status::FAILED, "invalid_resume_record");
+        return;
+    }
+    if (record->kimi_code_home && !resume_scope_matches(*record, request->context)) {
+        context.fail(addon::Result_status::FAILED, "resume_scope_mismatch");
         return;
     }
     const auto workspace = addon::path_from_utf8(request->context.working_directory);
@@ -143,6 +146,16 @@ void prepare_resume(addon::Invocation_context& context)
     }
     auto environment = environment_pairs(request->context.launch_environment->effective_environment);
     const auto home = bound_home(*request->context.launch_environment, request->context.working_directory, request->context.account_context);
+    if (record->kimi_code_home) {
+        const auto native = lookup_native_session(*record->kimi_code_home, record->provider_session_id);
+        if (native.selector_ambiguous || native.availability == addon::Resume_availability::ABSENT) {
+            context.fail(addon::Result_status::UNAVAILABLE,
+                native.selector_ambiguous ? "native_session_ambiguous" : "native_session_absent");
+            return;
+        }
+        // UNKNOWN remains explicitly resumable. The native entry point owns
+        // recovery of an unreadable or newer store; inspection never deletes it.
+    }
     const auto program = verified_program(request->context.launcher, request->context.launcher_argv,
         environment, request->context.working_directory, true, context);
     if (!program) { unavailable(context); return; }
@@ -152,7 +165,7 @@ void prepare_resume(addon::Invocation_context& context)
     }
     auto argv = addon::literal_argv(request->context.launcher.script_body);
     argv.front() = *program;
-    argv.insert(argv.end(), {"--session", session});
+    argv.insert(argv.end(), {"--session", record->provider_session_id});
     addon::Resume_prepare_result result;
     result.process.executable = k_bridge;
     result.process.argv = std::move(argv);
@@ -170,7 +183,13 @@ void prepare_resume(addon::Invocation_context& context)
 void handle_preparation(addon::Invocation_context& context)
 {
     const auto& request = context.request();
-    if (request.capability.capability_id == "interactive-resume" && request.operation == "prepare_resume") {
+    if (request.capability.capability_id == "interactive-resume" && request.operation == "inspect_resume") {
+        handle_resume_inspection(context);
+    }
+    else
+    if (request.capability.capability_id == "interactive-resume" &&
+        request.capability.version == 2 && request.operation == "prepare_resume")
+    {
         prepare_resume(context);
     }
     else
