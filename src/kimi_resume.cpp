@@ -3,6 +3,7 @@
 #include "kimi_accounts.h"
 
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/usage_scan.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -53,7 +54,7 @@ bool valid_home(std::string_view text)
 fs::file_status native_status(const fs::path& path)
 {
     std::error_code error;
-    const auto result = fs::symlink_status(path, error);
+    const auto result = fs::symlink_status(addon::usage_cache_io_path(path), error);
     if (error && error != std::errc::no_such_file_or_directory) {
         throw std::runtime_error("native_session_unavailable");
     }
@@ -71,12 +72,13 @@ std::optional<std::string> read_stable_file(const fs::path& path, std::size_t bo
     if (!fs::is_regular_file(native_status(path))) {
         return std::nullopt;
     }
-    const auto size = fs::file_size(path);
-    const auto modified = fs::last_write_time(path);
+    const auto io_path = addon::usage_cache_io_path(path);
+    const auto size = fs::file_size(io_path);
+    const auto modified = fs::last_write_time(io_path);
     if (size > bound) {
         return std::nullopt;
     }
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(io_path, std::ios::binary);
     if (!input) {
         return std::nullopt;
     }
@@ -84,8 +86,8 @@ std::optional<std::string> read_stable_file(const fs::path& path, std::size_t bo
     input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     if (input.gcount() != static_cast<std::streamsize>(bytes.size()) || input.bad() ||
         input.peek() != std::char_traits<char>::eof() ||
-        !fs::is_regular_file(native_status(path)) || fs::file_size(path) != size ||
-        fs::last_write_time(path) != modified)
+        !fs::is_regular_file(native_status(path)) || fs::file_size(io_path) != size ||
+        fs::last_write_time(io_path) != modified)
     {
         return std::nullopt;
     }
@@ -717,22 +719,24 @@ bool resume_scope_matches(const Resume_record& record, const addon::Session_laun
 Native_session_lookup lookup_native_session(const fs::path& home, std::string_view session)
 {
     try {
-        if (!home.is_absolute() || !valid_session_id(session) || !fs::is_directory(home)) {
+        const auto io_home = addon::usage_cache_io_path(home);
+        if (!home.is_absolute() || !valid_session_id(session) || !fs::is_directory(io_home)) {
             return {};
         }
-        const auto canonical_home = fs::canonical(home);
+        const auto canonical_home = fs::canonical(io_home);
         const auto sessions = home / "sessions";
         if (!native_directory(sessions)) {
             return {};
         }
-        const auto initial_time = fs::last_write_time(sessions);
+        const auto io_sessions = addon::usage_cache_io_path(sessions);
+        const auto initial_time = fs::last_write_time(io_sessions);
         std::vector<std::pair<fs::path, fs::file_time_type>> workspaces;
         fs::path selected;
         std::size_t entries = 0;
         // Native sessionIndexSource reads this exact path; session_index.jsonl
         // and the optional database are hints/projections. Only workspace
         // buckets are enumerated, never the other conversations' histories.
-        for (const auto& entry : fs::directory_iterator(sessions)) {
+        for (const auto& entry : fs::directory_iterator(io_sessions)) {
             if (++entries > k_workspace_bound) {
                 return {};
             }
@@ -740,15 +744,17 @@ Native_session_lookup lookup_native_session(const fs::path& home, std::string_vi
             if (name == ".index-cache" || name == ".index-dirty") {
                 continue;
             }
-            const auto kind = native_status(entry.path());
+            // Extended Windows spelling is an I/O detail, never native scope.
+            const auto workspace = sessions / entry.path().filename();
+            const auto kind = native_status(workspace);
             if (fs::is_symlink(kind)) {
                 return {};
             }
             if (!fs::is_directory(kind)) {
                 continue;
             }
-            workspaces.emplace_back(entry.path(), fs::last_write_time(entry.path()));
-            const auto candidate = entry.path() / addon::path_from_utf8(session);
+            workspaces.emplace_back(workspace, fs::last_write_time(addon::usage_cache_io_path(workspace)));
+            const auto candidate = workspace / addon::path_from_utf8(session);
             const auto candidate_kind = native_status(candidate);
             if (!fs::exists(candidate_kind)) {
                 continue;
@@ -777,11 +783,13 @@ Native_session_lookup lookup_native_session(const fs::path& home, std::string_vi
             result.session_directory = selected;
             result.metadata = *metadata;
         }
-        if (fs::canonical(home) != canonical_home || fs::last_write_time(sessions) != initial_time) {
+        if (fs::canonical(io_home) != canonical_home || fs::last_write_time(io_sessions) != initial_time) {
             return {};
         }
         for (const auto& [workspace, modified] : workspaces) {
-            if (!native_directory(workspace) || fs::last_write_time(workspace) != modified) {
+            if (!native_directory(workspace) ||
+                fs::last_write_time(addon::usage_cache_io_path(workspace)) != modified)
+            {
                 return {};
             }
         }

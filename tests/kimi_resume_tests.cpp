@@ -9,6 +9,7 @@
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
+#include <logonomic_cli_addon/usage_scan.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -49,7 +50,7 @@ public:
     ~Workspace()
     {
         std::error_code error;
-        fs::remove_all(path, error);
+        fs::remove_all(addon::usage_cache_io_path(path), error);
     }
 
     fs::path path;
@@ -57,8 +58,8 @@ public:
 
 void write(const fs::path& path, const std::string& bytes)
 {
-    fs::create_directories(path.parent_path());
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    fs::create_directories(addon::usage_cache_io_path(path.parent_path()));
+    std::ofstream output(addon::usage_cache_io_path(path), std::ios::binary | std::ios::trunc);
     output << bytes;
     output.close();
     require(output.good(), "native history fixture is written completely");
@@ -66,7 +67,7 @@ void write(const fs::path& path, const std::string& bytes)
 
 std::string read(const fs::path& path)
 {
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(addon::usage_cache_io_path(path), std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
@@ -270,8 +271,42 @@ void native_completed_contract(const fs::path& fixture, addon::Host_simulator* h
         "incomplete native completion write remains uncertain");
 }
 
+void long_native_history_contract(const fs::path& fixture, addon::Host_simulator* host)
+{
+#ifdef _WIN32
+    using Availability = addon::Resume_availability;
+    using Content = addon::Resume_content;
+    auto home = fixture / "retained-profile";
+    while (home.native().size() < 280) {
+        home /= "working-directory-history";
+    }
+    const auto session = home / "sessions/wd_project_hash/session-a";
+    const auto state = session / "state.json";
+    const auto wire = session / "agents/main/wire.jsonl";
+    const auto metadata = addon::serialize_json(native_metadata("session-a"));
+    const auto history = std::string(k_metadata) + std::string(k_user) + std::string(k_model);
+    write(state, metadata);
+    write(wire, history);
+    require(fs::is_regular_file(addon::usage_cache_io_path(state)) &&
+        fs::is_regular_file(addon::usage_cache_io_path(wire)),
+        "long-path native history is present before inspection");
+    auto request = inspection_request(home, fixture);
+    expect(request, Availability::AVAILABLE, Content::NONEMPTY, host,
+        "native history beyond Windows MAX_PATH remains available");
+    require(read(state) == metadata && read(wire) == history,
+        "long-path inspection preserves native history bytes");
+    request.resume_record = scoped_record(home, "absent-session");
+    expect(request, Availability::ABSENT, Content::UNKNOWN, host,
+        "a complete long-path scan can still prove native absence");
+#else
+    (void)fixture;
+    (void)host;
+#endif
+}
+
 void history_contract(const fs::path& fixture, addon::Host_simulator* host)
 {
+    long_native_history_contract(fixture, host);
     native_completed_contract(fixture, host);
     native_initialization_contract(fixture, host);
     using Availability = addon::Resume_availability;
