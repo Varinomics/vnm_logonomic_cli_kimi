@@ -202,15 +202,18 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t-_. /\\:=") != std::string::npos) return std::nullopt;
         if (supplied != std::vector<std::string>{"powershell.exe", "-NoLogo", "-Command", launcher.script_body}) return std::nullopt;
     }
-    if (!resume && !std::all_of(args.begin() + 1, args.end(), [](const std::string& option) {
-            return option == "--yolo" || option == "-y" || option == "--auto" || option == "--plan";
-        })) return std::nullopt;
-    if (resume) {
-        for (std::size_t index = 1; index < args.size(); ++index) {
-            const auto& option = args[index];
-            if (option == "--yolo" || option == "-y" || option == "--auto" || option == "--plan") continue;
-            if (option != "--model" && option != "-m" && option != "--skills-dir" && option != "--add-dir") return std::nullopt;
-            if (++index == args.size() || args[index].empty() || args[index].starts_with('-')) return std::nullopt;
+    for (std::size_t index = 1; index < args.size(); ++index) {
+        const auto& option = args[index];
+        if (option == "--yolo" || option == "-y" || option == "--auto" || option == "--plan") {
+            continue;
+        }
+        if (option != "--model" && option != "-m" &&
+            (!resume || (option != "--skills-dir" && option != "--add-dir")))
+        {
+            return std::nullopt;
+        }
+        if (++index == args.size() || args[index].empty() || args[index].starts_with('-')) {
+            return std::nullopt;
         }
     }
     const auto program = resolve_program(args.front(), environment, working_directory);

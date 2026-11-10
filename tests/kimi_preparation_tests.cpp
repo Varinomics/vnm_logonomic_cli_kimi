@@ -2,6 +2,7 @@
 #include "kimi_acp.h"
 #include "kimi_accounts.h"
 #include "kimi_config.h"
+#include "kimi_launcher.h"
 
 #include <logonomic_cli_addon_test/invocation_context.h>
 
@@ -114,6 +115,31 @@ void required_control_reaches_native_admission(const char* executable)
         auto expected = selected.context.launcher_argv;
         expected.push_back("acp");
         require(proposal && proposal->process.argv == expected, "launcher permission options are preserved in delegated ACP");
+    }
+    for (const bool override_model : {false, true}) {
+        auto selected = request;
+        selected.context.launcher.script_body += " --model saved-model --plan";
+        selected.context.launcher_argv.insert(selected.context.launcher_argv.end(), {"--model", "saved-model", "--plan"});
+        if (override_model) selected.model_selection = addon::Delegated_model_selection{"task-model", "high"};
+        Context configured;
+        configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
+            addon::encode_delegated_prepare_request(selected)};
+        kimi::handle_preparation(configured);
+        const auto proposal = configured.m_result
+            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure) : std::nullopt;
+        require(proposal && proposal->model_selection == selected.model_selection &&
+            proposal->account_context && proposal->account_context->profile_path == home &&
+            proposal->account_context->adapter_account_key == selected.context.account_context->adapter_account_key &&
+            kimi::environment_value(proposal->process.environment, "KIMI_CODE_HOME") == home,
+            "task settings keep the selected account and acknowledge only the request");
+        const auto state = addon::parse_json(proposal->inspection.protocol_state, {}, nullptr);
+        const auto selection = state ? addon::decode_delegated_model_selection(*state->find("model_selection"), &failure) : std::nullopt;
+        require(selection && selection->model == (override_model ? "task-model" : "saved-model") &&
+            selection->reasoning_effort == (override_model ? std::optional<std::string>("high") : std::nullopt) &&
+            state->find("launcher_mode")->as_string() == "plan",
+            "ACP carries the requested or saved model without changing launcher permissions");
+        require(selected.context.launcher.script_body.ends_with("--model saved-model --plan"),
+            "the saved launcher remains unchanged");
     }
     const auto& input = result->process.stdin_payload;
     const auto session = addon::parse_json(input.substr(input.find('\n') + 1), {}, nullptr);

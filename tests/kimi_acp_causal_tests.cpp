@@ -106,8 +106,51 @@ void launcher_permissions()
         "missing plain allow-once refuses instead of selecting a persistent or mode-changing approval");
 }
 
+void task_model_selection()
+{
+    auto request = task_request();
+    request.context.launcher.script_body = "kimi --model saved-model --plan";
+    request.model_selection = addon::Delegated_model_selection{"task-model", "high"};
+    const auto model = inspect(provider::initial_acp_state(request), initialize + new_session + commands);
+    require(!model.failure_reason && carries(model, R"("configId":"model","value":"task-model")") &&
+        !carries(model, "TASK PAYLOAD"), "task model is selected before effort, permission mode and the task");
+    const auto model_ack = reply(3, R"({"configOptions":[{"id":"model","currentValue":"task-model"}]})");
+    const auto effort_ack = reply(4, R"({"configOptions":[{"id":"thinking","currentValue":"high"}]})");
+    for (std::size_t split = 1; split < model_ack.size(); ++split) {
+        const auto first = inspect(model.protocol_state, model_ack.substr(0, split));
+        require(!first.failure_reason && !first.stdin_bytes, "partial model acknowledgment cannot release effort or task");
+        const auto second = inspect(first.protocol_state, model_ack.substr(split));
+        require(!second.failure_reason && carries(second, R"("configId":"thinking","value":"high")"),
+            "the exact native model acknowledgment releases its native effort setting");
+    }
+    require(inspect(model.protocol_state, model_ack + effort_ack).failure_reason == "out_of_order_acp_response",
+        "effort cannot acknowledge a configuration request that has not been written");
+    const auto effort = inspect(model.protocol_state, model_ack);
+    const auto mode = inspect(effort.protocol_state, effort_ack);
+    require(!mode.failure_reason && carries(mode, R"("id":5)") && carries(mode, R"("value":"plan")") &&
+        !carries(mode, "TASK PAYLOAD"), "model selection preserves the saved permission mode");
+    const auto querying = inspect(mode.protocol_state, reply(5, R"({"configOptions":[{"id":"mode","currentValue":"plan"}]})"));
+    require(!querying.failure_reason && carries(querying, R"("id":6)") && carries(querying, "/mcp"),
+        "configuration acknowledgment still requires Task-server admission");
+    const auto prompt = inspect(querying.protocol_state, status(connected, 6));
+    require(!prompt.failure_reason && carries(prompt, R"("id":7)") && carries(prompt, "TASK PAYLOAD"),
+        "the task follows every exact configuration acknowledgment and Task-server admission");
+    require(inspect(model.protocol_state, reply(3, R"({"configOptions":[{"id":"model","currentValue":"other"}]})")).failure_reason ==
+        "model_selection_unavailable", "a changed model never releases the task");
+    require(inspect(effort.protocol_state, reply(4, R"({"configOptions":[{"id":"thinking","currentValue":"medium"}]})")).failure_reason ==
+        "reasoning_effort_unavailable", "clamped effort never releases the task");
+    require(inspect(effort.protocol_state, R"({"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Unsupported effort"}})" "\n").failure_reason ==
+        "reasoning_effort_unavailable", "native unsupported effort fails before the task");
+    request.context.launcher.script_body = "kimi";
+    request.model_selection = addon::Delegated_model_selection{std::nullopt, "off"};
+    const auto effort_only = inspect(provider::initial_acp_state(request), initialize + new_session);
+    require(!effort_only.failure_reason && carries(effort_only, R"("id":3)") &&
+        carries(effort_only, R"("configId":"thinking","value":"off")"), "effort-only selection preserves the native default model");
+}
+
 int main() {
     launcher_permissions();
+    task_model_selection();
     for (const auto& [flag, mode] : {std::pair{"--yolo", "auto"}, {"-y", "auto"},
             {"--auto", "yolo"}, {"--plan", "plan"}}) {
         auto request = task_request();

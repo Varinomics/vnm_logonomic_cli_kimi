@@ -98,7 +98,12 @@ background completion and file replay. Ambiguous session paths are rejected.
 
 Delegated execution requires the native ACP contract and a supported observed
 version (at least 0.39.1); future releases are not rejected by an upper version
-ceiling. Interactive resume additionally verifies native `--session [id]` support
+ceiling. `delegated-model-selection@1` applies a task's model and native reasoning
+effort through ACP `session/set_config_option` (`model` and `thinking`). A saved
+launcher model remains effective when the task does not override it. The task
+waits for exact native acknowledgments before permission mode and Task-server
+admission; unsupported values fail before the prompt. These session settings
+preserve the selected account and saved defaults. Interactive resume additionally verifies native `--session [id]` support
 and the installed SessionStart hook. The quota helper reads managed usage over
 HTTPS when the selected official Kimi endpoint and file credential are known
 and native token renewal is not due. Kimi remains the sole owner of credential

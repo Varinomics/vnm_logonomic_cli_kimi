@@ -28,8 +28,6 @@ constexpr std::size_t k_status_limit = 64 * 1024;
 // connection change over ACP, so a pending server is queried again.
 constexpr std::string_view k_status_command = "mcp";
 constexpr auto k_status_interval = std::chrono::milliseconds(100);
-// Requests 1-3 initialize the session; status queries, the task and close follow.
-constexpr int k_first_status_request_id = 4;
 constexpr double k_max_request_id = 2147483647.0;
 
 enum class Task_server_status { ADMITTED, PENDING, UNAVAILABLE };
@@ -96,15 +94,21 @@ addon::Structured_inspect_result failure(const char* reason)
     return result;
 }
 
-bool mode_matches(const Json& value, std::string_view mode)
+bool configuration_matches(const Json& value, std::string_view id, std::string_view expected)
 {
     const auto& options = json_util::member(value, "configOptions");
     if (!options.is_array()) return false;
+    bool matched = false;
     for (const auto& option : options.as_array()) {
         if (!option.is_object()) return false;
-        if (json_util::text(option, "id") == "mode" && json_util::text(option, "currentValue") == mode) return true;
+        if (json_util::text(option, "id") == id) {
+            if (matched || json_util::text(option, "currentValue") != expected) {
+                return false;
+            }
+            matched = true;
+        }
     }
-    return false;
+    return matched;
 }
 
 // Approve only the tools injected for this Task. Never select a persistent
@@ -195,7 +199,8 @@ bool valid_plan(const Json& value)
 }
 
 bool notification(const Json& value, std::string_view stage, std::string_view session, bool status_outstanding,
-    std::string& output, std::string& status, bool& status_command, std::string_view mode)
+    std::string& output, std::string& status, bool& status_command, std::string_view mode,
+    const addon::Delegated_model_selection& selection)
 {
     const auto& params = json_util::member(value, "params");
     if (!json_util::exact_keys(value, {"jsonrpc", "method", "params"}) || json_util::text(value, "jsonrpc") != "2.0" ||
@@ -220,7 +225,16 @@ bool notification(const Json& value, std::string_view stage, std::string_view se
             json_util::text(update, "currentModeId") == mode;
     }
     if (type == "config_option_update") {
-        return stage == "await_mode" && json_util::exact_keys(update, {"sessionUpdate", "configOptions"}) && mode_matches(update, mode);
+        if (!json_util::exact_keys(update, {"sessionUpdate", "configOptions"})) {
+            return false;
+        }
+        if (stage == "await_model" && selection.model) {
+            return configuration_matches(update, "model", *selection.model);
+        }
+        if (stage == "await_effort" && selection.reasoning_effort) {
+            return configuration_matches(update, "thinking", *selection.reasoning_effort);
+        }
+        return stage == "await_mode" && configuration_matches(update, "mode", mode);
     }
     if (type == "agent_message_chunk" || type == "agent_thought_chunk") {
         if (stage != "await_prompt" || !valid_text(update)) return false;
@@ -329,8 +343,8 @@ std::string initial_acp_state(const addon::Delegated_prepare_request& request)
 {
     auto servers = Json::array();
     auto tools = Json::array();
-    // Kimi's ACP entry ignores top-level mode flags. Mirror their CLI meaning
-    // only when the launcher explicitly supplies one (plan takes precedence).
+    // Kimi's ACP entry ignores top-level settings. Apply saved mode and model
+    // choices through session configuration before the task (plan takes precedence).
     const auto args = addon::literal_argv(request.context.launcher.script_body);
     const auto has = [&](std::string_view flag) { return std::find(args.begin(), args.end(), flag) != args.end(); };
     const std::string mode = has("--plan") ? "plan" : has("--auto") ? "yolo" :
@@ -340,18 +354,34 @@ std::string initial_acp_state(const addon::Delegated_prepare_request& request)
         servers.push_back(json_util::object({{"name", Json(task_server_name(request, server))},
             {"actions", Json(static_cast<double>(server.actions.size()))}}));
     }
-    return addon::serialize_json(json_util::object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
+    auto state = json_util::object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
         {"deferred_input_base64", Json("")},
         {"prompt_base64", Json(addon::encode_base64(request.prompt))}, {"session_id", Json("")}, {"result_base64", Json("")},
         {"task_tools", std::move(tools)}, {"launcher_mode", Json(mode)}, {"servers", std::move(servers)}, {"status_command", Json(false)}, {"request_id", Json(0)},
-        {"status_base64", Json("")}}));
+        {"status_base64", Json("")}});
+    addon::Delegated_model_selection selection;
+    for (std::size_t index = 1; index + 1 < args.size(); ++index) {
+        if (args[index] == "--model" || args[index] == "-m") {
+            selection.model = args[++index];
+        }
+    }
+    if (request.model_selection) {
+        if (request.model_selection->model) {
+            selection.model = request.model_selection->model;
+        }
+        selection.reasoning_effort = request.model_selection->reasoning_effort;
+    }
+    if (selection.model || selection.reasoning_effort) {
+        state.set("model_selection", addon::encode_delegated_model_selection(selection));
+    }
+    return addon::serialize_json(state);
 }
 
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
-    if (!parsed || !json_util::exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
-            "result_base64", "task_tools", "launcher_mode", "servers", "status_command", "request_id", "status_base64"}) ||
+    if (!parsed || !json_util::only_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
+            "result_base64", "task_tools", "launcher_mode", "servers", "status_command", "request_id", "status_base64", "model_selection"}) ||
         !json_util::member(*parsed, "stage").is_string() || !json_util::bounded_string(json_util::member(*parsed, "session_id"), 512, true) ||
         !json_util::member(*parsed, "servers").is_array() || !json_util::member(*parsed, "status_command").is_boolean() ||
         !nonnegative_integer(json_util::member(*parsed, "request_id")) || json_util::member(*parsed, "request_id").as_number() > k_max_request_id)
@@ -363,6 +393,15 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (!json_util::bounded_string(tool, 64)) return failure("malformed_acp_state");
     }
     if (!json_util::member(*parsed, "launcher_mode").is_string()) return failure("malformed_acp_state");
+    addon::Delegated_model_selection selection;
+    if (const auto* record = parsed->find("model_selection")) {
+        addon::Contract_failure error;
+        const auto decoded = addon::decode_delegated_model_selection(*record, &error);
+        if (!decoded) {
+            return failure("malformed_acp_state");
+        }
+        selection = *decoded;
+    }
     auto state = std::move(*parsed);
     for (const auto key : {"pending_base64", "deferred_input_base64", "prompt_base64", "result_base64", "status_base64"}) {
         if (!json_util::member(state, key).is_string()) return failure("malformed_acp_state");
@@ -382,6 +421,25 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     auto request_id = static_cast<int>(json_util::member(state, "request_id").as_number());
     const auto status_request = [&state, &request_id]() {
         return prompt_request(request_id, json_util::member(state, "session_id"), "/" + std::string(k_status_command));
+    };
+    const int effort_request_id = 3 + (selection.model ? 1 : 0);
+    const int mode_request_id   = effort_request_id + (selection.reasoning_effort ? 1 : 0);
+    const int first_status_id   = mode_request_id + 1;
+    const auto configure = [&state](int id, const char* setting, const std::string& value) {
+        return rpc(id, "session/set_config_option", json_util::object({{"sessionId", json_util::member(state, "session_id")},
+            {"configId", Json(setting)}, {"value", Json(value)}}));
+    };
+    const auto prepare_mode = [&]() {
+        const auto mode = json_util::text(state, "launcher_mode");
+        state.set("stage", Json(mode.empty() ? "await_admission" : "await_mode"));
+        if (!mode.empty()) {
+            return configure(mode_request_id, "mode", mode);
+        }
+        if (status_command) {
+            request_id = first_status_id;
+            return status_request();
+        }
+        return std::string{};
     };
     *pending += inspection.stdout_bytes;
     // A reply proposed while a native record is incomplete has not been
@@ -421,15 +479,17 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                 }
             }
             if (!notification(*value, stage, json_util::text(state, "session_id"), stage == "await_admission" && request_id != 0,
-                    *output, *status, status_command, json_util::text(state, "launcher_mode")))
+                    *output, *status, status_command, json_util::text(state, "launcher_mode"), selection))
             {
                 return failure("unauthenticated_acp_notification");
             }
-            if (type == "available_commands_update" && (stage == "await_mode" || stage == "await_admission")) {
+            if (type == "available_commands_update" &&
+                (stage == "await_model" || stage == "await_effort" || stage == "await_mode" || stage == "await_admission"))
+            {
                 // Without the builtin, "/mcp" would reach the model as a prompt.
                 if (!status_command) return failure("task_server_status_unavailable");
                 if (stage == "await_admission" && request_id == 0) {
-                    request_id = k_first_status_request_id;
+                    request_id = first_status_id;
                     input = status_request();
                 }
             }
@@ -446,22 +506,50 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (stage == "await_new") {
             if (!response(*value, 2) || !json_util::bounded_string(json_util::member(result, "sessionId"), 512)) return failure("invalid_acp_session");
             state.set("session_id", json_util::member(result, "sessionId"));
-            const auto mode = json_util::text(state, "launcher_mode");
-            state.set("stage", Json(mode.empty() ? "await_admission" : "await_mode"));
-            if (!mode.empty()) {
-                input = rpc(3, "session/set_config_option", json_util::object({{"sessionId", json_util::member(state, "session_id")},
-                    {"configId", Json("mode")}, {"value", Json(mode)}}));
+            if (selection.model) {
+                state.set("stage", Json("await_model"));
+                input = configure(3, "model", *selection.model);
+            }
+            else
+            if (selection.reasoning_effort) {
+                state.set("stage", Json("await_effort"));
+                input = configure(effort_request_id, "thinking", *selection.reasoning_effort);
+            }
+            else {
+                input = prepare_mode();
             }
         }
         else
+        if (stage == "await_model") {
+            if (!selection.model || !response(*value, 3) || !configuration_matches(result, "model", *selection.model)) {
+                return failure("model_selection_unavailable");
+            }
+            if (selection.reasoning_effort) {
+                state.set("stage", Json("await_effort"));
+                input = configure(effort_request_id, "thinking", *selection.reasoning_effort);
+            }
+            else {
+                input = prepare_mode();
+            }
+        }
+        else
+        if (stage == "await_effort") {
+            if (!selection.reasoning_effort || !response(*value, effort_request_id) ||
+                !configuration_matches(result, "thinking", *selection.reasoning_effort))
+            {
+                return failure("reasoning_effort_unavailable");
+            }
+            input = prepare_mode();
+        }
+        else
         if (stage == "await_mode") {
-            if (!response(*value, 3) || !mode_matches(result, json_util::text(state, "launcher_mode")) || prompt->empty() || !addon::is_valid_utf8(*prompt)) {
+            if (!response(*value, mode_request_id) || !configuration_matches(result, "mode", json_util::text(state, "launcher_mode")) || prompt->empty() || !addon::is_valid_utf8(*prompt)) {
                 return failure("invalid_acp_mode");
             }
             state.set("stage", Json("await_admission"));
             // The command list follows the session reply and may still be in flight.
             if (status_command) {
-                request_id = k_first_status_request_id;
+                request_id = first_status_id;
                 input = status_request();
             }
         }

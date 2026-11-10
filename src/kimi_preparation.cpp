@@ -78,6 +78,13 @@ void prepare_delegated(addon::Invocation_context& context)
     addon::Contract_failure error;
     const auto request = addon::decode_delegated_prepare_request(context.request().payload, &error);
     if (!request) { context.fail(addon::Result_status::FAILED, error.reason_code, error.detail); return; }
+    constexpr addon::Delegated_model_selection_declaration selection_support{true, true};
+    if (request->model_selection &&
+        !addon::validate_delegated_model_selection(*request->model_selection, &selection_support, &error))
+    {
+        context.fail(addon::Result_status::UNAVAILABLE, error.reason_code, error.detail);
+        return;
+    }
     if (request->purpose != addon::Structured_purpose::IMPLEMENTATION) {
         context.fail(addon::Result_status::UNAVAILABLE, "purpose_unavailable");
         return;
@@ -104,6 +111,7 @@ void prepare_delegated(addon::Invocation_context& context)
     addon::Delegated_prepare_result result;
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
+    result.model_selection = request->model_selection;
     result.process.executable = k_bridge;
     result.process.argv = addon::literal_argv(request->context.launcher.script_body);
     result.process.argv.front() = *program;
