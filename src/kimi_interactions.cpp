@@ -2,6 +2,7 @@
 #include "kimi_wire_record.h"
 
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/provider_event_diagnostic.h>
 #include <logonomic_cli_addon/sha256.h>
 
 #include <algorithm>
@@ -9,7 +10,9 @@
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -25,6 +28,17 @@ constexpr std::size_t k_frontier_bound = 32 * 1024;
 constexpr std::size_t k_request_bound = 4096;
 constexpr std::size_t k_record_bound = 4 * 1024 * 1024;
 constexpr std::size_t k_anchor_bound = 4096;
+
+[[noreturn]] void reject_frontier(
+    std::string field,
+    addon::Provider_event_problem problem,
+    const Json* value,
+    std::optional<std::uint64_t> limit = {},
+    std::string rule = {})
+{
+    throw addon::Provider_event_error(addon::make_provider_event_diagnostic(
+        "SessionStart", std::move(field), problem, value, limit, std::move(rule)));
+}
 
 bool valid_component(const std::string& value)
 {
@@ -280,26 +294,75 @@ Interaction_reader::Interaction_reader(std::string session, const Json& frontier
     const auto& version = json_util::member(frontier, "version");
     const auto& root = json_util::member(frontier, "root");
     const auto& agents = json_util::member(frontier, "agents");
-    if (!frontier.is_object() || frontier.as_object().size() != 3 ||
-        !version.is_integer() || version.as_integer() != 1 || !root.is_string() ||
-        (!root.as_string().empty() && !addon::sha256_from_hex(root.as_string())) ||
-        !agents.is_array() || agents.as_array().size() > k_agent_bound ||
-        addon::serialize_json(frontier).size() > k_frontier_bound)
-    {
-        throw std::runtime_error("invalid_interaction_frontier");
+    if (!frontier.is_object() || frontier.as_object().size() != 3) {
+        reject_frontier("interaction_frontier", addon::Provider_event_problem::INVALID_SHAPE,
+            &frontier, 3, "frontier_members");
+    }
+    if (!version.is_integer() || version.as_integer() != 1) {
+        reject_frontier("interaction_frontier.version", !frontier.find("version") ? addon::Provider_event_problem::MISSING
+                : !version.is_integer() ? addon::Provider_event_problem::WRONG_TYPE : addon::Provider_event_problem::INVALID_VALUE,
+            frontier.find("version"), {}, "frontier_version");
+    }
+    if (!root.is_string() || (!root.as_string().empty() && !addon::sha256_from_hex(root.as_string()))) {
+        reject_frontier("interaction_frontier.root", !frontier.find("root") ? addon::Provider_event_problem::MISSING
+                : !root.is_string() ? addon::Provider_event_problem::WRONG_TYPE : addon::Provider_event_problem::INVALID_VALUE,
+            frontier.find("root"), {}, "optional_sha256");
+    }
+    if (!agents.is_array() || agents.as_array().size() > k_agent_bound) {
+        reject_frontier("interaction_frontier.agents", !frontier.find("agents") ? addon::Provider_event_problem::MISSING
+                : !agents.is_array() ? addon::Provider_event_problem::WRONG_TYPE : addon::Provider_event_problem::TOO_LARGE,
+            frontier.find("agents"), k_agent_bound, "agent_count");
+    }
+    const auto frontier_bytes = addon::serialize_json(frontier).size();
+    if (frontier_bytes > k_frontier_bound) {
+        auto diagnostic = addon::make_provider_event_diagnostic(
+            "SessionStart", "interaction_frontier", addon::Provider_event_problem::TOO_LARGE,
+            &frontier, k_frontier_bound, "serialized_bytes");
+        diagnostic.actual_size = frontier_bytes;
+        throw addon::Provider_event_error(std::move(diagnostic));
     }
     m_state->session = std::move(session);
     m_state->root = root.as_string();
-    for (const auto& entry : agents.as_array()) {
+    for (std::size_t index = 0; index < agents.as_array().size(); ++index) {
+        const auto& entry = agents.as_array()[index];
+        const auto field = "interaction_frontier.agents[" + std::to_string(index) + "]";
         const auto agent = json_util::text(entry, "agent_id");
         const auto& offset = json_util::member(entry, "offset");
         const auto& anchor = json_util::member(entry, "anchor");
         const auto& partial = json_util::member(entry, "partial");
-        if (!entry.is_object() || entry.as_object().size() != 4 || !valid_component(agent) ||
-            !offset.is_integer() || offset.as_integer() < 0 || !anchor.is_string() ||
-            !addon::sha256_from_hex(anchor.as_string()) || !partial.is_boolean() || m_state->streams.contains(agent))
-        {
-            throw std::runtime_error("invalid_interaction_frontier");
+        if (!entry.is_object() || entry.as_object().size() != 4) {
+            reject_frontier(field, addon::Provider_event_problem::INVALID_SHAPE, &entry, 4, "agent_members");
+        }
+        if (!valid_component(agent)) {
+            const auto* value = entry.find("agent_id");
+            reject_frontier(field + ".agent_id", !value ? addon::Provider_event_problem::MISSING
+                    : !value->is_string() ? addon::Provider_event_problem::WRONG_TYPE
+                    : agent.empty() ? addon::Provider_event_problem::EMPTY
+                    : agent.size() > 256 ? addon::Provider_event_problem::TOO_LARGE
+                    : agent.find('\0') != std::string::npos ? addon::Provider_event_problem::CONTROL_CHARACTER
+                                                          : addon::Provider_event_problem::INVALID_VALUE,
+                value, 256, "session_component");
+        }
+        if (!offset.is_integer() || offset.as_integer() < 0) {
+            reject_frontier(field + ".offset", !entry.find("offset") ? addon::Provider_event_problem::MISSING
+                    : !offset.is_integer() ? addon::Provider_event_problem::WRONG_TYPE
+                                           : addon::Provider_event_problem::INVALID_VALUE,
+                entry.find("offset"), {}, "nonnegative_integer");
+        }
+        if (!anchor.is_string() || !addon::sha256_from_hex(anchor.as_string())) {
+            reject_frontier(field + ".anchor", !entry.find("anchor") ? addon::Provider_event_problem::MISSING
+                    : !anchor.is_string() ? addon::Provider_event_problem::WRONG_TYPE
+                                          : addon::Provider_event_problem::INVALID_VALUE,
+                entry.find("anchor"), {}, "sha256");
+        }
+        if (!partial.is_boolean()) {
+            reject_frontier(field + ".partial", !entry.find("partial") ? addon::Provider_event_problem::MISSING
+                    : addon::Provider_event_problem::WRONG_TYPE,
+                entry.find("partial"), {}, "boolean");
+        }
+        if (m_state->streams.contains(agent)) {
+            reject_frontier(field + ".agent_id", addon::Provider_event_problem::DUPLICATE,
+                entry.find("agent_id"), {}, "unique_agent");
         }
         Stream stream;
         stream.offset = static_cast<std::uint64_t>(offset.as_integer());

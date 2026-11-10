@@ -11,12 +11,15 @@
 #include <logonomic_cli_addon/adapter_runtime.h>
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/profile_storage.h>
+#include <logonomic_cli_addon/provider_event_diagnostic.h>
 #include <logonomic_cli_addon/session_contracts.h>
 #include <logonomic_cli_addon/usage_owned_event_correction.h>
 
+#include <array>
 #include <exception>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -105,6 +108,12 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         }
         else kimi::handle_preparation(context);
     }
+    catch (const addon::Provider_event_error& error) {
+        const bool cancelled = context.cancel_requested();
+        context.fail(cancelled ? addon::Result_status::CANCELLED : addon::Result_status::FAILED,
+            cancelled ? "cancelled" : "invalid_provider_event",
+            cancelled ? std::string{} : addon::encode_provider_event_diagnostic(error.diagnostic()));
+    }
     catch (const kimi::Usage_observation_unsettled&) {
         context.fail(context.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
             context.cancel_requested() ? "cancelled" : "usage_observation_unsettled");
@@ -123,6 +132,34 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
             context.fail(addon::Result_status::FAILED, std::string(reason),
                 "Kimi usage record is invalid.");
             return;
+        }
+        constexpr std::array observer_failures{
+            "invalid_observation_cursor", "invalid_kimi_session",
+            "wire_interest_capacity_exhausted", "wire_path_unavailable", "ambiguous_wire_session",
+            "wire_file_already_bound", "wire_final_drain_incomplete", "observation_queue_capacity_exhausted",
+            "direct_agent_active_capacity_exhausted", "direct_agent_retained_capacity_exhausted",
+            "direct_agent_identity_capacity_exhausted", "direct_agent_run_capacity_exhausted",
+            "interaction_wire_unavailable", "interaction_wire_changed", "interaction_inventory_capacity_exhausted",
+            "interaction_frontier_capacity_exhausted", "interaction_request_capacity_exhausted",
+            "ambiguous_interaction_session", "interaction_scope_changed", "invalid_interaction_wire_record",
+            "interaction_record_capacity_exhausted",
+        };
+        for (const char* known : observer_failures) {
+            if (reason != known) {
+                continue;
+            }
+            const auto& request = context.request();
+            if (request.capability.capability_id == "lifecycle-events" || request.capability.capability_id == "helper-ingress" ||
+                request.capability.capability_id == addon::k_attention_kind_capability_id)
+            {
+                const auto* event = request.payload.find("event");
+                const auto event_name = event ? addon::json::text(*event, "name") : request.operation;
+                context.fail(addon::Result_status::FAILED, known,
+                    addon::encode_provider_event_diagnostic(addon::make_provider_event_diagnostic(
+                        event_name, "wire", addon::Provider_event_problem::UNAVAILABLE, nullptr, {}, known)));
+                return;
+            }
+            break;
         }
         // Configuration, prompt, tokens and private filesystem bytes never
         // enter host diagnostics.
