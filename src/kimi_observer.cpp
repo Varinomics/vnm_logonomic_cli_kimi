@@ -7,6 +7,7 @@
 
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
+#include <logonomic_cli_addon/provider_event_diagnostic.h>
 #include <logonomic_cli_addon/sha256.h>
 
 #include <QDir>
@@ -39,6 +40,31 @@ constexpr std::size_t k_record_bound = 4 * 1024 * 1024;
 constexpr std::size_t k_queue_bound = 4096;
 constexpr std::size_t k_interest_bound = 4096;
 constexpr std::size_t k_interest_characters = 1024 * 1024;
+
+[[noreturn]] void reject_event_field(
+    const addon::Classify_event_request& request,
+    std::string field,
+    addon::Provider_event_problem problem,
+    std::string rule,
+    std::optional<std::uint64_t> limit = {})
+{
+    throw addon::Provider_event_error(addon::make_provider_event_diagnostic(
+        request.event.name, field, problem, request.event.body.find(field), limit, std::move(rule)));
+}
+
+void require_event_identity(const addon::Classify_event_request& request, const std::string& field)
+{
+    const auto* value = request.event.body.find(field);
+    if (value && json_util::bounded_string(*value, 256)) {
+        return;
+    }
+    const auto problem = !value ? addon::Provider_event_problem::MISSING
+        : !value->is_string() ? addon::Provider_event_problem::WRONG_TYPE
+        : value->as_string().empty() ? addon::Provider_event_problem::EMPTY
+        : value->as_string().size() > 256 ? addon::Provider_event_problem::TOO_LARGE
+                                         : addon::Provider_event_problem::CONTROL_CHARACTER;
+    reject_event_field(request, field, problem, "bounded_identity", 256);
+}
 
 struct Cursor
 {
@@ -473,9 +499,14 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     }
     const auto session = json_util::text(event.body, "session_id");
     const auto source = json_util::text(event.body, "source");
-    if (!json_util::bounded_string(json_util::member(event.body, "session_id"), 256) || source.size() > 128 ||
-        source.find('\0') != std::string::npos || session.find_first_of("/\\") != std::string::npos || session == "." || session == "..") {
-        throw std::runtime_error("invalid_kimi_session");
+    require_event_identity(request, "session_id");
+    if (source.size() > 128 || source.find('\0') != std::string::npos) {
+        reject_event_field(request, "source", source.size() > 128 ? addon::Provider_event_problem::TOO_LARGE
+                : addon::Provider_event_problem::CONTROL_CHARACTER,
+            "session_source", 128);
+    }
+    if (session.find_first_of("/\\") != std::string::npos || session == "." || session == "..") {
+        reject_event_field(request, "session_id", addon::Provider_event_problem::INVALID_VALUE, "session_component");
     }
     addon::Lifecycle_observation observation;
     observation.provider_event_name = event.name;
@@ -484,9 +515,7 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     std::lock_guard lock(m_state->mutex);
     if (permission) {
         for (const auto key : {"id", "agent_id", "tool_call_id"}) {
-            if (!json_util::bounded_string(json_util::member(event.body, key), 256)) {
-                throw std::runtime_error("invalid_kimi_permission");
-            }
+            require_event_identity(request, key);
         }
         const auto& transition = request.ledger.current_transition;
         if (!transition || request.ledger.current_epoch == 0 || transition->provider_session_id != session) {
@@ -508,12 +537,22 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     else
     if (event.name == "SessionStart") {
         const auto home = json_util::text(event.body, "kimi_code_home");
-        if (home.empty() || !addon::path_from_utf8(home).is_absolute()) throw std::runtime_error("invalid_kimi_home");
+        if (home.empty() || !addon::path_from_utf8(home).is_absolute()) {
+            const auto* value = event.body.find("kimi_code_home");
+            reject_event_field(request, "kimi_code_home", !value ? addon::Provider_event_problem::MISSING
+                    : !value->is_string() ? addon::Provider_event_problem::WRONG_TYPE
+                    : home.empty() ? addon::Provider_event_problem::EMPTY : addon::Provider_event_problem::INVALID_VALUE,
+                "absolute_path");
+        }
         auto found = m_state->sessions.find(request.transition_nonce);
-        if (found == m_state->sessions.end()) throw std::runtime_error("correlation_not_reserved");
+        if (found == m_state->sessions.end()) {
+            reject_event_field(request, "transition_nonce", addon::Provider_event_problem::UNAVAILABLE,
+                "correlation_not_reserved");
+        }
         if (found->second &&
             (found->second->home != home || found->second->session != session)) {
-            throw std::runtime_error("wire_session_already_bound");
+            reject_event_field(request, found->second->home != home ? "kimi_code_home" : "session_id",
+                addon::Provider_event_problem::MISMATCH, "wire_session_already_bound");
         }
         const auto& current = request.ledger.current_transition;
         if (current && current->provider_session_id == session) {
