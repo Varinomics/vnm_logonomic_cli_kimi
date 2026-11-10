@@ -187,7 +187,8 @@ void native_completed_contract(const fs::path& fixture, addon::Host_simulator* h
 {
     using Availability = addon::Resume_availability;
     using Content = addon::Resume_content;
-    const auto captured = fs::path(__FILE__).parent_path() / "fixtures/native-completed";
+    const auto captured =
+        fs::absolute(fs::path(__FILE__)).lexically_normal().parent_path() / "fixtures/native-completed";
     const auto metadata = read(captured / "state.json");
     const auto completed = read(captured / "wire.jsonl");
     require(!metadata.empty() && !completed.empty(), "captured native completion fixture is present");
