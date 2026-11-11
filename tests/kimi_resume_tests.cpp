@@ -272,6 +272,82 @@ void native_completed_contract(const fs::path& fixture, addon::Host_simulator* h
         "incomplete native completion write remains uncertain");
 }
 
+void permission_mode_history_contract(const fs::path& fixture, addon::Host_simulator* host)
+{
+    using Availability = addon::Resume_availability;
+    using Content = addon::Resume_content;
+    const auto captured = fs::absolute(fs::path(__FILE__)).lexically_normal().parent_path() /
+        "fixtures/native-permission-mode.jsonl";
+    const auto injection = read(captured);
+    const auto record = addon::parse_json(injection, addon::Json_parse_limits{}, nullptr);
+    require(record.has_value(), "captured native permission-mode injection is present");
+    const auto home    = fixture / "permission-profile";
+    const auto session = home / "sessions/wd_fixture/session-a";
+    const auto state   = session / "state.json";
+    const auto wire    = session / "agents/main/wire.jsonl";
+    const auto metadata = addon::serialize_json(native_metadata("session-a"));
+    write(state, metadata);
+    const auto request = inspection_request(home, fixture);
+
+    // The enter record is unchanged from official Windows Kimi Code 2.5.2.
+    // Its permissionModeInjection and reminderService at 1c142a0 append enter
+    // and exit reminders with the same injection origin, never user input.
+    // The exit text below comes from permission-mode-auto-exit-reminder.md.
+    auto exited = *record;
+    auto exit_message = json_util::member(exited, "message");
+    exit_message.set("content", Json(Json::Array{json_util::object({
+        {"type", Json("text")},
+        {"text", Json("<system-reminder>\nAuto permission mode is no longer active. "
+            "Tool approvals and permission checks are back to the current mode.\n"
+            "  - Continue normally, but expect approval prompts or denials when a tool requires them.\n"
+            "</system-reminder>")}})}));
+    exited.set("message", exit_message);
+    for (const auto& reminder : {injection, addon::serialize_json(exited) + '\n'}) {
+        const auto initialized = std::string(k_metadata) + reminder;
+        write(wire, initialized);
+        expect(request, Availability::AVAILABLE, Content::EMPTY, host,
+            "permission-mode reminders alone are not conversation content");
+        const auto completed = std::string(k_metadata) + std::string(k_user) + reminder + std::string(k_model);
+        write(wire, completed);
+        expect(request, Availability::AVAILABLE, Content::NONEMPTY, host,
+            "permission-mode reminders preserve retained user and model content");
+        require(read(state) == metadata && read(wire) == completed,
+            "permission-mode inspection preserves native bytes");
+    }
+    auto user_record = *record;
+    auto user_message = json_util::member(user_record, "message");
+    user_message.set("origin", json_util::object({{"kind", Json("user")}}));
+    user_record.set("message", user_message);
+    write(wire, std::string(k_metadata) + addon::serialize_json(user_record) + '\n');
+    expect(request, Availability::AVAILABLE, Content::NONEMPTY, host,
+        "user-origin permission prose remains conversation content");
+
+    struct Uncertain_message
+    {
+        const char* field;
+        Json replacement;
+    };
+    for (const auto& uncertain : std::vector<Uncertain_message>{
+            {"role", Json("assistant")},
+            {"content", Json(Json::Array{Json(false)})},
+            {"partial", Json(true)},
+            {"toolCalls", Json(Json::Array{json_util::object({
+                {"type", Json("function")}, {"id", Json("call-1")}, {"name", Json("Bash")}})})},
+            {"origin", json_util::object({{"kind", Json("injection")}, {"variant", Json("future_reminder")}})}})
+    {
+        auto changed = *record;
+        auto message = json_util::member(changed, "message");
+        message.set(uncertain.field, uncertain.replacement);
+        changed.set("message", message);
+        write(wire, std::string(k_metadata) + std::string(k_user) + addon::serialize_json(changed) + '\n');
+        expect(request, Availability::AVAILABLE, Content::UNKNOWN, host,
+            "unsupported permission-mode message shape remains uncertain");
+    }
+    write(wire, std::string(k_metadata) + injection.substr(0, injection.size() - 1));
+    expect(request, Availability::AVAILABLE, Content::UNKNOWN, host,
+        "incomplete permission-mode write remains uncertain");
+}
+
 void long_native_history_contract(const fs::path& fixture, addon::Host_simulator* host)
 {
 #ifdef _WIN32
@@ -307,6 +383,7 @@ void long_native_history_contract(const fs::path& fixture, addon::Host_simulator
 
 void history_contract(const fs::path& fixture, addon::Host_simulator* host)
 {
+    permission_mode_history_contract(fixture, host);
     long_native_history_contract(fixture, host);
     native_completed_contract(fixture, host);
     native_initialization_contract(fixture, host);

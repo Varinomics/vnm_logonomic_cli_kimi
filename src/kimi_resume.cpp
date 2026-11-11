@@ -230,7 +230,9 @@ std::optional<bool> message_content(const Json& message)
         const auto kind = json_util::text(*origin, "kind");
         if (kind == "injection" && role == "user" && !calls) {
             const auto variant = json_util::text(*origin, "variant");
-            if (variant == "project_context" || variant == "environment_binding" || variant == "date_change") {
+            if (variant == "project_context" || variant == "environment_binding" ||
+                variant == "date_change" || variant == "permission_mode")
+            {
                 return false;
             }
             return std::nullopt;
