@@ -703,8 +703,12 @@ int main()
         quota();
         quota_usages();
         account_names();
-        require(kimi::recognize_launcher("kimi --yolo"), "Kimi literal launcher recognition");
-        require(!kimi::recognize_launcher("echo kimi"), "mention does not establish provider invocation");
+        require(kimi::recognize_launcher("kimi --yolo", "bash"), "Kimi literal launcher recognition");
+        require(kimi::recognize_launcher(R"cmd($env:KIMI_HOME="D:\profiles\work\"; kimi)cmd", "powershell"),
+            "PowerShell quoted trailing profile path retains Kimi recognition");
+        require(kimi::recognize_launcher(R"cmd(kimi --work-dir D:\src\)cmd", "cmd"),
+            "cmd trailing argument path retains Kimi recognition");
+        require(!kimi::recognize_launcher("echo kimi", "bash"), "mention does not establish provider invocation");
         std::puts("Kimi contract checks passed.");
         return 0;
     }

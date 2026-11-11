@@ -30,7 +30,7 @@ using logonomic::cli_addon::probe;
 std::string path_string(const std::filesystem::path& path);
 bool is_kimi_program(std::string_view value);
 bool is_kimi_invocation(const std::vector<std::string>& argv);
-bool recognize_launcher(std::string_view script);
+bool recognize_launcher(std::string_view script, std::string_view runner);
 std::optional<logonomic::cli_addon::Launcher_candidate> discover_launcher(
     const logonomic::cli_addon::Discover_request& request);
 std::optional<std::string> verified_program(const logonomic::cli_addon::Launcher_request& launcher,

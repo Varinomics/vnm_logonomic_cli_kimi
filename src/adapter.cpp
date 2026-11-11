@@ -58,7 +58,7 @@ void launcher(addon::Invocation_context& context)
         const auto request = addon::decode_recognize_request(context.request().payload, &failure);
         if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail); return; }
         addon::Launcher_recognition result;
-        result.recognized = kimi::recognize_launcher(request->launcher.script_body);
+        result.recognized = kimi::recognize_launcher(request->launcher.script_body, request->launcher.runner_key);
         if (result.recognized) result.display_name = "Kimi";
         context.succeed(addon::encode_recognition(result));
     }

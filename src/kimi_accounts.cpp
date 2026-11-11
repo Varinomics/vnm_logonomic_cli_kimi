@@ -109,7 +109,7 @@ void handle_accounts(addon::Invocation_context& context)
         context.fail(addon::Result_status::FAILED, failure.reason_code);
         return;
     }
-    if (!recognize_launcher(input->launcher.script_body)) {
+    if (!recognize_launcher(input->launcher.script_body, input->launcher.runner_key)) {
         context.succeed(context.request().operation == "discover" ? addon::encode_accounts({})
             : addon::encode_account_resolution({std::nullopt}));
         return;

@@ -75,7 +75,7 @@ bool package_flag(std::string_view value)
         value == "--silent" || value == "--no-install" || value == "--bun";
 }
 
-std::optional<Launcher_command> recognize(std::string_view script, int depth)
+std::optional<Launcher_command> recognize(std::string_view script, std::string_view runner, int depth)
 {
     if (depth == 0) return std::nullopt;
     Environment inherited;
@@ -84,7 +84,7 @@ std::optional<Launcher_command> recognize(std::string_view script, int depth)
         line = trim(line);
         if (line.empty() || line.starts_with('#') || line.starts_with("//") ||
             lower(line).starts_with("rem ")) continue;
-        for (std::string segment : addon::launcher_segments(line, addon::Launcher_whitespace::UTF8)) {
+        for (std::string segment : addon::launcher_segments(line, runner, addon::Launcher_whitespace::UTF8)) {
             const std::string normalized = lower(segment);
             std::optional<std::pair<std::string, std::string>> standalone;
             if (normalized.starts_with("set ")) standalone = addon::environment_assignment(
@@ -108,7 +108,7 @@ std::optional<Launcher_command> recognize(std::string_view script, int depth)
                 environment.emplace_back(match[1].str(), unquote(match[2].str()));
                 segment.erase(0, match.length());
             }
-            const auto words = addon::launcher_tokens(segment);
+            const auto words = addon::launcher_tokens(segment, runner);
             std::size_t index = 0;
             while (index < words.size()) {
                 const auto value = addon::environment_assignment(words[index], addon::Launcher_whitespace::UTF8);
@@ -151,7 +151,8 @@ std::optional<Launcher_command> recognize(std::string_view script, int depth)
                         if (!tail.empty()) tail += ' ';
                         tail += words[index];
                     }
-                    auto command = recognize(unquote(tail), depth - 1);
+                    auto command = recognize(unquote(tail),
+                        base == "cmd" ? "cmd" : base == "bash" || base == "sh" ? "bash" : "powershell", depth - 1);
                     if (command) {
                         command->environment.insert(command->environment.begin(), environment.begin(), environment.end());
                         return command;
@@ -166,9 +167,9 @@ std::optional<Launcher_command> recognize(std::string_view script, int depth)
 
 } // namespace
 
-bool recognize_launcher(std::string_view script)
+bool recognize_launcher(std::string_view script, std::string_view runner)
 {
-    return recognize(script, 8).has_value();
+    return recognize(script, runner, 8).has_value();
 }
 
 std::optional<addon::Launcher_candidate> discover_launcher(const addon::Discover_request& request)
