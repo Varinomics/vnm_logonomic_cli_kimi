@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -95,23 +96,28 @@ def prepare_qt(root, platform, toolchain, aqt_source):
     # can never stand in for the selected one.
     qt_root = root / f"qt-{architecture}"
     marker = root / f"qt-{QT_VERSION}-{architecture}.ready"
-    if not marker.is_file():
+    archives = ["qtbase"]
+    if platform == "linux-x86_64":
+        archives.append("icu")
+    elif architecture == "win64_llvm_mingw":
+        # The kit's own LLVM runtime archive installs libc++.dll and libunwind.dll
+        # into its bin, the only directory the package's Windows closure searches.
+        archives.append("llvm")
+    # The marker names what installed the kit, so --record can state it and a
+    # restored kit from another aqtinstall source or archive set is replaced.
+    installation = {"aqt_source": aqt_source, "archives": archives}
+    if not marker.is_file() or marker.read_text(encoding="utf-8") != json.dumps(installation):
+        if qt_root.exists():
+            shutil.rmtree(qt_root)
         tools = root / "aqt"
         run([sys.executable, "-m", "pip", "install", "--upgrade", "--target", str(tools),
              "--cache-dir", str(root / "pip-cache"), aqt_source])
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(tools)
-        archives = ["qtbase"]
-        if platform == "linux-x86_64":
-            archives.append("icu")
-        elif architecture == "win64_llvm_mingw":
-            # The kit's own LLVM runtime archive installs libc++.dll and libunwind.dll
-            # into its bin, the only directory the package's Windows closure searches.
-            archives.append("llvm")
         run([sys.executable, "-m", "aqt", "install-qt", host, "desktop", QT_VERSION,
              architecture, "--outputdir", str(qt_root), "--archives", *archives], env=environment)
         qt_prefix(qt_root)
-        marker.touch()
+        marker.write_text(json.dumps(installation), encoding="utf-8")
     prefix = qt_prefix(qt_root)
     notices = root / f"qtbase-{QT_VERSION}"
     if not notices.exists():

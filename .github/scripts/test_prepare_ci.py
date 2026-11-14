@@ -95,7 +95,8 @@ class Preparation_tests(unittest.TestCase):
             retail = root / "qt-win64_msvc2022_64" / PREPARE.QT_VERSION / "msvc2022_64/lib/cmake/Qt6Core"
             retail.mkdir(parents=True)
             (retail / "Qt6CoreConfig.cmake").touch()
-            (root / f"qt-{PREPARE.QT_VERSION}-win64_msvc2022_64.ready").touch()
+            (root / f"qt-{PREPARE.QT_VERSION}-win64_msvc2022_64.ready").write_text(
+                json.dumps({"aqt_source": AQT, "archives": ["qtbase"]}), encoding="utf-8")
             (root / f"qtbase-{PREPARE.QT_VERSION}").mkdir()
 
             def install(arguments, **options):
@@ -118,6 +119,36 @@ class Preparation_tests(unittest.TestCase):
                 prefix, _ = PREPARE.prepare_qt(root, "windows-x86_64", "msvc", AQT)
             self.assertEqual(prefix, retail.parents[2])
             self.assertFalse([call for call in commands.call_args_list if "install-qt" in call.args[0]])
+
+    def test_a_kit_installed_by_another_aqt_source_or_archive_set_is_installed_again(self):
+        stale_installations = (
+            {"aqt_source": PREPARE.DEVELOPMENT_AQT, "archives": ["qtbase", "llvm"]},
+            {"aqt_source": AQT, "archives": ["qtbase"]},
+            None)
+        for stale in stale_installations:
+            with tempfile.TemporaryDirectory() as directory, self.subTest(stale=stale):
+                root = Path(directory)
+                kit = root / "qt-win64_llvm_mingw" / PREPARE.QT_VERSION / "llvm-mingw_64"
+                (kit / "lib/cmake/Qt6Core").mkdir(parents=True)
+                (kit / "lib/cmake/Qt6Core/Qt6CoreConfig.cmake").touch()
+                (kit / "bin").mkdir()
+                (kit / "bin/stale.dll").touch()
+                marker = root / f"qt-{PREPARE.QT_VERSION}-win64_llvm_mingw.ready"
+                marker.write_text("" if stale is None else json.dumps(stale), encoding="utf-8")
+                (root / f"qtbase-{PREPARE.QT_VERSION}").mkdir()
+
+                def install(arguments, **options):
+                    if "install-qt" in arguments:
+                        output = Path(arguments[arguments.index("--outputdir") + 1])
+                        config = output / PREPARE.QT_VERSION / "llvm-mingw_64/lib/cmake/Qt6Core/Qt6CoreConfig.cmake"
+                        config.parent.mkdir(parents=True)
+                        config.touch()
+                with patch.object(PREPARE, "run", side_effect=install) as commands:
+                    PREPARE.prepare_qt(root, "windows-x86_64", "llvm-mingw", AQT)
+                self.assertEqual(len([call for call in commands.call_args_list if "install-qt" in call.args[0]]), 1)
+                self.assertFalse((kit / "bin/stale.dll").exists())
+                self.assertEqual(json.loads(marker.read_text(encoding="utf-8")),
+                                 {"aqt_source": AQT, "archives": ["qtbase", "llvm"]})
 
     def test_qt_installation_uses_the_selected_aqt_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -144,7 +175,8 @@ class Preparation_tests(unittest.TestCase):
             config = root / "qt-linux_gcc_64" / PREPARE.QT_VERSION / "kit/lib/cmake/Qt6Core/Qt6CoreConfig.cmake"
             config.parent.mkdir(parents=True)
             config.touch()
-            (root / f"qt-{PREPARE.QT_VERSION}-linux_gcc_64.ready").touch()
+            (root / f"qt-{PREPARE.QT_VERSION}-linux_gcc_64.ready").write_text(
+                json.dumps({"aqt_source": AQT, "archives": ["qtbase", "icu"]}), encoding="utf-8")
             notices = root / f"qtbase-{PREPARE.QT_VERSION}"
             notices.mkdir()
             with patch.object(PREPARE, "run") as run:

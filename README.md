@@ -164,7 +164,9 @@ Provider CI preparation, `.github/scripts/prepare_ci.py`, installs the Qt kit of
 the requested compiler family (`--toolchain`: `msvc` or `llvm-mingw` on Windows,
 `gcc` or `clang` on Linux) with the given aqtinstall source; the llvm-mingw kit
 includes its LLVM runtime archive, which puts `libc++.dll` and `libunwind.dll`
-beside QtCore, where the package's Windows closure finds them. It takes
+beside QtCore, where the package's Windows closure finds them. A kit restored
+from a cache that another aqtinstall source or archive set installed is
+installed again. It takes
 `vnm_framework`, `vnm_qt_dispatch` and `vnm_cmake` at `master`, or at the exact
 commits a release passes with `--revisions`, and `--record` writes the toolchain,
 kit, aqtinstall source and revisions it used. For LLVM-MinGW it writes
