@@ -160,6 +160,16 @@ MSVC Debug packages instead select Debug CRT and Debug UCRT from the active
 toolchain and Windows SDK. Their separate notice and resolved-source provenance
 identify private debugging/testing deployment only; they are not production
 redistributables.
+Provider CI preparation, `.github/scripts/prepare_ci.py`, installs the Qt kit of
+the requested compiler family (`--toolchain`: `msvc` or `llvm-mingw` on Windows,
+`gcc` or `clang` on Linux) with the given aqtinstall source; the llvm-mingw kit
+includes its LLVM runtime archive, which puts `libc++.dll` and `libunwind.dll`
+beside QtCore, where the package's Windows closure finds them. It takes
+`vnm_framework`, `vnm_qt_dispatch` and `vnm_cmake` at `master`, or at the exact
+commits a release passes with `--revisions`, and `--record` writes the toolchain,
+kit, aqtinstall source and revisions it used. For LLVM-MinGW it writes
+`libc++.dll.txt` and `libunwind.dll.txt` from the toolchain's `LICENSE.TXT`, two
+LF bytes and its x86_64 MinGW-w64 runtime `COPYING` text.
 The index marks every copied runtime as third-party and points to its notices
 and resolved-source provenance. The optional `kimi_package_membership` recipe
 forwards these selected sources into its isolated nested build.
