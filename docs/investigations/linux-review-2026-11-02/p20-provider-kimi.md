@@ -199,7 +199,7 @@ under the named dependency directories. `qtbase-notices` must contain the
 selected Qt version's `.cmake.conf`, `LICENSES`, and third-party notices.
 `kimi_notices` must contain the resolved non-Qt runtime notices named
 `<library filename>.txt`, as required by
-[`kimi_package_runtime.cmake`](../../../cmake/kimi_package_runtime.cmake).
+[the SDK's Qt package recipe](https://github.com/Varinomics/logonomic/blob/master/sdk/logonomic_cli_addon_sdk/cmake/qt_runtime.cmake).
 This run used SDK/system package copyright files and the
 [ICU 73.2 license](https://github.com/unicode-org/icu/blob/release-73-2/icu4c/LICENSE)
 for the matching ICU libraries. Ubuntu libcurl development headers/library

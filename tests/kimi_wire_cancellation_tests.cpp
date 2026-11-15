@@ -148,6 +148,62 @@ void independent_cancellation()
     require(decoder.close("SessionEnd").empty(), "uncorrelated cancellation must retire the native agent");
 }
 
+void capacity_preserves_admitted_finishes()
+{
+    kimi::Wire_decoder decoder("session-capacity");
+    const auto call = [](const std::string& id) {
+        return json("{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.call\","
+            "\"name\":\"Agent\",\"toolCallId\":\"" + id + "\"}}");
+    };
+    const auto result = [](const std::string& id) {
+        return json("{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.result\","
+            "\"toolCallId\":\"" + id + "\"}}");
+    };
+    for (int index = 0; index < 128; ++index) {
+        require(decoder.accept(call("admitted-" + std::to_string(index))).size() == 1,
+            "native Agent calls within the host limit remain admitted");
+    }
+    require(decoder.accept(call("excess")).empty(), "the 129th active child is locally refused");
+    stopped(decoder.accept(result("admitted-0")), "admitted-0");
+    require(decoder.accept(result("excess")).empty(), "an unadmitted call cannot produce a STOP");
+    require(decoder.accept(call("replacement")).size() == 1, "a released active slot remains reusable");
+    stopped(decoder.accept(result("replacement")), "replacement");
+    require(decoder.close("SessionEnd").size() == 127, "root closure retains every other admitted identity");
+}
+
+void native_correlation_capacity_is_reserved_before_start()
+{
+    for (const bool distinct_agents : {false, true}) {
+        kimi::Wire_decoder decoder("session-native-capacity");
+        const auto call = [](const std::string& id) {
+            return json("{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.call\","
+                "\"name\":\"Agent\",\"toolCallId\":\"" + id + "\"}}");
+        };
+        const auto spawned = [](const std::string& id, const std::string& agent) {
+            return json("{\"type\":\"subagent.spawned\",\"subagentId\":\"" + agent +
+                "\",\"parentToolCallId\":\"" + id + "\"}");
+        };
+        const auto cancelled = [](const std::string& agent) {
+            return json("{\"type\":\"subagent.cancelled\",\"subagentId\":\"" + agent + "\"}");
+        };
+        for (int index = 0; index < 511; ++index) {
+            const auto id = "previous-" + std::to_string(index);
+            const auto agent = distinct_agents ? "native-" + std::to_string(index) : "resumed-native";
+            require(decoder.accept(call(id)).size() == 1, "native history below its retained bound is admitted");
+            require(decoder.accept(spawned(id, agent)).empty(), "spawn binds the admitted native call");
+            stopped(decoder.accept(cancelled(agent)), id);
+        }
+        require(decoder.accept(call("held-call")).size() == 1, "the final native correlation slot can be reserved");
+        require(decoder.accept(json(R"({"type":"subagent.started","subagentId":"unreserved-native"})")).empty(),
+            "an uncorrelated native run cannot consume an admitted call's reserved lineage capacity");
+        require(decoder.accept(spawned("held-call", "held-native")).empty(), "the admitted call retains its native identity join");
+        stopped(decoder.accept(cancelled("held-native")), "held-call");
+        require(decoder.accept(call("excess-call")).empty(),
+            "native identity/run exhaustion must refuse START before promising an untrackable child");
+        require(decoder.close("SessionEnd").empty(), "native cancellation closed every published call before root END");
+    }
+}
+
 } // namespace
 
 int main()
@@ -161,6 +217,8 @@ int main()
         {"cancellation-before-reply", cancellation_before_reply},
         {"terminal-notifications", terminal_notifications},
         {"independent-cancellation", independent_cancellation},
+        {"capacity-preserves-admitted-finishes", capacity_preserves_admitted_finishes},
+        {"native-correlation-capacity", native_correlation_capacity_is_reserved_before_start},
     };
     for (const auto& test : cases) {
         try {

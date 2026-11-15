@@ -279,10 +279,8 @@ void irrelevant_interaction_records_preserve_observation()
     require(retire(observer, nonce), "reader fixture retires its native observation owner");
 }
 
-void investigate_admitted_inventory_growth()
+void inventory_growth_preserves_admitted_source()
 {
-    // Diagnostic only: report the shared observer's outcome without asserting
-    // that losing lifecycle observation is the desired capacity policy.
     namespace observation = vnm::filesystem_observation;
     Workspace workspace;
     const auto agents = workspace.m_root / "sessions/workspace/session/agents";
@@ -309,15 +307,139 @@ void investigate_admitted_inventory_growth()
         fs::create_directories(agents / ("child-" + std::to_string(index)));
     }
     write_bytes(wire, call_record("child_after_inventory_growth"), true);
-    const bool finished = wait_until([&] {
-        return window.worker.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
-    });
+    require(wait_until([&] {
+        const auto page = poll(observer, nonce);
+        return page && page->observations.size() == 1 &&
+            page->observations.front().agent_id == "child_after_inventory_growth";
+    }), "an oversized optional inventory does not hide the admitted main wire's child fact");
     window.stop();
-    std::cout << "post_admission_inventory=257; observation="
-        << (finished ? (window.context.m_failure.empty() ? "success" : window.context.m_failure)
-                     : "still_active_before_cancellation") << '\n';
-    require(retire(observer, nonce), "diagnostic observation loss must still permit abandoned retirement");
+    require(window.context.m_result.has_value(), "optional inventory bounds cannot withdraw the lifecycle channel");
+    require(retire(observer, nonce), "bounded optional inventory still permits abandoned retirement");
     require(!poll(observer, nonce), "retirement must release the diagnostic correlation");
+}
+
+void capacity_preserves_admitted_attention_and_root_end()
+{
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    const auto wire = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+    fs::create_directories(wire.parent_path());
+    write_bytes(wire, {});
+    const auto service = std::make_shared<observation::Service>();
+    observation::Configuration configuration;
+    configuration.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, configuration);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve the bounded native interaction owner");
+    auto start = start_request(workspace, nonce);
+    start.event.body.set("interaction_frontier",
+        kimi::capture_interaction_frontier(kimi::path_string(workspace.m_root), "session"));
+    observer.classify(start);
+    std::string requests = call_record("held-child");
+    for (int index = 0; index < 129; ++index) {
+        requests += "{\"type\":\"interaction.request\",\"id\":\"question-" + std::to_string(index) +
+            "\",\"agentId\":\"main\",\"kind\":\"question\",\"toolCallId\":\"ask\",\"request\":{}}\n";
+    }
+    write_bytes(wire, requests, true);
+    Observe_window window(observer, workspace, nonce);
+    require(wait_until([&] {
+        const auto page = poll(observer, nonce);
+        const auto statistics = service->statistics();
+        return page && !page->observations.empty() && statistics.outstanding == 0 &&
+            statistics.pending_registrations == 0 && statistics.retained_events == 0;
+    }), "initial native child and interaction acquisition completes");
+    std::string cursor;
+    std::size_t admitted = 0;
+    for (;;) {
+        const auto page = poll(observer, nonce, cursor);
+        require(page.has_value(), "the 129th attention request cannot fail polling");
+        admitted += page->observations.size();
+        cursor = page->resume_cursor;
+        if (!page->more) break;
+    }
+    require(admitted == 129, "the queue admits one child and the host's 128 live attention requests");
+    window.stop();
+    std::string records;
+    for (int index = 0; index < 2100; ++index) {
+        const auto id = "short-" + std::to_string(index);
+        records += call_record(id) + "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.result\","
+            "\"toolCallId\":\"" + id + "\"}}\n";
+    }
+    // Native request history is retained independently of the host's smaller
+    // live-attention limit. Refusing #4097 must still reach a known resolution.
+    for (int index = 129; index <= 4096; ++index) {
+        records += "{\"type\":\"interaction.request\",\"id\":\"question-" + std::to_string(index) +
+            "\",\"agentId\":\"main\",\"kind\":\"question\",\"toolCallId\":\"ask\",\"request\":{}}\n";
+    }
+    for (const auto* id : {"question-0", "question-128"}) {
+        records += "{\"type\":\"interaction.resolved\",\"id\":\"" + std::string(id) +
+            "\",\"agentId\":\"main\",\"response\":{}}\n";
+    }
+    write_bytes(wire, records, true);
+    auto end = start_request(workspace, addon::random_nonce_hex());
+    end.event.name = "SessionEnd";
+    end.ledger = {1, addon::Ledger_transition{addon::Transition_kind::START, "session", nonce}};
+    require(observer.classify(end).observations.empty(), "the final drain retains its terminal page");
+    std::vector<addon::Lifecycle_observation> final;
+    for (;;) {
+        const auto page = poll(observer, nonce, cursor);
+        require(page.has_value(), "queue saturation cannot discard admitted resolution or terminal state");
+        final.insert(final.end(), page->observations.begin(), page->observations.end());
+        cursor = page->resume_cursor;
+        if (!page->more) break;
+    }
+    require(final.size() > 3 && final.size() <= 4096 && final.size() < 4203,
+        "new optional child spans are refused within the retained queue bound");
+    require(final[final.size() - 3].attention_transition == addon::Attention_transition::RESOLVED &&
+        final[final.size() - 3].attention_request_id == "question-0" &&
+        final[final.size() - 2].subagent_transition == addon::Subagent_transition::STOPPED &&
+        final[final.size() - 2].agent_id == "held-child" &&
+        final.back().session_transition == addon::Session_transition::ENDED,
+        "admitted attention resolution and child STOP retain their slots before root END");
+    require(retire(observer, nonce, cursor), "the saturated native stream retains exact terminal retirement");
+}
+
+void retained_interaction_capacity_preserves_resolution()
+{
+    Workspace workspace;
+    const auto wire = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+    fs::create_directories(wire.parent_path());
+    write_bytes(wire, {});
+    kimi::Interaction_reader reader("session",
+        kimi::capture_interaction_frontier(kimi::path_string(workspace.m_root), "session"));
+    const auto request = [](const std::string& id) {
+        return "{\"type\":\"interaction.request\",\"id\":\"" + id +
+            "\",\"agentId\":\"main\",\"kind\":\"question\",\"toolCallId\":\"ask\",\"request\":{}}\n";
+    };
+    const auto resolution = [](const std::string& id) {
+        return "{\"type\":\"interaction.resolved\",\"id\":\"" + id +
+            "\",\"agentId\":\"main\",\"response\":{}}\n";
+    };
+    std::string records = request("held");
+    for (int index = 0; index < 4095; ++index) {
+        const auto id = "past-" + std::to_string(index);
+        records += request(id) + resolution(id);
+    }
+    write_bytes(wire, records, true);
+    const auto inventory = kimi::discover_interaction_wires(kimi::path_string(workspace.m_root), "session");
+    std::vector<addon::Lifecycle_observation> observations;
+    require(reader.acquire(inventory, observations, [] { return false; }) && observations.size() == 8191,
+        "the reader retains its actual 4096-request history with one unresolved request");
+    observations.clear();
+    write_bytes(wire, request("excess") + resolution("held"), true);
+    std::string first_failure;
+    std::string retry_failure;
+    try { reader.acquire(inventory, observations, [] { return false; }); }
+    catch (const std::runtime_error& error) { first_failure = error.what(); }
+    try { reader.acquire(inventory, observations, [] { return false; }); }
+    catch (const std::runtime_error& error) { retry_failure = error.what(); }
+    if (!first_failure.empty() || !retry_failure.empty()) {
+        std::cerr << "interaction_capacity_first=" << first_failure << "; retry=" << retry_failure << '\n';
+    }
+    require(first_failure.empty() && retry_failure.empty() && observations.size() == 1 &&
+        observations.front().attention_request_id == "held" &&
+        observations.front().attention_transition == addon::Attention_transition::RESOLVED,
+        "capacity refusal preserves physical cursor/anchor progress and the admitted resolution");
 }
 
 void native_wire_reconciliation_preserves_records_and_final_drain()
@@ -560,42 +682,49 @@ void session_end_retains_failed_drain_and_resolves_new_wire()
     }
 }
 
-void failed_discovery_retains_reconciliation_across_windows()
+void failed_discovery_recovers_inside_the_same_window()
 {
-    namespace observation = vnm::filesystem_observation;
-    Workspace workspace;
-    const auto path = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
-    fs::create_directories(path.parent_path());
-    write_bytes(path, {});
-    const auto service = std::make_shared<observation::Service>();
-    observation::Configuration configuration;
-    configuration.general_interval = std::chrono::milliseconds(25);
-    kimi::Lifecycle_observer observer(service, configuration);
-    const auto nonce = addon::random_nonce_hex();
-    require(reserve(observer, nonce), "reserve transient discovery owner");
-    observer.classify(start_request(workspace, nonce));
-    {
-        Observe_window window(observer, workspace, nonce);
-        require(wait_until([&] { const auto statistics = service->statistics(); return statistics.dispatches > 0 &&
-            statistics.outstanding == 0 && statistics.pending_registrations == 0; }), "settle discovery receiver");
-        window.stop();
-    }
-    observer.set_acquisition_failures_for_tests([] { throw std::runtime_error("wire_path_unavailable"); }, {});
-    write_bytes(path, call_record("unread-after-discovery-failure"));
-    {
-        Observe_window failed(observer, workspace, nonce);
-        require(failed.worker.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
-            "actual capture reaches the failing discovery boundary");
-        require(failed.context.m_failure == "wire_observation_failed", "discovery failure remains truthful");
-    }
-    observer.set_acquisition_failures_for_tests({}, {});
-    {
+    for (const bool initial_failure : {false, true}) {
+        namespace observation = vnm::filesystem_observation;
+        Workspace workspace;
+        const auto path = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+        fs::create_directories(path.parent_path());
+        write_bytes(path, {});
+        const auto service = std::make_shared<observation::Service>();
+        observation::Configuration configuration;
+        configuration.general_interval = std::chrono::milliseconds(25);
+        kimi::Lifecycle_observer observer(service, configuration);
+        const auto nonce = addon::random_nonce_hex();
+        require(reserve(observer, nonce), "reserve transient discovery owner");
+        observer.classify(start_request(workspace, nonce));
+        if (!initial_failure) {
+            Observe_window window(observer, workspace, nonce);
+            require(wait_until([&] { const auto statistics = service->statistics(); return statistics.dispatches > 0 &&
+                statistics.outstanding == 0 && statistics.pending_registrations == 0; }), "settle discovery receiver");
+            window.stop();
+        }
+        std::atomic<int> failed_discoveries = 0;
+        observer.set_acquisition_failures_for_tests([&] {
+            ++failed_discoveries;
+            throw std::runtime_error("wire_path_unavailable");
+        }, {});
+        write_bytes(path, call_record("unread-after-discovery-failure"));
         Observe_window retry(observer, workspace, nonce);
+        require(wait_until([&] { return failed_discoveries > 0; }),
+            "actual capture reaches the failing discovery boundary");
+        require(poll(observer, nonce).has_value() &&
+            retry.worker.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready,
+            "optional discovery failure retains the live observation channel");
+        observer.set_acquisition_failures_for_tests({}, {});
         require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 1; }),
-            "failed capture retains a successor without any later native file event");
+            "failed capture recovers inside the same window without any later native file event");
+        require(wait_until([&] { const auto statistics = service->statistics(); return statistics.outstanding == 0 &&
+            statistics.pending_registrations == 0 && statistics.retained_events == 0; }),
+            "successful recovery acknowledges the retained acquisition capture");
         retry.stop();
+        require(retry.context.m_result.has_value(), "a recovered watch completes successfully");
+        require(retire(observer, nonce), "retire recovered discovery owner");
     }
-    require(retire(observer, nonce), "retire recovered discovery owner");
 }
 
 void workspace_frontier_rejects_excess_before_collecting_interests()
@@ -1045,7 +1174,7 @@ int main(int argc, char** argv)
     }
     try {
         if (std::string_view(argv[1]) == "--investigate-inventory") {
-            investigate_admitted_inventory_growth();
+            inventory_growth_preserves_admitted_source();
             return 0;
         }
         if (std::string_view(argv[1]) == "--reader-isolation") {
@@ -1059,6 +1188,9 @@ int main(int argc, char** argv)
             return 0;
         }
         irrelevant_interaction_records_preserve_observation();
+        inventory_growth_preserves_admitted_source();
+        retained_interaction_capacity_preserves_resolution();
+        capacity_preserves_admitted_attention_and_root_end();
         declared_profile_admits_every_shape(addon::path_from_utf8(argv[1]));
         candidates_reclaim_without_tombstones();
         retirement_releases_only_its_owner();
@@ -1074,7 +1206,7 @@ int main(int argc, char** argv)
         missing_ancestors_and_parent_replacement_reconcile_without_polling();
         final_append_during_acquisition_keeps_its_own_capture();
         session_end_retains_failed_drain_and_resolves_new_wire();
-        failed_discovery_retains_reconciliation_across_windows();
+        failed_discovery_recovers_inside_the_same_window();
         workspace_frontier_rejects_excess_before_collecting_interests();
         return 0;
     }

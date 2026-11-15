@@ -48,9 +48,9 @@ def main() -> int:
             f'set(runtime_search_dirs {cmake_string(runtime_dir)})',
             'set(exclusions PRE_EXCLUDE_REGEXES "^[Aa][Pp][Ii]-" "^[Ee][Xx][Tt]-"',
             '    POST_EXCLUDE_REGEXES ".*[/\\\\][Ww][Ii][Nn][Dd][Oo][Ww][Ss][/\\\\].*")',
-            f'set(kimi_runtime_dependency_cache_directory {cmake_string(cache_dir)})',
+            f'set(qt_runtime_dependency_cache_directory {cmake_string(cache_dir)})',
             f'include({cmake_string(Path(args.module))})',
-            f'kimi_resolve_runtime_dependencies(resolved EXECUTABLES {cmake_string(binary)})',
+            f'qt_resolve_runtime_dependencies(resolved EXECUTABLES {cmake_string(binary)})',
             f'file(WRITE {cmake_string(result)} "${{resolved}}")',
         ]) + '\n', encoding='utf-8')
 

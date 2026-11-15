@@ -11,6 +11,7 @@ import unittest
 
 DEPLOYER = Path(sys.argv.pop(1)).resolve()
 CMAKE = sys.argv.pop(1)
+SDK = Path(sys.argv.pop(1)).resolve()
 SOURCE = Path(__file__).resolve().parents[1]
 
 
@@ -27,8 +28,8 @@ class Linux_runtime_provenance(unittest.TestCase):
             (root / "LICENSE").write_text("toml++ license")
             library = root / "libQt6Core.so.6"
             library.write_bytes(b"\x7fELFvendor-input")
-            (source / "cmake/kimi_runtime_dependencies.cmake").write_text(
-                f'function(kimi_resolve_runtime_dependencies output)\n'
+            (source / "cmake/qt_runtime_dependencies.cmake").write_text(
+                f'function(qt_resolve_runtime_dependencies output)\n'
                 f'  set(${{output}} "{library.as_posix()}" PARENT_SCOPE)\nendfunction()\n')
             programs = ("kimi_adapter", "kimi_helper", "kimi_launch_bridge", "kimi_quota_probe")
             for name in programs:
@@ -65,13 +66,16 @@ class Linux_runtime_provenance(unittest.TestCase):
             patchelf = root / "patchelf-input"
             patchelf.write_text("Native tool fixture")
             replacements = {
-                "KIMI_PACKAGE_DIRECTORY": package.as_posix(), "CMAKE_CURRENT_SOURCE_DIR": source.as_posix(),
+                "qt_package_directory": package.as_posix(), "CMAKE_CURRENT_SOURCE_DIR": source.as_posix(),
                 "CMAKE_CURRENT_BINARY_DIR": root.as_posix(), "CMAKE_SYSTEM_NAME": "Linux",
-                "kimi_toml_source": root.as_posix(), "KIMI_PATCHELF_EXECUTABLE": patchelf.as_posix(),
-                "KIMI_LINUX_RUNTIME_DEPLOYER": wrapper.as_posix(), "Python3_EXECUTABLE": Path(sys.executable).as_posix(),
-                "kimi_package_indexer": f"{Path(sys.executable).as_posix()};{indexer.as_posix()}",
+                "qt_runtime_directory": (source / "cmake").as_posix(), "qt_recipe_directory": root.as_posix(),
+                "qt_extra_copies": (root / "LICENSE").as_posix() + "|notices/tomlplusplus-LICENSE.txt",
+                "qt_executables": ";".join((root / name).as_posix() for name in programs),
+                "patchelf_executable": patchelf.as_posix(),
+                "linux_runtime_deployer": wrapper.as_posix(), "Python3_EXECUTABLE": Path(sys.executable).as_posix(),
+                "qt_package_indexer": f"{Path(sys.executable).as_posix()};{indexer.as_posix()}",
             }
-            text = (SOURCE / "cmake/assemble_kimi_package.cmake.in").read_text()
+            text = (SDK / "cmake/qt_runtime_assemble.cmake.in").read_text()
             for key, value in replacements.items():
                 text = text.replace("@" + key + "@", value)
             text = re.sub(r"@[A-Za-z0-9_]+@", "", text)

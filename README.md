@@ -94,7 +94,17 @@ classification and retires it when the host abandons the chain. Ordinary watch
 windows preserve unread pages; the final closed page remains replayable until
 the host acknowledges its exact consumption cursor.
 Agent stops are delivered before the final SessionEnd, including
-background completion and file replay. Ambiguous session paths are rejected.
+background completion and file replay. Ambiguous session paths supply no new
+native source binding.
+
+The SDK's shared filesystem lifecycle driver owns reservations, cursors, queues
+and subscriptions. Native wire discovery, interaction frontiers and the final
+captured-wire drain remain Kimi-specific. Incomplete discovery or reads retain a
+service-paced retry without failing the root observation channel. Existing
+admitted sources can still publish valid evidence while optional inventory is
+unavailable. At the host's 128-live-child or 128-live-attention bounds, new
+admissions are refused locally. The bounded queue reserves space for admitted
+child stops, identified attention resolutions and the final root SessionEnd.
 
 Delegated execution requires the native ACP contract and a supported observed
 version (at least 0.39.1); future releases are not rejected by an upper version
@@ -133,8 +143,8 @@ required to configure.
 The `kimi_package` target produces `package/logonomic.cli.kimi` beneath a
 single-configuration build directory, or `package/<config>/logonomic.cli.kimi`
 with a multi-configuration generator, including its integrity index.
-The assembler inspects each executable's actual runtime closure and places its
-non-system libraries beside it. Linux executables use a package-local `$ORIGIN`
+The SDK's shared Qt package recipe inspects each executable's actual runtime
+closure and places its non-system libraries beside it. Linux executables use a package-local `$ORIGIN`
 loader path; staged ELF libraries are normalized with `patchelf` (override its
 location with `KIMI_PATCHELF_EXECUTABLE`). Windows resolves its DLLs from the executable directory. SONAME
 files are regular copies because the package contract excludes symlinks. The
@@ -160,7 +170,8 @@ MSVC Debug packages instead select Debug CRT and Debug UCRT from the active
 toolchain and Windows SDK. Their separate notice and resolved-source provenance
 identify private debugging/testing deployment only; they are not production
 redistributables.
-Provider CI preparation, `.github/scripts/prepare_ci.py`, installs the Qt kit of
+Provider CI preparation, `.github/scripts/prepare_ci.py`, delegates to the selected
+SDK's shared preparation module. It installs the Qt kit of
 the requested compiler family (`--toolchain`: `msvc` or `llvm-mingw` on Windows,
 `gcc` or `clang` on Linux) with the given aqtinstall source; the llvm-mingw kit
 includes its LLVM runtime archive, which puts `libc++.dll` and `libunwind.dll`

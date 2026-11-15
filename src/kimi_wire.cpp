@@ -46,11 +46,18 @@ std::optional<std::size_t> Wire_decoder::selected(const Lineage& lineage) const
     return std::nullopt;
 }
 
-bool Wire_decoder::remember(const std::string& agent)
+std::size_t Wire_decoder::pending_correlations() const
+{
+    return std::count_if(m_calls.begin(), m_calls.end(), [](const auto& item) {
+        return item.second.agent_id.empty();
+    });
+}
+
+bool Wire_decoder::remember(const std::string& agent, bool uses_reservation)
 {
     if (!valid_id(agent)) return false;
     if (m_known.contains(agent)) return true;
-    if (m_known.size() >= 512) return false;
+    if (m_known.size() + pending_correlations() - std::size_t(uses_reservation) >= 512) return false;
     m_known.insert(agent);
     return true;
 }
@@ -104,7 +111,6 @@ addon::Lifecycle_observation Wire_decoder::observation(
 
 std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& record)
 {
-    if (!m_failure.empty()) return {};
     auto type = json_util::text(record, "type");
     if (type == "context.append_loop_event") {
         const auto& event = json_util::member(record, "event");
@@ -114,13 +120,15 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         if (event_type == "tool.call" && json_util::text(event, "name") == "Agent") {
             if (m_calls.contains(id) || m_retired.contains(id)) return {};
             if (m_calls.size() >= 128 || m_running.size() >= 128) {
-                m_failure = "direct_agent_active_capacity_exhausted";
                 return {};
             }
             if (m_calls.size() + m_retired.size() >= 4096) {
-                m_failure = "direct_agent_retained_capacity_exhausted";
                 return {};
             }
+            // A published tool-call START must retain capacity for the later
+            // native identity join, including cancellation before tool.result.
+            const auto pending = pending_correlations();
+            if (m_known.size() + pending >= 512 || m_run_count + pending >= 512) return {};
             Call call;
             auto name = trim(json_util::text(json_util::member(event, "display"), "agent_name"));
             if (name.empty()) name = trim(json_util::text(json_util::member(event, "args"), "subagent_type"));
@@ -182,8 +190,8 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         Call* correlation = call != m_calls.end() ? &call->second :
             retired != m_retired.end() ? &retired->second : nullptr;
         if (correlation && !correlation->agent_id.empty() && correlation->agent_id != agent) return {};
-        if (!remember(agent)) {
-            if (correlation) m_failure = "direct_agent_identity_capacity_exhausted";
+        const bool reserved = call != m_calls.end() && call->second.agent_id.empty();
+        if (!remember(agent, reserved)) {
             return {};
         }
         auto& lineage = m_lineages[agent];
@@ -198,8 +206,7 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         }
         if (!index) {
             if (std::any_of(lineage.runs.begin(), lineage.runs.end(), [](const auto& run) { return run.active; })) return {};
-            if (m_run_count >= 512) {
-                if (correlation) m_failure = "direct_agent_run_capacity_exhausted";
+            if (m_run_count + pending_correlations() - std::size_t(reserved) >= 512) {
                 return {};
             }
             Run run;
@@ -234,7 +241,7 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         if (!remember(agent)) return {};
         auto found = m_lineages.find(agent);
         if (found == m_lineages.end()) {
-            if (m_run_count >= 512) return {};
+            if (m_run_count + pending_correlations() >= 512) return {};
             Lineage lineage;
             lineage.runs.emplace_back();
             found = m_lineages.emplace(agent, std::move(lineage)).first;
@@ -249,7 +256,6 @@ std::vector<addon::Lifecycle_observation> Wire_decoder::accept(const Json& recor
         if (m_retired.contains(run.parent)) { run.terminal = true; return {}; }
         if (m_running.contains(run.public_id)) return {};
         if (m_running.size() >= 128) {
-            if (m_calls.contains(run.parent)) m_failure = "direct_agent_active_capacity_exhausted";
             return {};
         }
         run.active = true;

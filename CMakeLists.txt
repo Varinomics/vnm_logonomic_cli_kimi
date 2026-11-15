@@ -55,6 +55,7 @@ else()
 endif()
 
 include(cmake/kimi_observation_dependency.cmake)
+logonomic_cli_addon_add_filesystem_observer()
 
 function(kimi_target target)
     target_link_libraries(${target} PRIVATE logonomic_cli_addon_sdk::sdk)
@@ -82,7 +83,7 @@ function(kimi_add_provider target)
     kimi_target(${target})
     target_include_directories(${target} PUBLIC src)
     target_link_libraries(${target} PUBLIC logonomic_cli_addon_sdk::sdk
-        vnm_framework::vnm_filesystem_observation)
+        logonomic_cli_addon_sdk::filesystem_observer)
     target_link_libraries(${target} PRIVATE tomlplusplus::tomlplusplus)
 endfunction()
 kimi_add_provider(kimi_provider)
@@ -111,19 +112,32 @@ if(MINGW)
 endif()
 
 logonomic_cli_addon_package_platform(KIMI_PLATFORM)
-logonomic_cli_addon_package_directory(logonomic.cli.kimi KIMI_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
-logonomic_cli_addon_package_indexer(kimi_package_indexer kimi_index_dependencies)
-include(cmake/kimi_package_runtime.cmake)
-# Check exact source and package bytes on every build: external runtimes can
-# change without a relink. Reuse PE import discovery only while all resolution
-# inputs remain unchanged, and leave a complete unchanged package untouched.
-add_custom_target(kimi_package ALL
-    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/assemble-package-$<CONFIG>.cmake"
-    BYPRODUCTS "${KIMI_PACKAGE_DIRECTORY}/package.files.json"
-    DEPENDS kimi_adapter kimi_helper kimi_launch_bridge kimi_quota_probe logonomic_cli_addon_index
-    VERBATIM)
-logonomic_cli_addon_install_package("${KIMI_PACKAGE_DIRECTORY}" logonomic.cli.kimi TARGET kimi_package)
+set(KIMI_QTBASE_SOURCE "" CACHE PATH "qtbase source matching the selected Qt runtime (notices)")
+set(KIMI_RUNTIME_NOTICES_DIRECTORY "" CACHE PATH
+    "Copyright/license files for external runtimes, named <library filename>.txt")
+set(KIMI_LINUX_RUNTIME_MATERIAL "" CACHE FILEPATH
+    "Exact prebuilt input provenance from the selected Qt/runtime acquisition")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(KIMI_PATCHELF_EXECUTABLE patchelf REQUIRED)
+endif()
+logonomic_cli_addon_add_qt_package(kimi_package logonomic.cli.kimi KIMI_PACKAGE_DIRECTORY
+    ADAPTER kimi_adapter
+    HELPERS kimi_helper kimi_launch_bridge kimi_quota_probe
+    QTBASE_SOURCE "${KIMI_QTBASE_SOURCE}"
+    RUNTIME_NOTICES "${KIMI_RUNTIME_NOTICES_DIRECTORY}"
+    LINUX_RUNTIME_MATERIAL "${KIMI_LINUX_RUNTIME_MATERIAL}"
+    PATCHELF "${KIMI_PATCHELF_EXECUTABLE}"
+    EXTRA_FILES "${kimi_toml_source}/LICENSE" notices/tomlplusplus-LICENSE.txt
+    OUT_RUNTIME_CHECK KIMI_RUNTIME_CHECK
+    OUT_QTBASE_SOURCE KIMI_QTBASE_SOURCE
+    INDEX_ARGUMENTS
+        --third-party assets/kimi.svg notices/lobe_icons_mit.txt provenance/lobe_icons.json
+        --third-party assets/kimi-color.svg notices/lobe_icons_mit.txt provenance/lobe_icons.json
+        --third-party "adapter/kimi_adapter${CMAKE_EXECUTABLE_SUFFIX}"
+            notices/tomlplusplus-LICENSE.txt provenance/tomlplusplus.json
+        --third-party "adapter/kimi_helper${CMAKE_EXECUTABLE_SUFFIX}"
+            notices/tomlplusplus-LICENSE.txt provenance/tomlplusplus.json)
 
 # Everything below is the package's own test suite, which only its standalone
 # build configures; an embedding build stages the package and stops here.
@@ -205,21 +219,26 @@ add_test(NAME kimi_package_runtime_layout
         "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_runtime_layout_tests.cmake")
 set_tests_properties(kimi_contract_tests kimi_package_validation kimi_package_conformance PROPERTIES TIMEOUT 120)
-if(MSVC OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    add_test(NAME kimi_package_runtime_closure
-        COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure-$<CONFIG>.cmake")
-    set_tests_properties(kimi_package_runtime_closure PROPERTIES TIMEOUT 120)
-endif()
+add_test(NAME kimi_package_runtime_closure COMMAND ${KIMI_RUNTIME_CHECK})
+set_tests_properties(kimi_package_runtime_closure PROPERTIES TIMEOUT 120)
+get_target_property(_kimi_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME kimi_dependency_preparation_tests
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/test_prepare_ci.py"
+        --sdk "${_kimi_sdk_source}")
+set_tests_properties(kimi_dependency_preparation_tests PROPERTIES TIMEOUT 30)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    logonomic_cli_addon_macos_runtime_deployer(KIMI_MACOS_RUNTIME_DEPLOYER)
     add_test(NAME kimi_macos_runtime_tests
         COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/macos_runtime_tests.py"
             "${KIMI_MACOS_RUNTIME_DEPLOYER}")
     set_tests_properties(kimi_macos_runtime_tests PROPERTIES TIMEOUT 30)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    logonomic_cli_addon_linux_runtime_deployer(KIMI_LINUX_RUNTIME_DEPLOYER)
     add_test(NAME kimi_linux_runtime_provenance_tests
         COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_runtime_provenance_tests.py"
-            "${KIMI_LINUX_RUNTIME_DEPLOYER}" "${CMAKE_COMMAND}")
+            "${KIMI_LINUX_RUNTIME_DEPLOYER}" "${CMAKE_COMMAND}" "${_kimi_sdk_source}")
     set_tests_properties(kimi_linux_runtime_provenance_tests PROPERTIES TIMEOUT 30)
 endif()
 set_tests_properties(kimi_usage_tests PROPERTIES TIMEOUT 180)
@@ -275,7 +294,7 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
         get_filename_component(kimi_compiler_directory "${CMAKE_CXX_COMPILER}" DIRECTORY)
         add_test(NAME kimi_runtime_dependency_cache
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_dependency_cache_tests.py"
-                "--module=${CMAKE_CURRENT_SOURCE_DIR}/cmake/kimi_runtime_dependencies.cmake"
+                "--module=${_kimi_sdk_source}/cmake/qt_runtime_dependencies.cmake"
                 "--cmake=${CMAKE_COMMAND}" "--inspector=${kimi_compiler_directory}/dumpbin.exe"
                 "--binary=$<TARGET_FILE:kimi_adapter>" "--qt-runtime=$<TARGET_FILE:Qt6::Core>")
         set_tests_properties(kimi_runtime_dependency_cache PROPERTIES

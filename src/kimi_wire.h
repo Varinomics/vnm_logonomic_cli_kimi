@@ -19,7 +19,6 @@ public:
         const logonomic::cli_addon::Json_value& record);
     std::vector<logonomic::cli_addon::Lifecycle_observation> close(std::string_view reason);
     void rewind();
-    const std::string& failure() const { return m_failure; }
 
 private:
     struct Call
@@ -46,7 +45,8 @@ private:
         std::size_t scan_cursor = 0;
     };
     std::optional<std::size_t> selected(const Lineage& lineage) const;
-    bool remember(const std::string& agent);
+    std::size_t pending_correlations() const;
+    bool remember(const std::string& agent, bool uses_reservation = false);
     bool stop_call(const std::string& id);
     void retire(const std::string& id);
     logonomic::cli_addon::Lifecycle_observation observation(
@@ -61,7 +61,6 @@ private:
     std::set<std::string> m_known;
     std::set<std::string> m_running;
     std::size_t m_run_count = 0;
-    std::string m_failure;
 };
 
 } // namespace kimi

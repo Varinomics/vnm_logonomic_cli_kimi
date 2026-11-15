@@ -265,7 +265,10 @@ struct Interaction_reader::State
                 return;
             }
             if (requests.size() >= k_request_bound) {
-                throw std::runtime_error("interaction_request_capacity_exhausted");
+                // Retained identities cannot be evicted or reused. Refuse only
+                // the new request so acquisition can commit its byte frontier
+                // and still reach resolutions for already admitted requests.
+                return;
             }
             requests.emplace(id, Request{agent, false});
         }
