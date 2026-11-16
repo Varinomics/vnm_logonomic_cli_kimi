@@ -183,9 +183,20 @@ addon::Provider_event relay(
     environment.insert(QStringLiteral("KIMI_TEST_EVENT_CAPTURE"), QString::fromStdString(addon::path_to_utf8(capture)));
     environment.insert(QStringLiteral("KIMI_TEST_WRAPPER_TRACE"), QString::fromStdString(addon::path_to_utf8(trace)));
 
-    const auto hooks = toml::parse(kimi::hook_entry("PermissionRequest", 13));
-    const auto command = hooks["hooks"][0]["command"].value<std::string>();
-    require(command.has_value(), "managed hook command is missing");
+    // Run the event's managed hook under the timeout Kimi enforces for it. A
+    // relay that finishes within that deadline is delivered in the product.
+    const auto event_name = json_util::text(payload, "hook_event_name");
+    const auto config = toml::parse(kimi::updated_config({}));
+    std::optional<std::string> command;
+    std::optional<int> timeout_s;
+    for (const auto& hook : *config["hooks"].as_array()) {
+        const auto& entry = *hook.as_table();
+        if (entry["event"].value<std::string>() == event_name) {
+            command   = entry["command"].value<std::string>();
+            timeout_s = entry["timeout"].value<int>();
+        }
+    }
+    require(command && timeout_s, "managed hook entry is missing for " + event_name);
     QProcess process;
     process.setProcessEnvironment(environment);
 #ifdef _WIN32
@@ -205,11 +216,11 @@ addon::Provider_event relay(
     require(queued_bytes == bytes.size(), "native hook input was not written");
     process.closeWriteChannel();
     const auto wait_began_ms = elapsed_ms();
-    const bool finished = process.waitForFinished(10000);
+    const bool finished = process.waitForFinished(*timeout_s * 1000);
     if (!finished) {
         const auto finished_ms = elapsed_ms();
         std::cerr << "packaged relay scenario=" << scenario << " ordinal=" << ordinal
-            << " event=" << json_util::text(payload, "hook_event_name")
+            << " event=" << event_name << " timeout_s=" << *timeout_s
             << " elapsed_ms=" << finished_ms << " started_ms=" << started_ms
             << " finish_wait_ms=" << (finished_ms - wait_began_ms) << '\n';
         std::cerr << "qprocess started_pid=" << started_pid << " current_pid=" << process.processId()
