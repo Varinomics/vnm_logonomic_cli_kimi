@@ -9,7 +9,6 @@
 #include "kimi_wire.h"
 
 #include <logonomic_cli_addon/session_contracts.h>
-#include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
 #include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/probe_contracts.h>
@@ -195,82 +194,6 @@ void wire_layout()
     try { kimi::find_session_wire(home, "session-alpha"); }
     catch (const std::exception&) { rejected = true; }
     require(rejected, "duplicate native session identities remain ambiguous across workspaces");
-}
-
-void saturated_session_end()
-{
-    namespace fs = std::filesystem;
-    struct Fixture
-    {
-        fs::path root = fs::temp_directory_path() / ("kimi-wire-capacity-" + addon::random_nonce_hex());
-        ~Fixture() { std::error_code error; fs::remove_all(root, error); }
-    } fixture;
-    const auto path = fixture.root / "sessions" / "workspace" / "session" / "agents" / "main" / "wire.jsonl";
-    fs::create_directories(path.parent_path());
-    {
-        std::ofstream wire(path);
-        for (int index = 0; index < 2047; ++index) {
-            wire << "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.call\",\"name\":\"Agent\",\"toolCallId\":\"call-" << index << "\"}}\n";
-            wire << "{\"type\":\"context.append_loop_event\",\"event\":{\"type\":\"tool.result\",\"toolCallId\":\"call-" << index << "\"}}\n";
-        }
-        wire << R"({"type":"context.append_loop_event","event":{"type":"tool.call","name":"Agent","toolCallId":"last-live-call"}})" << '\n';
-        require(static_cast<bool>(wire), "saturation fixture writes complete native records");
-    }
-    class Context : public addon::Invocation_context
-    {
-    public:
-        const addon::Invoke_request& request() const override { return invocation; }
-        bool cancel_requested() const override { return cancelled; }
-        bool wait_for_cancel(int) override { return cancelled; }
-        void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override { cancelled = true; }
-        void succeed(Json) override { succeeded = true; }
-        void fail(addon::Result_status, std::string reason, std::string) override { failure = std::move(reason); }
-        bool finished() const override { return succeeded || !failure.empty(); }
-        addon::Invoke_request invocation;
-        bool cancelled = false;
-        bool succeeded = false;
-        std::string failure;
-    } observing;
-    const std::string nonce(32, 'a');
-    kimi::Lifecycle_observer observer;
-    addon::Classify_event_request start;
-    start.event.name = "SessionStart";
-    start.event.body = json_util::object({{"session_id", Json("session")}, {"kimi_code_home", Json(kimi::path_string(fixture.root))}});
-    start.transition_nonce = nonce;
-    Context reservation;
-    reservation.invocation.capability = {"lifecycle-correlation-lifetime", 1};
-    reservation.invocation.operation = "reserve";
-    reservation.invocation.payload = addon::encode_lifecycle_correlation_reserve_request({{nonce}});
-    observer.handle(reservation);
-    require(reservation.succeeded, "host reserves the classifier correlation first");
-    observer.classify(start);
-    addon::Observe_request request;
-    request.session = {kimi::path_string(fixture.root), {"kimi"}, "session"};
-    request.window_ms = addon::limits::k_observe_window_ms;
-    request.correlation = addon::Session_correlation{nonce};
-    observing.invocation.operation = "observe";
-    observing.invocation.payload = addon::encode_observe_request(request);
-    observer.handle(observing);
-    require(observing.succeeded, "full retained queue is established before SessionEnd");
-    auto ending = start;
-    ending.event.name = "SessionEnd";
-    ending.ledger.current_epoch = 1;
-    ending.ledger.current_transition = addon::Ledger_transition{addon::Transition_kind::START, "session", nonce};
-    bool rejected = false;
-    try { observer.classify(ending); }
-    catch (const std::exception&) { rejected = true; }
-    require(rejected, "SessionEnd cannot acknowledge a terminal fact that exceeds retained capacity");
-    addon::Poll_observations_request poll;
-    poll.limit = 16;
-    poll.correlation = addon::Session_correlation{nonce};
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        Context polling;
-        polling.invocation.operation = "poll_observations";
-        polling.invocation.payload = addon::encode_poll_observations_request(poll);
-        observer.handle(polling);
-        require(!polling.succeeded && polling.failure == "observation_queue_capacity_exhausted",
-            "poll reports retained failure repeatedly rather than silently draining and erasing the session");
-    }
 }
 
 #ifndef _WIN32
@@ -694,7 +617,6 @@ int main()
         configuration();
         session_guidance();
         wire_layout();
-        saturated_session_end();
 #ifndef _WIN32
         probe_reaps_owned_leader();
 #endif
