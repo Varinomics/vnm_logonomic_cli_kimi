@@ -104,7 +104,7 @@ environment.update({
     'LOGONOMIC_PROVIDER_GENERATION_NONCE': 'c' * 32,
     'LOGONOMIC_PROVIDER_HELPERS_DIR': str(RUN / 'helpers'),
 })
-command = ['bwrap', '--ro-bind', '/', '/', '--dev-bind', '/dev', '/dev', '--proc', '/proc',
+command = ['bwrap', '--die-with-parent', '--ro-bind', '/', '/', '--dev-bind', '/dev', '/dev', '--proc', '/proc',
     '--bind', str(RUN / 'home'), str(Path.home()), '--bind', str(RUN), str(RUN),
     '--bind', str(RUN / 'tmp'), '/tmp', '--chdir', str(WORK),
     'node', str(cli),
