@@ -40,7 +40,58 @@ or auxiliary model records leave the last valid fact intact.
 
 Root parsing is covered by `kimi_model_tests`, including source-frontier
 isolation, model changes, negotiation, source order, and exclusion of auxiliary,
-billing and child records. This is a fixture gate, not a live Kimi account run.
+billing and child records. The production adapter and helper compile with the
+official Linux development SDK, and this registered test passes. These are
+component gates; package conformance and host timeline acceptance are separate.
+
+### Native Kimi Code 2.6.2 check (2026-11-16)
+
+The official npm CLI completed an actual request to a loopback Chat Completions
+endpoint using a fresh profile, with telemetry and updates disabled. The
+production `kimi_helper` captured its native `SessionStart` frontier through a
+capture transport. The model request used `native-root-model`, and the CLI
+printed the endpoint's reply. This check did not use an account or a remote
+model service.
+
+The resulting root wire emitted **no `llm.request` record**. The current bundle
+declares `LlmRequest`, but its request observer no longer dispatches that event.
+Consequently this CLI's root badge remains unconfirmed. The implementation
+covers native versions that emit the documented request record and the older
+captured fixture; the manifest declaration alone is not a live gate.
+
+The same run distinguishes per-step usage from serving-model identity:
+
+| Native observation | Actual value |
+|---|---|
+| Loopback request `model` | `native-root-model` |
+| Root `profile.bind.modelAlias` | `scripted-alias` |
+| Root `usage.record.model`, `usageScope: "turn"` | `scripted-alias` |
+| Root `llm.request` records | None |
+
+This is not merely an aggregate-usage limitation. Native
+[`requestObservation.ts`](https://github.com/MoonshotAI/kimi-code/blob/6e35efa98402b2a5a198aa929ef178e79ab26bb4/packages/agent-core-v2/src/agent/loop/requestObservation.ts)
+passes `request.modelAlias` to the usage service, and
+[`usageAgentModel.ts`](https://github.com/MoonshotAI/kimi-code/blob/6e35efa98402b2a5a198aa929ef178e79ab26bb4/packages/agent-core-v2/src/session/usage/usageAgentModel.ts)
+copies it into `UsageRecord.model`. Resolving that alias through configuration
+would manufacture serving-model evidence, so it remains excluded.
+
+The reproducible Linux probe is
+[`kimi_native_model_probe.py`](../tests/kimi_native_model_probe.py). Run it through
+the build queue with an official CLI, the built production helper, and a new
+output directory:
+
+```sh
+queued-build --slots 1 -- python3 tests/kimi_native_model_probe.py \
+  --cli /path/to/kimi-code/dist/main.mjs \
+  --helper /path/to/build/kimi_helper \
+  --output-directory /path/to/new/native-model-probe
+```
+
+It uses `bwrap` to isolate the real home mount, preserves the actual home
+environment selector, and writes only its fresh fixture directory. It records
+native stdout, stderr and helper delivery. It exits nonzero when the source
+cell is unconfirmed, including on 2.6.2; successful model completion alone is
+not reported as a model-observation pass.
 
 Child facts remain unconfirmed. The current lifecycle decoder maps native
 agent identifiers into call/run identities, while the agent-local wire reports
@@ -49,5 +100,5 @@ is established; parent models are never inherited.
 
 Structured ACP responses currently expose selected-model configuration, which
 does not establish the model that served the inspected operation. Structured
-model observations are therefore omitted. Native interactive and structured
-account-free gates are still required before claiming those cells complete.
+model observations are therefore omitted. Native model-observation and
+structured gates are still required before claiming those cells complete.
