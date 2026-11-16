@@ -132,6 +132,12 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
 endif()
 
 enable_testing()
+add_executable(kimi_model_tests tests/kimi_model_tests.cpp src/kimi_interactions.cpp src/kimi_wire_record.cpp)
+target_include_directories(kimi_model_tests PRIVATE src)
+kimi_target(kimi_model_tests)
+add_test(NAME kimi_model_tests COMMAND kimi_model_tests)
+set_tests_properties(kimi_model_tests PROPERTIES TIMEOUT 15)
+
 add_executable(kimi_quota_startup_tests tests/kimi_quota_startup_tests.cpp)
 target_link_libraries(kimi_quota_startup_tests PRIVATE kimi_provider)
 kimi_target(kimi_quota_startup_tests)

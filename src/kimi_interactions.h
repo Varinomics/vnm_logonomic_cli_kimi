@@ -3,12 +3,14 @@
 #include "kimi_json.h"
 
 #include <logonomic_cli_addon/lifecycle_events.h>
+#include <logonomic_cli_addon/model_state.h>
 
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace kimi {
@@ -42,7 +44,8 @@ public:
 
     bool acquire(const Interaction_inventory& inventory,
         std::vector<logonomic::cli_addon::Lifecycle_observation>& observations,
-        const std::function<bool()>& cancelled);
+        const std::function<bool()>& cancelled, bool observe_models = false);
+    std::optional<logonomic::cli_addon::Model_update> model_observation(std::string_view source_nonce) const;
 
 private:
     struct State;

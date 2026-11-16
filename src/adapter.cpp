@@ -179,6 +179,7 @@ int main()
         {"lifecycle-correlation-lifetime", 1}, {"execution-context", 1},
         {"launch-preparation", 3}, {"structured-session", 3}, {"delegated-session", 3},
         {addon::k_delegated_model_selection_capability_id, addon::k_delegated_model_selection_version},
+        {addon::k_model_state_capability_id, addon::k_model_state_version},
         {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
         {"quota", 2}, {"quota-failure", 1}, {"lifecycle-events", 2},
         {"helper-ingress", 2}, {"coordination-delivery", 1},

@@ -5,6 +5,7 @@
 #include "kimi_interactions.h"
 #include "kimi_launcher.h"
 
+#include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
 #include <logonomic_cli_addon/provider_event_diagnostic.h>
@@ -158,6 +159,7 @@ struct Binding
     std::string failure;
     bool discarding = false;
     bool observing = false;
+    bool observe_models = false;
     bool closed = false;
     std::optional<addon::Lifecycle_observation> pending_end;
     bool retired = false;
@@ -413,7 +415,7 @@ bool scan(Binding& binding, addon::Invocation_context* invocation)
     if (complete && binding.interactions) {
         std::vector<addon::Lifecycle_observation> interactions;
         complete = binding.interactions->acquire(binding.interaction_inventory, interactions,
-            [&] { return invocation && invocation->cancel_requested(); });
+            [&] { return invocation && invocation->cancel_requested(); }, binding.observe_models);
         enqueue(binding, std::move(interactions));
     }
     return complete && binding.failure.empty();
@@ -723,6 +725,15 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
         }
         while (binding.first_sequence < cursor.sequence) { binding.queue.pop_front(); ++binding.first_sequence; }
         addon::Poll_observations_result result;
+        if (request->model_failure) {
+            result.model_failure = request->model_failure;
+        }
+        else
+        if (request->model_state_version == addon::k_model_state_version && binding.interactions) {
+            if (auto model = binding.interactions->model_observation(binding.nonce)) {
+                result.model_updates.push_back(std::move(*model));
+            }
+        }
         const auto count = std::min(request->limit, binding.queue.size());
         result.observations.assign(binding.queue.begin(), binding.queue.begin() + static_cast<std::ptrdiff_t>(count));
         result.resume_cursor = cursor.key + ':' + std::to_string(cursor.sequence + count);
@@ -756,6 +767,7 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
         }
         binding->cursor_key = cursor.key;
         binding->observing = true;
+        binding->observe_models = request->model_state_version == addon::k_model_state_version && !request->model_failure;
         initial_sequence = binding->next_sequence;
         m_state->cursors[cursor.key] = binding;
     }
@@ -828,7 +840,20 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
         }
         if (!error.empty()) context.fail(addon::Result_status::FAILED,
             binding->failure.empty() ? "wire_observation_failed" : binding->failure);
-        else context.succeed(addon::encode_observe_result({cursor.key + ':' + std::to_string(cursor.sequence)}));
+        else {
+            addon::Observe_result result;
+            result.resume_cursor = cursor.key + ':' + std::to_string(cursor.sequence);
+            if (request->model_failure) {
+                result.model_failure = request->model_failure;
+            }
+            else
+            if (request->model_state_version == addon::k_model_state_version && binding->interactions) {
+                if (auto model = binding->interactions->model_observation(binding->nonce)) {
+                    result.model_updates.push_back(std::move(*model));
+                }
+            }
+            context.succeed(addon::encode_observe_result(result));
+        }
     }
 }
 
