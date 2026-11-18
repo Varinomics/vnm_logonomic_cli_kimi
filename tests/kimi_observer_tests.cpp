@@ -611,6 +611,13 @@ void final_append_during_acquisition_keeps_its_own_capture()
     std::promise<void> release;
     auto released = release.get_future().share();
     std::atomic<bool> held = false;
+    Observe_window window(observer, workspace, nonce);
+    // Initial registration can require a detail-free rescan. Hold a later
+    // delivery on the armed wire so the append exercises a pending file event.
+    require(wait_until([&] {
+        const auto stats = service->statistics();
+        return stats.dispatches > 0 && stats.pending_registrations == 0 && stats.outstanding == 0;
+    }), "settle the initial wire subscription before holding a native delivery");
     observer.set_scan_gate_for_tests([&] {
         if (!held.exchange(true)) {
             entered.set_value();
@@ -618,13 +625,13 @@ void final_append_during_acquisition_keeps_its_own_capture()
                 "held wire acquisition must be released");
         }
     });
-    Observe_window window(observer, workspace, nonce);
+    write_bytes(path, "\n", true);
     require(entered_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
         "hold actual acquisition after its snapshot length was captured");
     write_bytes(path, call_record("quiet-final-child"), true);
-    require(wait_until([&] { return service->statistics().retained_events > 0; }),
-        "actual native final write reaches the outstanding acquisition");
+    const bool retained = wait_until([&] { return service->statistics().retained_events > 0; });
     release.set_value();
+    require(retained, "actual native final write reaches the outstanding acquisition");
     require(wait_until([&] { const auto page = poll(observer, nonce); return page && page->observations.size() == 1; }),
         "old capture acknowledgement cannot lose the final append without another edit");
     window.stop();
