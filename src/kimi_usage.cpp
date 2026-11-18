@@ -280,8 +280,26 @@ void merge_temporal(addon::Usage_record& accumulated, const addon::Usage_record&
 
 std::string path_key(const fs::path& path)
 {
-    // Account and file identities use the same platform path comparison rules.
     return account_key(fs::absolute(path).lexically_normal());
+}
+
+std::string wire_source_key(const fs::path& path, const fs::path& sessions_directory)
+{
+    // Cache rows retain the directory-entry spellings from the native scan.
+    // They still distinguish archived wires when their containing directory
+    // disappears or is recreated with different name lookup rules.
+    auto component = path.begin();
+    fs::path recorded_root;
+    for (auto part = sessions_directory.begin(); part != sessions_directory.end(); ++part) {
+        if (component == path.end()) throw std::runtime_error("usage_cache_record_invalid");
+        recorded_root /= *component++;
+    }
+    if (component == path.end() || !addon::same_native_account_profile(recorded_root, sessions_directory)) {
+        throw std::runtime_error("usage_cache_record_invalid");
+    }
+    fs::path relative;
+    for (; component != path.end(); ++component) relative /= *component;
+    return addon::to_hex(addon::Sha256::digest(path_string(relative)));
 }
 
 std::optional<std::string> repository(std::string_view cwd)
@@ -939,6 +957,68 @@ private:
     std::uint64_t m_count = 0;
 };
 
+#ifdef _WIN32
+// The native lookup key is only a candidate index for this scan. Keep the
+// session's exact ID so an archived sibling cannot claim its current wire.
+std::string wire_actor_key(const fs::path& path)
+{
+    const auto session = path.parent_path().parent_path().parent_path();
+    const auto identity = addon::native_account_profile_identity(path);
+    return addon::to_hex(addon::Sha256::digest(identity.value_or(path_string(path)) + '\0' + path_string(session.filename())));
+}
+
+std::optional<fs::path> native_wire_alias(Row_lookup& candidates, const fs::path& stored)
+{
+    const auto actor = wire_actor_key(stored);
+    const auto index = candidates.find(actor);
+    if (!index || (*index && candidates.at(*index - 1).first == actor) ||
+        (*index + 1 < candidates.size() && candidates.at(*index + 1).first == actor)) return std::nullopt;
+    const auto candidate = addon::path_from_utf8(candidates.at(*index).second.as_string());
+    if (!addon::same_native_account_profile(stored, candidate)) return std::nullopt;
+    return candidate;
+}
+
+fs::path reconcile_live_wire_spellings(const fs::path& cached, const fs::path& live,
+    const fs::path& sessions_directory, const fs::path& work, addon::Invocation_context& context)
+{
+    Row_stream old_rows(cached), new_rows(live);
+    if (!old_rows.available() || !new_rows.available()) return cached;
+    Row_sorter new_actors(work, "new-wire-actors", context);
+    bool archived = false;
+    bool discovered = false;
+    while (old_rows.available() || new_rows.available()) {
+        check_cancel(context);
+        if (!new_rows.available() || (old_rows.available() && old_rows.key() < new_rows.key())) {
+            archived = true;
+            old_rows.next();
+        }
+        else if (!old_rows.available() || new_rows.key() < old_rows.key()) {
+            discovered = true;
+            const auto path = json_util::text(new_rows.value(), "path");
+            new_actors.add(wire_actor_key(addon::path_from_utf8(path)), Json(path));
+            new_rows.next();
+        }
+        else {
+            old_rows.next();
+            new_rows.next();
+        }
+    }
+    if (!archived || !discovered) return cached;
+
+    Row_lookup candidates(new_actors.finish(), work / "new-wire-offsets", context);
+    Row_sorter reconciled(work, "matched-wires", context);
+    for (Row_stream row(cached); row.available(); row.next()) {
+        check_cancel(context);
+        auto key = row.key();
+        auto value = row.value();
+        const auto stored = addon::path_from_utf8(json_util::text(json_util::member(value, "file"), "path"));
+        if (const auto current = native_wire_alias(candidates, stored)) key = wire_source_key(*current, sessions_directory);
+        reconciled.add(key, value);
+    }
+    return reconciled.finish();
+}
+#endif
+
 class Event_stream final
 {
 public:
@@ -1419,9 +1499,34 @@ File_record observed_file(const Json& row)
 // A copied occurrence is suppressed only through its direct parent, whose
 // own chain must close at an original counted in this same candidate. Keeping
 // both status and the traversal stack on disk also bounds a deeply nested fork.
-void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::path& work,
+void validate_fork_chains(Row_lookup& files, const fs::path& sessions_directory, const fs::path& events, const fs::path& work,
     Ownership_origins& origins, addon::Invocation_context& context)
 {
+#ifdef _WIN32
+    std::optional<Row_lookup> retained_actors;
+#endif
+    const auto find_parent = [&](const fs::path& path) {
+        auto index = files.find(wire_source_key(path, sessions_directory));
+#ifdef _WIN32
+        if (index) return index;
+        // A live child can name an archived parent through a newly cased
+        // workspace. Resolve the exact actor under witnessed native casing.
+        if (!retained_actors) {
+            Row_sorter actors(work, "fork-actors", context);
+            for (std::uint64_t i = 0; i < files.size(); ++i) {
+                check_cancel(context);
+                const auto row = files.at(i).second;
+                const auto source = json_util::text(json_util::member(row, "file"), "path");
+                actors.add(wire_actor_key(addon::path_from_utf8(source)), Json(source));
+            }
+            retained_actors.emplace(actors.finish(), work / "fork-actor-offsets", context);
+        }
+        if (const auto alias = native_wire_alias(*retained_actors, path)) {
+            index = files.find(wire_source_key(*alias, sessions_directory));
+        }
+#endif
+        return index;
+    };
     const auto status_path = work / "fork-status";
     {
         std::ofstream output(status_path, std::ios::binary);
@@ -1468,7 +1573,7 @@ void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::p
             const auto parent_path = path.parent_path().parent_path().parent_path().parent_path() /
                 addon::path_from_utf8(json_util::text(identity, "parent_session_id")) /
                 "agents" / path.parent_path().filename() / "wire.jsonl";
-            const auto parent_index = files.find(path_key(parent_path));
+            const auto parent_index = find_parent(parent_path);
             require_io(parent_index.has_value());
             const auto parent = observed_file(files.at(*parent_index).second);
             parent_events.emplace(events, parent.event_begin, parent.event_end);
@@ -1540,7 +1645,7 @@ void validate_fork_chains(Row_lookup& files, const fs::path& events, const fs::p
             const auto session = path.parent_path().parent_path().parent_path();
             const auto parent_path = session.parent_path() / addon::path_from_utf8(parent_id) /
                 "agents" / path.parent_path().filename() / "wire.jsonl";
-            const auto parent_index = files.find(path_key(parent_path));
+            const auto parent_index = find_parent(parent_path);
             if (!parent_index) { proved = false; break; }
             const auto parent = observed_file(files.at(*parent_index).second);
             if (!parent.fork_evidence) { proved = false; break; }
@@ -1607,7 +1712,7 @@ void merge_usage(addon::Usage_record& accumulated, const addon::Usage_record& re
     bool& mixed_coverage, addon::Invocation_context& context)
 {
     if (!record.source_path || !accumulated.source_path ||
-        path_key(addon::path_from_utf8(*record.source_path)) != path_key(addon::path_from_utf8(*accumulated.source_path)))
+        !addon::same_native_account_profile(addon::path_from_utf8(*record.source_path), addon::path_from_utf8(*accumulated.source_path)))
     {
         throw std::runtime_error("usage_session_path_conflict");
     }
@@ -2038,7 +2143,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
                 pending->accepted_event_count = event_count;
                 pending->retained_prefix_matches = true;
             }
-            cached.add(path_key(addon::path_from_utf8(pending_path)), observation(pending_path, *pending));
+            cached.add(wire_source_key(addon::path_from_utf8(pending_path), sessions_directory), observation(pending_path, *pending));
             pending.reset();
         };
         Cache_reader(input_file, context).read(owner, [&](const Json& row) {
@@ -2075,12 +2180,17 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
         if (entry.path().filename() != "wire.jsonl" || !entry.is_regular_file() ||
             entry.path().parent_path().parent_path().filename() != "agents") continue;
         const auto path = fs::absolute(entry.path()).lexically_normal();
-        live.add(path_key(path), json_util::object({{"path", Json(path_string(path))}}));
+        live.add(wire_source_key(path, sessions_directory), json_util::object({{"path", Json(path_string(path))}}));
         ++total;
         if (total % 256 == 0) context.report_progress(0, std::nullopt, "Discovering usage logs");
     }
     context.report_progress(0, total, "Sorting usage logs");
-    Row_stream cached_rows(cached.finish()), live_rows(live.finish());
+    auto cached_file = cached.finish();
+    const auto live_file = live.finish();
+#ifdef _WIN32
+    cached_file = reconcile_live_wire_spellings(cached_file, live_file, sessions_directory, work, context);
+#endif
+    Row_stream cached_rows(cached_file), live_rows(live_file);
     const auto staged_cache = work / "files.jsonl";
     std::ofstream cache_output(staged_cache, std::ios::binary);
     require_io(static_cast<bool>(cache_output));
@@ -2138,7 +2248,7 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
     require_io(static_cast<bool>(events));
     Row_lookup observed(observations.finish(), work / "observation-offsets", context);
     Ownership_origins origins(work, observed.size(), context);
-    validate_fork_chains(observed, events_path, work, origins, context);
+    validate_fork_chains(observed, sessions_directory, events_path, work, origins, context);
     const auto records = work / "records.jsonl";
     std::unique_ptr<Row_lookup> corrected_files;
     if (correction) {

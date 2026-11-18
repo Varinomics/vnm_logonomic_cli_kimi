@@ -25,6 +25,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace json_util = logonomic::cli_addon::json;
 
 namespace {
@@ -478,8 +482,32 @@ void fork_chains_contract()
     verify(670);
     fs::remove_all(directory / "root");
     fs::remove_all(directory / "child");
+#ifdef _WIN32
+    // The remaining live forks still refer to these archived parents after
+    // the enclosing workspace is renamed on a case-insensitive volume.
+    const auto renamed = directory.parent_path() / "Workspace";
+    const bool renamed_workspace = fs::exists(renamed);
+    if (renamed_workspace) {
+        fs::rename(directory, renamed);
+        require(fs::directory_iterator(directory.parent_path())->path().filename() == renamed.filename(),
+            "native directory enumeration reports the changed workspace spelling");
+    }
+#endif
     records = selected.scan(profile, "repair", context);
     verify(670);
+#ifdef _WIN32
+    if (renamed_workspace) {
+        // This child has no earlier accepted count. Its copied prefix must
+        // be proved against the archived parent through the new spelling.
+        add_session("latest", "root", usage(100) + usage(300) + marker + usage(11));
+        records = selected.scan(profile, "incremental", context);
+        const auto latest = std::find_if(records.begin(), records.end(), [](const auto& record) {
+            return record.record_id == "kimi:latest";
+        });
+        require(latest != records.end() && latest->total_tokens == 11,
+            "a newly discovered fork keeps only its own spend after its archived parent's workspace is renamed");
+    }
+#endif
 
     const auto cache = selected.path();
     const auto accepted_bytes = [&] {
@@ -760,6 +788,77 @@ void missing_sessions_contract()
     std::ifstream preserved(cache);
     std::string bytes((std::istreambuf_iterator<char>(preserved)), {});
     require(bytes == "corrupt retained cache", "failed cache validation leaves original bytes untouched");
+}
+
+void archived_case_distinct_sessions()
+{
+    Workspace workspace;
+    const auto profile = workspace.path / "profile";
+    const auto storage = workspace.path / "storage";
+    const auto sessions = profile / "sessions/workspace";
+    fs::create_directories(sessions);
+    fs::create_directories(storage);
+#ifdef _WIN32
+    const HANDLE directory = CreateFileW(sessions.c_str(), FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    require(directory != INVALID_HANDLE_VALUE, "open native session fixture directory");
+    FILE_CASE_SENSITIVE_INFO sensitivity{FILE_CS_FLAG_CASE_SENSITIVE_DIR};
+    const bool enabled = SetFileInformationByHandle(directory, FileCaseSensitiveInfo, &sensitivity, sizeof(sensitivity)) != 0;
+    CloseHandle(directory);
+    if (!enabled) {
+        std::cerr << "Skipping case-distinct session archive on a volume without per-directory case sensitivity\n";
+        return;
+    }
+#endif
+    const auto write_session = [&](const char* name, unsigned tokens) {
+        const auto session = sessions / name;
+        native_session(session);
+        write(session / "agents/main/wire.jsonl", "{\"type\":\"usage.record\",\"time\":1789200000000,\"usage\":{\"output\":" +
+            std::to_string(tokens) + "}}\n");
+    };
+    write_session("Work", 7);
+#ifdef _WIN32
+    require(!fs::exists(sessions / "work"), "the enabled NTFS fixture distinguishes both native names");
+#else
+    if (fs::exists(sessions / "work")) {
+        std::cerr << "Skipping case-distinct session archive on a case-insensitive temporary volume\n";
+        return;
+    }
+#endif
+    write_session("work", 11);
+    Context context;
+    Selected_cache cache(storage);
+    const auto verify = [&](std::string_view mode, unsigned current) {
+        const auto records = cache.scan(profile, mode, context);
+        std::set<std::pair<std::string, std::uint64_t>> totals;
+        for (const auto& row : records) {
+            totals.emplace(row.record_id, row.total_tokens);
+        }
+        require(records.size() == 2 && totals.contains({"kimi:Work", 7}) && totals.contains({"kimi:work", current}),
+            "both distinct native sessions keep their own counters");
+    };
+    verify("incremental", 11);
+    fs::remove_all(sessions);
+    verify("incremental", 11);
+    verify("repair", 11);
+    write_session("work", 13);
+    verify("repair", 13);
+#ifdef _WIN32
+    fs::rename(sessions, sessions.parent_path() / "Workspace");
+    verify("incremental", 13);
+    // The same native file with an altered actor ID is still bound by Kimi's
+    // exact ownership check. It cannot supply a second accounting record.
+    const auto agents = sessions.parent_path() / "Workspace/work/agents";
+    if (fs::exists(agents / "MAIN")) {
+        fs::rename(agents / "main", agents / "MAIN");
+        bool refused = false;
+        try { (void)cache.scan(profile, "incremental", context); }
+        catch (const kimi::Usage_ownership_unavailable&) { refused = true; }
+        require(refused, "a changed native actor ID preserves the accepted ownership boundary");
+        fs::rename(agents / "MAIN", agents / "main");
+        verify("incremental", 13);
+    }
+#endif
 }
 
 void large_history_contract()
@@ -1286,6 +1385,7 @@ int main(int argc, char** argv)
         scan_contract();
         timestamp_cache_identity_contract();
         missing_sessions_contract();
+        archived_case_distinct_sessions();
         line_cache_contract();
         irrelevant_wire_records_contract();
         required_wire_records_contract();
