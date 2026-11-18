@@ -263,6 +263,40 @@ bool initialization_record(const Json& value)
         return false;
     }
     const auto type = json_util::text(value, "type");
+    // Kimi 2.4's runtimeBindingOps and mcpDiscoveryOps reducers record runtime
+    // selection and advertised tools. Neither reducer changes retained messages.
+    if (type == "runtime.set_binding") {
+        return !json_util::text(value, "workspaceId").empty() && !json_util::text(value, "runtimeId").empty();
+    }
+    if (type == "mcp.tools_discovered") {
+        const auto& tools = json_util::member(value, "tools");
+        if (json_util::text(value, "serverName").empty() || json_util::text(value, "hash").empty() ||
+            !string_array(json_util::member(value, "enabledNames")) || !tools.is_array())
+        {
+            return false;
+        }
+        for (const auto& tool : tools.as_array()) {
+            if (json_util::text(tool, "name").empty() || !json_util::member(tool, "description").is_string() ||
+                !json_util::member(tool, "inputSchema").is_object())
+            {
+                return false;
+            }
+        }
+        const auto* collisions = value.find("collisions");
+        if (!collisions) return true;
+        if (!collisions->is_array()) return false;
+        for (const auto& collision : collisions->as_array()) {
+            const auto& other = json_util::member(collision, "collidesWith");
+            const auto kind = json_util::text(other, "kind");
+            if (json_util::text(collision, "qualified").empty() || json_util::text(collision, "toolName").empty() ||
+                !((kind == "same_server" && !json_util::text(other, "toolName").empty()) ||
+                  (kind == "other_server" && !json_util::text(other, "serverName").empty())))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
     if (type == "environment.set_binding") {
         const auto* cwd = value.find("cwd");
         return !json_util::text(value, "environmentId").empty() && (!cwd || cwd->is_string());
@@ -604,7 +638,9 @@ struct History_scan
             activity = true;
             return true;
         }
-        if (type == "environment.set_binding" || type == "profile.bind" || type == "changeNotifier.snapshot") {
+        if (type == "environment.set_binding" || type == "runtime.set_binding" || type == "mcp.tools_discovered" ||
+            type == "profile.bind" || type == "changeNotifier.snapshot")
+        {
             return initialization_record(value);
         }
         if (routine_record(value)) {

@@ -172,7 +172,18 @@ void native_initialization_contract(const fs::path& fixture, addon::Host_simulat
     expect(request, Availability::AVAILABLE, Content::EMPTY, host, "actual native empty initialization shape");
     write(wire, initialized + std::string(k_user) + std::string(k_model));
     expect(request, Availability::AVAILABLE, Content::NONEMPTY, host, "actual initializer followed by retained conversation");
+    // Captured from 2.4.1's delegated ACP startup with a local MCP server.
+    const std::string delegated_initialization =
+        R"({"type":"runtime.set_binding","workspaceId":"wd_fixture","runtimeId":"local","agentId":"main","time":1789200000001})" "\n"
+        R"({"type":"mcp.tools_discovered","agentId":"main","serverName":"fixture","hash":"fixture-hash","tools":[{"name":"status","description":"Read status","inputSchema":{"type":"object","properties":{}}}],"enabledNames":["status"],"time":1789200000002})" "\n";
+    write(wire, std::string(k_metadata) + delegated_initialization);
+    expect(request, Availability::AVAILABLE, Content::EMPTY, host, "runtime and MCP setup carry no conversation");
+    write(wire, std::string(k_metadata) + delegated_initialization + std::string(k_user) + std::string(k_model));
+    expect(request, Availability::AVAILABLE, Content::NONEMPTY, host, "Kimi 2.4 delegated conversation");
     for (const auto* malformed : {
+            R"({"type":"runtime.set_binding","runtimeId":"local","agentId":"main"})",
+            R"({"type":"mcp.tools_discovered","agentId":"main","serverName":"fixture","hash":"hash","tools":[{"name":"status"}],"enabledNames":["status"]})",
+            R"({"type":"mcp.tools_discovered","agentId":"main","serverName":"fixture","hash":"hash","tools":[],"enabledNames":[],"collisions":[{"qualified":"status","toolName":"status","collidesWith":{"kind":"other_server"}}]})",
             R"({"type":"environment.set_binding","environmentId":false,"agentId":"main"})",
             R"({"type":"profile.bind","agentId":"main","thinkingEffort":"off","systemPrompt":false,"disallowedTools":[]})",
             R"({"type":"changeNotifier.snapshot","agentId":"main","agentsMdHash":null,"skillsHash":null,"subagentNames":"explore"})"})
