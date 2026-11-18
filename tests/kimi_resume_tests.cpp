@@ -220,6 +220,19 @@ void native_completed_contract(const fs::path& fixture, addon::Host_simulator* h
         "actual native completed user and assistant conversation");
     require(read(wire) == completed && read(session / "state.json") == metadata,
         "completed native conversation remains unchanged by inspection");
+    // Kimi 2.4.1 records this context-size measurement when its upstream
+    // returns token usage. Only its retained context can prove conversation.
+    const std::string measured =
+        R"({"type":"token_counting.measured","agentId":"main","length":4,"tokens":26,"time":1795004623500})" "\n";
+    write(wire, completed + measured);
+    expect(request, Availability::AVAILABLE, Content::NONEMPTY, host,
+        "native token measurement preserves a completed conversation");
+    write(wire, std::string(k_metadata) + measured);
+    expect(request, Availability::AVAILABLE, Content::UNKNOWN, host,
+        "a context-size measurement alone cannot establish retained conversation");
+    write(wire, completed + R"({"type":"token_counting.measured","agentId":"main","length":4,"tokens":"26","time":1795004623500})" "\n");
+    expect(request, Availability::AVAILABLE, Content::UNKNOWN, host,
+        "malformed native token measurement leaves the recorded history uncertain");
     std::vector<Json> records;
     std::size_t begin = 0;
     while (begin < completed.size()) {

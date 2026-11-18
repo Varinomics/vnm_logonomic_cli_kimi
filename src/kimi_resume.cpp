@@ -544,8 +544,8 @@ bool routine_record(const Json& value)
             (!duration || nonnegative_number(*duration)) && (!error || error->is_object()) &&
             (!stop || stop->is_string()) && (!request || request->is_string());
     }
-    if (type == "token_counting.turn_recorded") {
-        return nonnegative_number(json_util::member(value, "turnId")) &&
+    if (type == "token_counting.measured" || type == "token_counting.turn_recorded") {
+        return (type == "token_counting.measured" || nonnegative_number(json_util::member(value, "turnId"))) &&
             nonnegative_number(json_util::member(value, "length")) &&
             nonnegative_number(json_util::member(value, "tokens"));
     }
