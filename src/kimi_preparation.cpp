@@ -37,14 +37,11 @@ void unavailable(addon::Invocation_context& context)
 std::string bound_home(const addon::Launch_environment& environment, std::string_view working_directory,
     const std::optional<addon::Account_context>& account)
 {
-    const auto home = path_string(profile_for_environment(environment, working_directory));
-    if (account && (!account->profile_path ||
-        account_key(addon::path_from_utf8(*account->profile_path)) != account->adapter_account_key ||
-        account_key(addon::path_from_utf8(home)) != account->adapter_account_key))
-    {
+    const auto home = profile_for_environment(environment, working_directory);
+    if (account && !account_matches_profile(*account, home)) {
         throw std::runtime_error("account_context_mismatch");
     }
-    return home;
+    return path_string(home);
 }
 
 void prepare_launch(addon::Invocation_context& context)

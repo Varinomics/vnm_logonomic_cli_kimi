@@ -1996,7 +1996,7 @@ fs::path prepare_corrected_sessions(Row_lookup& observed, Ownership_origins& ori
 }
 
 Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
-    std::string_view mode,
+    std::string_view mode, const std::string& owner,
     addon::Invocation_context& context, const addon::Usage_cache_selection& selection,
     const addon::Usage_owned_event_correction_request* correction = nullptr)
 {
@@ -2005,7 +2005,6 @@ Scan_result scan_to_disk(const fs::path& profile, const fs::path& storage,
     const bool sessions_present = fs::exists(sessions_directory);
     if (sessions_present && !fs::is_directory(sessions_directory)) throw std::runtime_error("usage_sessions_not_directory");
     if (!storage.is_absolute() || !fs::is_directory(storage)) throw std::runtime_error("usage_storage_unavailable");
-    const auto owner = account_key(profile);
     const auto destination = cache_io_path(addon::path_from_utf8(selection.candidate_root) / "files.json");
     const auto input_file = selection.accepted
         ? cache_io_path(addon::path_from_utf8(selection.accepted->root) / "files.json")
@@ -2224,7 +2223,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& profile, const fs::p
     std::string_view mode,
     addon::Invocation_context& context, const addon::Usage_cache_selection& selection)
 {
-    const auto scan = scan_to_disk(profile, storage, mode, context, selection);
+    const auto scan = scan_to_disk(profile, storage, mode, account_key(profile), context, selection);
     std::ifstream input(scan.records, std::ios::binary);
     require_io(static_cast<bool>(input));
     std::vector<addon::Usage_record> result;
@@ -2310,7 +2309,10 @@ void handle_usage(addon::Invocation_context& context)
                 throw std::runtime_error("usage_cache_format_unsupported");
             }
         }
-        auto scan = scan_to_disk(profile, storage, input->mode, context,
+        // Keep a path-verified historical grant bound to its existing cache and counters.
+        const auto cache_owner = input->context.account_context
+            ? input->context.account_context->adapter_account_key : account_key(profile);
+        auto scan = scan_to_disk(profile, storage, input->mode, cache_owner, context,
             *input->cache_selection, correction ? &*correction : nullptr);
         snapshot.workspace = std::move(scan.workspace);
         snapshot.records = std::move(scan.records);

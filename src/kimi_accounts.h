@@ -11,6 +11,8 @@
 namespace kimi {
 
 std::string account_key(const std::filesystem::path& profile);
+bool account_matches_profile(const logonomic::cli_addon::Account_context& account,
+    const std::filesystem::path& selected);
 std::filesystem::path profile_for_environment(const logonomic::cli_addon::Launch_environment& launch,
     std::string_view normalization_directory, std::string_view default_home_fallback = {});
 std::filesystem::path profile_for_context(const logonomic::cli_addon::Session_launch_context& context);

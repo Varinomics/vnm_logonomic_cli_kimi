@@ -707,11 +707,8 @@ bool resume_scope_matches(const Resume_record& record, const addon::Session_laun
     }
     try {
         const auto home = profile_for_environment(*context.launch_environment, context.working_directory);
-        const auto key = account_key(home);
-        return account_key(*record.kimi_code_home) == key &&
-            (!context.account_context || (context.account_context->profile_path &&
-                context.account_context->adapter_account_key == key &&
-                account_key(addon::path_from_utf8(*context.account_context->profile_path)) == key));
+        return addon::same_native_account_profile(record.kimi_code_home->lexically_normal(), home) &&
+            (!context.account_context || account_matches_profile(*context.account_context, home));
     }
     catch (const std::exception&) {
         return false;

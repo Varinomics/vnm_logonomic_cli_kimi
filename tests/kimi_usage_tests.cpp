@@ -1,6 +1,7 @@
 #include "kimi_accounts.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
+#include "kimi_resume.h"
 #include "kimi_usage.h"
 
 #include <logonomic_cli_addon/ids.h>
@@ -312,6 +313,64 @@ void accounts_contract()
     catch (const std::runtime_error&) { rejected = true; }
     require(rejected, "account key cannot silently select another profile");
 }
+
+#ifdef _WIN32
+void case_distinct_profile_grants()
+{
+    Workspace workspace;
+    const auto first  = workspace.path / fs::path(u8".kimi-code-\U00010400");
+    const auto second = workspace.path / fs::path(u8".kimi-code-\U00010428");
+    write(first / "credentials/kimi-code.json", "{}");
+    write(second / "credentials/kimi-code.json", "{}");
+    require(!fs::equivalent(first, second), "the two native NTFS profile directories are distinct");
+
+    const auto historical = addon::historical_account_profile_identity(first, first);
+    require(historical && historical == addon::historical_account_profile_identity(second, second),
+        "the former Kimi Windows key folded the two persisted profile locators together");
+    const auto old_key = "profile-" + addon::to_hex(addon::Sha256::digest(*historical));
+    require(kimi::account_key(first) != kimi::account_key(second) &&
+        kimi::account_key(first) != old_key && kimi::account_key(second) != old_key,
+        "neither distinct directory claims the old shared account key");
+
+    const addon::Account_context grant{2, old_key, kimi::path_string(first)};
+    require(kimi::account_matches_profile(grant, first) && !kimi::account_matches_profile(grant, second),
+        "the old path-bearing grant authorizes only its retained native directory");
+    addon::Session_launch_context context;
+    context.account_context = grant;
+    context.launch_environment = addon::Launch_environment{addon::host_platform_id(),
+        json_util::object({{"KIMI_CODE_HOME", addon::Json_value(kimi::path_string(first))}}), {}};
+    context.working_directory = kimi::path_string(workspace.path);
+    require(kimi::profile_for_context(context) == first &&
+        kimi::resume_scope_matches({"native-session", first}, context) &&
+        !kimi::resume_scope_matches({"native-session", second}, context),
+        "historical usage and exact resume retain the originally bound Kimi home");
+
+    addon::Usage_scan_request request;
+    request.context = context;
+    request.context.launcher = {"kimi", addon::k_runner_direct, {}};
+    request.context.launcher_argv = {"kimi"};
+    const auto storage = workspace.path / "storage";
+    request.context.profile_storage = addon::Profile_storage_context{1, kimi::path_string(storage)};
+    std::optional<addon::Usage_cache_reference> accepted;
+    for (const auto* name : {"first-scan", "retained-cache"}) {
+        const auto candidate = storage / name;
+        fs::create_directories(candidate);
+        request.cache_selection = addon::Usage_cache_selection{accepted, kimi::path_string(candidate)};
+        Context scan;
+        scan.invocation = {"scan", {"usage-scan", 3}, "scan", addon::encode_usage_scan_request(request, 3)};
+        kimi::handle_usage(scan);
+        const auto page = addon::decode_usage_scan_result(scan.payload, nullptr, 3);
+        require(page && page->complete && page->scope.source_account_key == old_key && page->cache_candidate,
+            "scans consume and acknowledge a cache owned by the original account grant");
+        accepted = page->cache_candidate;
+        std::ifstream file(candidate / "files.json");
+        std::string header;
+        std::getline(file, header);
+        const auto row = json_util::parse(header);
+        require(row && json_util::text(*row, "profile") == old_key, "the durable cache retains the validated grant key");
+    }
+}
+#endif
 
 void fork_ownership_contract()
 {
@@ -1221,6 +1280,9 @@ int main(int argc, char** argv)
         raw_fork_mode_contract();
         legacy_metadata_contract();
         accounts_contract();
+#ifdef _WIN32
+        case_distinct_profile_grants();
+#endif
         scan_contract();
         timestamp_cache_identity_contract();
         missing_sessions_contract();
