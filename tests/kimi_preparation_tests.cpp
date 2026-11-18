@@ -12,6 +12,7 @@
 #include <logonomic_cli_addon/session_contracts.h>
 
 #include <cstdlib>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -91,9 +93,13 @@ void required_control_reaches_native_admission(const char* executable)
     request.control.servers.push_back({"coordination", server_program, {"status", "notice"},
         {{"VNM_CONTROL_TOKEN", "kimi-host-authority-canary"}}});
     request.control.servers.push_back({"delegation", server_program, {"targets", "submit"}, {}});
+    // A cold native Windows Kimi can spend more than ten seconds starting its version probe.
+    request.context.launch_environment->effective_environment.set("KIMI_TEST_COLD_START", addon::Json_value("1"));
     Context context;
     context.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request)};
+    context.m_request.deadline_ms = addon::limits::k_delegated_prepare_deadline_ms;
     kimi::handle_preparation(context);
+    request.context.launch_environment->effective_environment.erase("KIMI_TEST_COLD_START");
     addon::Contract_failure failure;
     const auto result = context.m_result ? addon::decode_delegated_prepare_result(*context.m_result, &failure) : std::nullopt;
     require(result && result->acknowledgment.connection_version == addon::k_delegated_connection_version &&
@@ -653,6 +659,7 @@ int main(int argc, char** argv)
 #endif
         const auto* text = std::getenv(std::string(argv[1]) == "--help" ? "KIMI_TEST_HELP" : "KIMI_TEST_VERSION");
         if (!text) return 1;
+        if (std::getenv("KIMI_TEST_COLD_START")) std::this_thread::sleep_for(std::chrono::milliseconds(10500));
         std::cout << text;
         return 0;
     }

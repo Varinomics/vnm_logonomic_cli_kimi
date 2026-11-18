@@ -1,5 +1,6 @@
 #include "kimi_launcher.h"
 #include "kimi_json.h"
+#include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/sha256.h>
 #ifndef _WIN32
@@ -271,7 +272,10 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
             if (const auto found = cache.find(cache_key); found != cache.end()) return found->second;
         }
     }
-    const auto output = probe({path_string(*program), resume ? "--help" : "--version"}, environment, working_directory, 10000, context);
+    const auto deadline = std::min<std::int64_t>(context.request().deadline_ms,
+        resume ? addon::limits::k_resume_prepare_deadline_ms : addon::limits::k_delegated_prepare_deadline_ms);
+    const auto output = probe({path_string(*program), resume ? "--help" : "--version"},
+        environment, working_directory, static_cast<int>(deadline), context);
     if (!output || before.empty() || before != fingerprint()) return std::nullopt;
     if (resume) {
         static const std::regex selector(R"((^|\n)[^\n]*--session[ \t]+\[id\]([ \t\r\n]|$))");
