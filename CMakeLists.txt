@@ -129,7 +129,9 @@ logonomic_cli_addon_add_qt_package(kimi_package logonomic.cli.kimi KIMI_PACKAGE_
     RUNTIME_NOTICES "${KIMI_RUNTIME_NOTICES_DIRECTORY}"
     LINUX_RUNTIME_MATERIAL "${KIMI_LINUX_RUNTIME_MATERIAL}"
     PATCHELF "${KIMI_PATCHELF_EXECUTABLE}"
-    EXTRA_FILES "${kimi_toml_source}/LICENSE" notices/tomlplusplus-LICENSE.txt
+    EXTRA_FILES
+        LICENSE notices/LICENSE
+        "${kimi_toml_source}/LICENSE" notices/tomlplusplus-LICENSE.txt
     OUT_RUNTIME_CHECK KIMI_RUNTIME_CHECK
     OUT_QTBASE_SOURCE KIMI_QTBASE_SOURCE
     INDEX_ARGUMENTS
@@ -333,6 +335,7 @@ get_directory_property(_provider_tests TESTS)
 set_property(TEST ${_provider_tests} APPEND PROPERTY LABELS "cli-addon;provider-contract")
 
 add_executable(kimi_error_boundary_tests tests/kimi_error_boundary_tests.cpp)
+target_compile_definitions(kimi_error_boundary_tests PRIVATE LOGONOMIC_CLI_ADDON_ADAPTER_VERSION="${PROJECT_VERSION}")
 target_link_libraries(kimi_error_boundary_tests PRIVATE kimi_provider logonomic_cli_addon_sdk::test_support)
 kimi_target(kimi_error_boundary_tests)
 add_test(NAME kimi_error_boundary_tests COMMAND kimi_error_boundary_tests)

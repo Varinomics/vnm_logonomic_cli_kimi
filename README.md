@@ -128,13 +128,15 @@ request. Authentication absence remains distinct from a failed quota request.
 
 The [contributor guide](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/CONTRIBUTING.md) covers local package checks.
 Send provider pull requests to [the kimi repository](https://github.com/Varinomics/vnm_logonomic_cli_kimi/pulls).
+See the [repository license](LICENSE) for the terms covering Varinomics code.
 
 CMake fetches the SDK from `vnm_logonomic_cli_addon` on `master` by default. An explicit
 `LOGONOMIC_CLI_ADDON_SDK_SOURCE` path overrides that dependency for coordinated
 local development. Observation reuses the embedding build's
 `vnm_framework::vnm_filesystem_observation` target. A standalone build accepts
 `KIMI_OBSERVATION_SOURCE`, otherwise uses the installed `vnm_filesystem_observation`
-package or acquires `vnm_filesystem_observation` on `master`. The leaf selects its owned
+package or fetches the [filesystem observation library](https://github.com/Varinomics/vnm_filesystem_observation)
+on `master`. The library selects its
 `vnm_qt_dispatch` dependency; source overrides use
 `FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH` and `FETCHCONTENT_SOURCE_DIR_VNM_CMAKE`.
 The filesystem observer requires Qt Core. Outside Windows, the quota probe also
