@@ -89,6 +89,7 @@ endfunction()
 kimi_add_provider(kimi_provider)
 
 add_executable(kimi_adapter src/adapter.cpp)
+target_compile_definitions(kimi_adapter PRIVATE LOGONOMIC_CLI_ADDON_ADAPTER_VERSION="${PROJECT_VERSION}")
 target_link_libraries(kimi_adapter PRIVATE kimi_provider)
 kimi_target(kimi_adapter)
 add_executable(kimi_helper src/kimi_helper.cpp)

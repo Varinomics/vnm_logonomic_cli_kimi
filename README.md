@@ -93,8 +93,10 @@ classification and retires it when the host abandons the chain. Ordinary watch
 windows preserve unread pages; the final closed page remains replayable until
 the host acknowledges its exact consumption cursor.
 Agent stops are delivered before the final SessionEnd, including
-background completion and file replay. Ambiguous session paths supply no new
-native source binding.
+background completion and file replay. Child observation requires persisted native events.
+Kimi Code 0.39.1 recorded direct `Agent` calls in `wire.jsonl` and kept
+`AgentSwarm` child lifecycles internal, so those children had no timeline entries.
+Ambiguous session paths supply no new native source binding.
 
 The SDK's shared filesystem lifecycle driver owns reservations, cursors, queues
 and subscriptions. Native wire discovery, interaction frontiers and the final
@@ -135,77 +137,24 @@ local development. Observation reuses the embedding build's
 package or acquires `vnm_filesystem_observation` on `master`. The leaf selects its owned
 `vnm_qt_dispatch` dependency; source overrides use
 `FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH` and `FETCHCONTENT_SOURCE_DIR_VNM_CMAKE`.
-Only QtCore >=6.12 is required; the aggregate GUI/QML framework is not imported.
-Use a fresh out-of-source tree. Packages target Windows and Linux x86-64 and
-macOS ARM64. Windows builds follow the workstation's queued Visual Studio 2026 /
-MSVC v145 build policy. macOS runtime assembly also requires Python >=3.9.
-Outside Windows, the quota probe links libcurl, so its development files are
-required to configure.
+The filesystem observer requires Qt Core. Outside Windows, the quota probe also
+requires libcurl development files.
 
 The `kimi_package` target produces `package/logonomic.cli.kimi` beneath a
 single-configuration build directory, or `package/<config>/logonomic.cli.kimi`
 with a multi-configuration generator, including its integrity index.
-The SDK's shared Qt package recipe inspects each executable's actual runtime
-closure and places its non-system libraries beside it. Linux executables use a package-local `$ORIGIN`
-loader path; staged ELF libraries are normalized with `patchelf` (override its
-location with `KIMI_PATCHELF_EXECUTABLE`). Windows resolves its DLLs from the executable directory. SONAME
-files are regular copies because the package contract excludes symlinks. The
-package does not depend on Qt next to Logonomic or on a developer search path.
-macOS shares its non-system native libraries beneath `helpers/runtime/`, rewrites their
-loader paths within the package, and applies ad-hoc signatures after relocation.
-Its deployment report records original and staged bytes and inspects every
-native slice. Controlled Release executables cannot contain debugging data;
-required supplied runtimes retain their original debugging data.
-A no-op build retains the package and index; changes to dependency bytes or
-membership rebuild both before the package is exported.
+For matching Qt notices, additional runtime notices and Linux deployment inputs,
+use `KIMI_QTBASE_SOURCE`, `KIMI_RUNTIME_NOTICES_DIRECTORY`,
+`KIMI_LINUX_RUNTIME_MATERIAL` and `KIMI_PATCHELF_EXECUTABLE` as described in
+[QtCore package assembly](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/sdk/logonomic_cli_addon_sdk/docs/package_contract.md#qtcore-package-assembly). The provider's CI preparation script delegates to that recipe.
 
-Runtime notices come from the selected Qt's matching qtbase source, supplied by
-`KIMI_QTBASE_SOURCE` or discovered at `<Qt-prefix>/../Src/qtbase`. Otherwise the
-build acquires Qt's official qtbase source at the selected runtime's version tag
-for notices only. Its licenses,
-bundled third-party notices and available installation SPDX metadata accompany
-the actual closure. Debian-family runtime dependencies use their installed
-package copyright files. Other external libraries require a notice file named
-`<library-filename>.txt` in `KIMI_RUNTIME_NOTICES_DIRECTORY`; missing notices fail
-assembly. The selected MSVC redistributables carry Microsoft's runtime notice.
-MSVC Debug packages instead select Debug CRT and Debug UCRT from the active
-toolchain and Windows SDK. Their separate notice and resolved-source provenance
-identify private debugging/testing deployment only; they are not production
-redistributables.
-Provider CI preparation, `.github/scripts/prepare_ci.py`, delegates to the selected
-SDK's shared preparation module. It installs the Qt kit of
-the requested compiler family (`--toolchain`: `msvc` or `llvm-mingw` on Windows,
-`gcc` or `clang` on Linux) with the given aqtinstall source; the llvm-mingw kit
-includes its LLVM runtime archive, which puts `libc++.dll` and `libunwind.dll`
-beside QtCore, where the package's Windows closure finds them. A kit restored
-from a cache that another aqtinstall source or archive set installed is
-installed again. It takes
-`vnm_filesystem_observation`, `vnm_qt_dispatch` and `vnm_cmake` at `master`, or at the exact
-commits a release passes with `--revisions`, and `--record` writes the toolchain,
-kit, aqtinstall source and revisions it used. For LLVM-MinGW it writes
-`libc++.dll.txt` and `libunwind.dll.txt` from the toolchain's `LICENSE.TXT`, two
-LF bytes and its x86_64 MinGW-w64 runtime `COPYING` text.
-The index marks every copied runtime as third-party and points to its notices
-and resolved-source provenance. The optional `kimi_package_membership` recipe
-forwards these selected sources into its isolated nested build.
 CTest registers focused contract checks,
 package validation, and SDK conformance. Implementation fixtures cover ACP
 admission, hook ownership, Agent correlation/replay, Unicode labels, and quota
 normalization. Qualification is a separate step; source availability does not
 establish a successful build or test run.
 
-The package recipe proves the Windows/Linux x86-64 or macOS ARM64 compiler target
-during configuration. `cmake --install` exports a fresh artifact beneath its install-time
-prefix and preserves executable permissions. An existing per-package destination,
-including a dangling symlink, is refused. POSIX `DESTDIR` staging is supported;
-nonempty `DESTDIR` with a drive-letter prefix is refused. Export is not atomic:
-a failure may leave a partial artifact directory. Choose a fresh destination or
-manually remove only that identified disposable export before retrying; never
-remove an installed generation this way. The application's package ingestion
-owns atomic installation and updates.
-
-The application chooses activation. Replacing the built-in Kimi provider removes
-that implementation; this package does not retain a native fallback.
+Use `cmake --install` to export the indexed package to a fresh directory. See [SDK package export](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/sdk/logonomic_cli_addon_sdk/docs/package_contract.md#exporting-a-package).
 
 ## Structured and delegated sessions
 

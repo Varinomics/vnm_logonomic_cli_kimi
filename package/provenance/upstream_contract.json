@@ -13,7 +13,7 @@
     "https://github.com/MoonshotAI/kimi-code/blob/main/apps/kimi-code/src/cli/commands.ts",
     "https://github.com/MoonshotAI/kimi-code/blob/main/packages/agent-core-v2/src/app/config/configService.ts"
   ],
-  "compatibility": "Observe required native behaviors; ACP minimum 0.39.1 has no upper version fence. The separate Python kimi-cli distribution does not establish Kimi Code hook or config semantics.",
+  "compatibility": "The reviewed ACP integration used a 0.39.1 minimum and admitted newer versions. The separate Python kimi-cli distribution does not establish Kimi Code hook or config semantics.",
   "icons": {
     "upstream": "https://github.com/lobehub/lobe-icons",
     "license": "MIT",

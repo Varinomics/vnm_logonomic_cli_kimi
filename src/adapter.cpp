@@ -173,7 +173,7 @@ int main()
 {
     addon::Adapter_runtime_options options;
     options.adapter_name = "kimi-addon";
-    options.adapter_version = "1.0.0";
+    options.adapter_version = LOGONOMIC_CLI_ADDON_ADAPTER_VERSION;
     options.capabilities = {
         {"presentation", 1}, {"launcher-discovery", 1}, {"profile-storage", 1},
         {"lifecycle-correlation-lifetime", 1}, {"execution-context", 1},
