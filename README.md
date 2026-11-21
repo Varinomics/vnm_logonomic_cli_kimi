@@ -18,8 +18,7 @@ subsequent guidance requests, and removed at `SessionEnd`. Resumed sessions use
 the same hook route. This does not change tool approval rules or the user's
 agent instructions.
 
-It uses the public Logonomic CLI add-on SDK, the filesystem observation leaf of
-vnm_framework, QtCore, platform APIs and toml++ for configuration parsing.
+It uses the Logonomic CLI add-on SDK, the `vnm_filesystem_observation` library, QtCore, platform APIs and toml++ for configuration parsing.
 
 The normal launch requests a host-owned transformation of the selected Kimi
 `config.toml`. Only Logonomic's marked hook blocks are replaced. The host owns
@@ -125,12 +124,15 @@ request. Authentication absence remains distinct from a failed quota request.
 
 ## Building and qualification
 
-CMake fetches the SDK from Logonomic `master` by default. An explicit
+The [contributor guide](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/CONTRIBUTING.md) covers local package checks.
+Send provider pull requests to [the kimi repository](https://github.com/Varinomics/vnm_logonomic_cli_kimi/pulls).
+
+CMake fetches the SDK from `vnm_logonomic_cli_addon` on `master` by default. An explicit
 `LOGONOMIC_CLI_ADDON_SDK_SOURCE` path overrides that dependency for coordinated
 local development. Observation reuses the embedding build's
 `vnm_framework::vnm_filesystem_observation` target. A standalone build accepts
-`KIMI_FRAMEWORK_SOURCE`, otherwise uses the installed `vnm_filesystem_observation`
-leaf package or acquires framework `master`. The leaf selects its owned
+`KIMI_OBSERVATION_SOURCE`, otherwise uses the installed `vnm_filesystem_observation`
+package or acquires `vnm_filesystem_observation` on `master`. The leaf selects its owned
 `vnm_qt_dispatch` dependency; source overrides use
 `FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH` and `FETCHCONTENT_SOURCE_DIR_VNM_CMAKE`.
 Only QtCore >=6.12 is required; the aggregate GUI/QML framework is not imported.
@@ -178,7 +180,7 @@ includes its LLVM runtime archive, which puts `libc++.dll` and `libunwind.dll`
 beside QtCore, where the package's Windows closure finds them. A kit restored
 from a cache that another aqtinstall source or archive set installed is
 installed again. It takes
-`vnm_framework`, `vnm_qt_dispatch` and `vnm_cmake` at `master`, or at the exact
+`vnm_filesystem_observation`, `vnm_qt_dispatch` and `vnm_cmake` at `master`, or at the exact
 commits a release passes with `--revisions`, and `--record` writes the toolchain,
 kit, aqtinstall source and revisions it used. For LLVM-MinGW it writes
 `libc++.dll.txt` and `libunwind.dll.txt` from the toolchain's `LICENSE.TXT`, two

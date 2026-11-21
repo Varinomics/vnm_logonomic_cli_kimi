@@ -1,19 +1,18 @@
-# Reuse the embedding build's selected leaf without changing its framework options.
-set(KIMI_FRAMEWORK_SOURCE "" CACHE PATH "Local vnm_framework source override")
+# Embedded providers share the host's selected observer.
+set(KIMI_OBSERVATION_SOURCE "" CACHE PATH "Local vnm_filesystem_observation source override")
 if(NOT TARGET vnm_framework::vnm_filesystem_observation)
-    if(KIMI_FRAMEWORK_SOURCE)
-        add_subdirectory("${KIMI_FRAMEWORK_SOURCE}/cpp/filesystem_observation"
+    if(KIMI_OBSERVATION_SOURCE)
+        add_subdirectory("${KIMI_OBSERVATION_SOURCE}"
             "${CMAKE_CURRENT_BINARY_DIR}/filesystem_observation")
     else()
         find_package(vnm_filesystem_observation CONFIG QUIET)
         if(NOT TARGET vnm_framework::vnm_filesystem_observation)
             include(FetchContent)
-            FetchContent_Declare(kimi_framework
-                GIT_REPOSITORY https://github.com/Varinomics/vnm_framework.git
+            FetchContent_Declare(vnm_filesystem_observation
+                GIT_REPOSITORY https://github.com/Varinomics/vnm_filesystem_observation.git
                 GIT_TAG master
-                GIT_SHALLOW TRUE
-                SOURCE_SUBDIR cpp/filesystem_observation)
-            FetchContent_MakeAvailable(kimi_framework)
+                GIT_SHALLOW TRUE)
+            FetchContent_MakeAvailable(vnm_filesystem_observation)
         endif()
     endif()
 endif()
@@ -25,7 +24,7 @@ get_target_property(kimi_observation_imported
 if(NOT kimi_observation_imported)
     get_target_property(kimi_observation_source
         vnm_framework::vnm_filesystem_observation SOURCE_DIR)
-    get_filename_component(kimi_framework_source "${kimi_observation_source}/../.." ABSOLUTE)
+    cmake_path(GET kimi_observation_source PARENT_PATH kimi_observation_source)
 endif()
 get_target_property(kimi_dispatch_imported vnm_qt_dispatch::vnm_qt_dispatch IMPORTED)
 if(NOT kimi_dispatch_imported)

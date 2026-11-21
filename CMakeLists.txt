@@ -32,7 +32,7 @@ else()
     else()
         include(FetchContent)
         FetchContent_Declare(logonomic_sdk_source
-            GIT_REPOSITORY https://github.com/Varinomics/logonomic.git
+            GIT_REPOSITORY https://github.com/Varinomics/vnm_logonomic_cli_addon.git
             GIT_TAG master
             GIT_SHALLOW TRUE
             SOURCE_SUBDIR sdk/logonomic_cli_addon_sdk)
@@ -307,7 +307,7 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_membership_tests.py"
             "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--sdk=${_membership_sdk_source}"
             "--tomlplusplus-source=${_membership_toml_source}"
-            "--framework-source=${kimi_framework_source}"
+            "--observation-source=${kimi_observation_source}"
             "--dispatch-source=${kimi_dispatch_source}"
             "--vnm-cmake-source=${kimi_vnm_cmake_source}"
             "--observation-prefix=${vnm_filesystem_observation_DIR}"
