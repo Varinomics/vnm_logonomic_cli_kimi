@@ -209,9 +209,8 @@ void native_completed_contract(const fs::path& fixture, addon::Host_simulator* h
     write(session / "state.json", metadata);
     write(wire, completed);
     const auto request = inspection_request(home, fixture);
-    // Captured from official Kimi Code 2.5.2 with an offline model response.
-    // Preserve all 23 record types, order, prompt/step references and completion
-    // boundaries; scrub paths, system/date prose and tool descriptions/schemas.
+    // Reduced from an offline Kimi Code 2.5.2 completion. All 23 records keep
+    // their native order, prompt and step relationships, and completion boundaries.
     // Native oracle at eb2035f3: replayBuilder/fold.ts, human/agent/historySchema.ts,
     // loop/turnOps.ts, loop/llmRequestOps.ts, plugin/agentPluginOps.ts,
     // toolSelect/toolSelectOps.ts, tokenCounting/tokenCountingOps.ts,
@@ -313,18 +312,14 @@ void permission_mode_history_contract(const fs::path& fixture, addon::Host_simul
     write(state, metadata);
     const auto request = inspection_request(home, fixture);
 
-    // The enter record is unchanged from official Windows Kimi Code 2.5.2.
-    // Its permissionModeInjection and reminderService at 1c142a0 append enter
-    // and exit reminders with the same injection origin, never user input.
-    // The exit text below comes from permission-mode-auto-exit-reminder.md.
+    // Kimi Code 2.5.2's permissionModeInjection and reminderService at 1c142a0
+    // mark both enter and exit reminders as injections. Only their origin
+    // distinguishes them from a user typing identical text.
     auto exited = *record;
     auto exit_message = json_util::member(exited, "message");
     exit_message.set("content", Json(Json::Array{json_util::object({
         {"type", Json("text")},
-        {"text", Json("<system-reminder>\nAuto permission mode is no longer active. "
-            "Tool approvals and permission checks are back to the current mode.\n"
-            "  - Continue normally, but expect approval prompts or denials when a tool requires them.\n"
-            "</system-reminder>")}})}));
+        {"text", Json("<system-reminder>Fixture left automatic mode.</system-reminder>")}})}));
     exited.set("message", exit_message);
     for (const auto& reminder : {injection, addon::serialize_json(exited) + '\n'}) {
         const auto initialized = std::string(k_metadata) + reminder;
