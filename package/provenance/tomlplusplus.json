@@ -3,5 +3,5 @@
   "source_selection": "The package build consumes upstream master or the explicit KIMI_TOMLPLUSPLUS_SOURCE checkout.",
   "notice": "notices/tomlplusplus-LICENSE.txt",
   "license_source": "LICENSE from the exact checkout consumed by the package build is copied without modification.",
-  "incorporation": "kimi_config.cpp includes the toml++ header-only parser. The adapter calls its configuration transformations directly; the helper references code_home from the same translation unit. Those two executables reference the config archive member. The quota probe links kimi_provider but its referenced quota, account and launcher translation units do not reference the config member; it is not marked as a toml++ resource. The attached process bridge links the SDK alone."
+  "incorporation": "The adapter and helper link kimi_config.cpp, which parses configurations with toml++. The quota probe calls direct_quota_route in kimi_quota_direct.cpp, which uses toml++ to read provider settings."
 }

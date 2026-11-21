@@ -137,6 +137,8 @@ logonomic_cli_addon_add_qt_package(kimi_package logonomic.cli.kimi KIMI_PACKAGE_
         --third-party "adapter/kimi_adapter${CMAKE_EXECUTABLE_SUFFIX}"
             notices/tomlplusplus-LICENSE.txt provenance/tomlplusplus.json
         --third-party "adapter/kimi_helper${CMAKE_EXECUTABLE_SUFFIX}"
+            notices/tomlplusplus-LICENSE.txt provenance/tomlplusplus.json
+        --third-party "adapter/kimi_quota_probe${CMAKE_EXECUTABLE_SUFFIX}"
             notices/tomlplusplus-LICENSE.txt provenance/tomlplusplus.json)
 
 # Everything below is the package's own test suite, which only its standalone
