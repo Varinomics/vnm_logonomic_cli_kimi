@@ -15,6 +15,7 @@ enum class Wire_record_kind
     METADATA,
     FORKED,
     USAGE,
+    MODEL_REQUEST,
 };
 
 // Classify native wire records without retaining their payloads. The complete

@@ -136,12 +136,13 @@ void prepare_observe(Context& context, const Workspace& workspace, const std::st
 }
 
 std::optional<addon::Poll_observations_result> poll(kimi::Lifecycle_observer& observer,
-    const std::string& nonce, std::string cursor = {}, std::size_t limit = 16)
+    const std::string& nonce, std::string cursor = {}, std::size_t limit = 16, unsigned model_version = 0)
 {
     addon::Poll_observations_request request;
     request.correlation = addon::Session_correlation{nonce};
     request.resume_cursor = std::move(cursor);
     request.limit = limit;
+    request.model_state_version = model_version;
     Context context;
     context.m_request.capability = {"lifecycle-events", 2};
     context.m_request.operation = "poll_observations";
@@ -166,9 +167,14 @@ bool wait_until(const std::function<bool()>& predicate)
 class Observe_window final
 {
 public:
-    Observe_window(kimi::Lifecycle_observer& observer, const Workspace& workspace, const std::string& nonce)
+    Observe_window(kimi::Lifecycle_observer& observer, const Workspace& workspace, const std::string& nonce,
+        std::function<void()> model_progress = {})
     {
         prepare_observe(context, workspace, nonce);
+        if (model_progress) {
+            addon::encode_model_state_request(context.m_request.payload, addon::k_model_state_version);
+            context.m_progress = std::move(model_progress);
+        }
         worker = std::async(std::launch::async, [&observer, this] { observer.handle(context); });
     }
     ~Observe_window()
@@ -277,6 +283,38 @@ void irrelevant_interaction_records_preserve_observation()
     require(replay && replay->resume_cursor == page->resume_cursor && replay->observations.size() == 3,
         "accepted observer facts remain replayable at their original cursor");
     require(retire(observer, nonce), "reader fixture retires its native observation owner");
+}
+
+void model_only_wire_reaches_the_shared_observer()
+{
+    namespace observation = vnm::filesystem_observation;
+    Workspace workspace;
+    const auto wire = workspace.m_root / "sessions/workspace/session/agents/main/wire.jsonl";
+    fs::create_directories(wire.parent_path());
+    write_bytes(wire, R"({"type":"llm.request","agentId":"main","kind":"loop","model":"historical"})" "\n");
+    auto service = std::make_shared<observation::Service>();
+    observation::Configuration options;
+    options.general_interval = std::chrono::milliseconds(25);
+    kimi::Lifecycle_observer observer(service, options);
+    const auto nonce = addon::random_nonce_hex();
+    require(reserve(observer, nonce), "reserve Kimi model observer");
+    auto start = start_request(workspace, nonce);
+    start.event.body.set("interaction_frontier",
+        kimi::capture_interaction_frontier(kimi::path_string(workspace.m_root), "session"));
+    observer.classify(start);
+    std::atomic<unsigned> wakes = 0;
+    Observe_window window(observer, workspace, nonce, [&] { ++wakes; });
+    write_bytes(wire, R"({"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"native-root","modelAlias":"scripted-alias"})" "\n", true);
+    require(wait_until([&] { return wakes.load() > 0; }),
+        "a root request without a lifecycle event must wake the host inside the observe window");
+    const auto page = poll(observer, nonce, {}, 1, addon::k_model_state_version);
+    require(page && page->model_updates.size() == 1, "the poll triggered by progress must contain the root model");
+    const auto& sample = page->model_updates.front();
+    require(page->observations.empty() && page->resume_cursor == nonce + ":0" && sample.model == "native-root" &&
+        sample.provider.empty() && sample.transition_nonce == nonce && sample.sequence == fs::file_size(wire),
+        "the page must preserve source order, root identity, and the native model without a backend");
+    const auto unrequested = poll(observer, nonce);
+    require(unrequested && unrequested->model_updates.empty(), "a host without model negotiation receives no model");
 }
 
 void inventory_growth_preserves_admitted_source()
@@ -1195,6 +1233,7 @@ int main(int argc, char** argv)
             return 0;
         }
         irrelevant_interaction_records_preserve_observation();
+        model_only_wire_reaches_the_shared_observer();
         inventory_growth_preserves_admitted_source();
         retained_interaction_capacity_preserves_resolution();
         capacity_preserves_admitted_attention_and_root_end();

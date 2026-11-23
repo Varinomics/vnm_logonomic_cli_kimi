@@ -134,6 +134,10 @@ struct Binding final : addon::Filesystem_lifecycle_binding
 
     observation::Subscription_options interests(const addon::Filesystem_lifecycle_bindings& bindings) override;
     bool reconcile(addon::Invocation_context* invocation) override;
+    std::optional<addon::Model_update> root_model_observation() const override
+    {
+        return interactions ? interactions->model_observation() : std::nullopt;
+    }
     void release() override
     {
         path.reset();
@@ -352,7 +356,7 @@ bool scan(Binding& binding, addon::Invocation_context* invocation)
     if (complete && binding.interactions) {
         std::vector<addon::Lifecycle_observation> interactions;
         complete = binding.interactions->acquire(binding.interaction_inventory, interactions,
-            [&] { return invocation && invocation->cancel_requested(); });
+            [&] { return invocation && invocation->cancel_requested(); }, binding.nonce);
         enqueue(binding, std::move(interactions));
     }
     return complete;

@@ -29,6 +29,7 @@ Wire_record_kind selected_kind(std::string_view type)
     if (type == "metadata")     { return Wire_record_kind::METADATA; }
     if (type == "forked")       { return Wire_record_kind::FORKED;   }
     if (type == "usage.record") { return Wire_record_kind::USAGE;    }
+    if (type == "llm.request")  { return Wire_record_kind::MODEL_REQUEST; }
     return Wire_record_kind::OTHER;
 }
 

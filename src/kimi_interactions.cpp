@@ -240,6 +240,25 @@ struct Interaction_reader::State
     std::string root;
     std::map<std::string, Stream> streams;
     std::map<std::string, Request> requests;
+    std::optional<addon::Model_update> model;
+
+    void accept_main_model(const Json& record, std::string_view source_nonce, std::uint64_t source_offset)
+    {
+        if (json_util::text(record, "agentId") != "main" || json_util::text(record, "kind") != "loop") {
+            return;
+        }
+        addon::Model_update update;
+        update.provider_session_id = session;
+        update.transition_nonce    = source_nonce;
+        update.sequence            = source_offset;
+        update.status              = addon::Model_status::CONFIRMED;
+        // Kimi's "provider" names the request protocol even for another backend.
+        update.model               = json_util::text(record, "model");
+        update.source              = "kimi.llm.request";
+        if (addon::is_valid_model_update(update)) {
+            model = std::move(update);
+        }
+    }
 
     void accept(const Json& record, const std::string& agent,
         std::vector<addon::Lifecycle_observation>& observations)
@@ -377,8 +396,14 @@ Interaction_reader::Interaction_reader(std::string session, const Json& frontier
 
 Interaction_reader::~Interaction_reader() = default;
 
+std::optional<addon::Model_update> Interaction_reader::model_observation() const
+{
+    return m_state->model;
+}
+
 bool Interaction_reader::acquire(const Interaction_inventory& inventory,
-    std::vector<addon::Lifecycle_observation>& observations, const std::function<bool()>& cancelled)
+    std::vector<addon::Lifecycle_observation>& observations, const std::function<bool()>& cancelled,
+    std::string_view source_nonce)
 {
     const auto root = root_digest(inventory);
     if (!root.empty()) {
@@ -420,7 +445,9 @@ bool Interaction_reader::acquire(const Interaction_inventory& inventory,
             }
             stream.record_bytes += part.size();
             stream.envelope.append(part);
-            if (!stream.envelope.type_known() || stream.envelope.kind() == Wire_record_kind::INTERACTION) {
+            if (!stream.envelope.type_known() || stream.envelope.kind() == Wire_record_kind::INTERACTION ||
+                (wire.agent_id == "main" && stream.envelope.kind() == Wire_record_kind::MODEL_REQUEST))
+            {
                 stream.record_digest.update(part);
             }
         };
@@ -429,21 +456,30 @@ bool Interaction_reader::acquire(const Interaction_inventory& inventory,
                 if (!stream.envelope.finish()) {
                     throw std::runtime_error("invalid_interaction_wire_record");
                 }
-                if (stream.envelope.kind() == Wire_record_kind::INTERACTION) {
-                    if (stream.record_bytes > k_record_bound) {
-                        throw std::runtime_error("interaction_record_capacity_exhausted");
-                    }
+                const bool interaction = stream.envelope.kind() == Wire_record_kind::INTERACTION;
+                const bool model = !source_nonce.empty() && wire.agent_id == "main" &&
+                    stream.envelope.kind() == Wire_record_kind::MODEL_REQUEST;
+                if (interaction && stream.record_bytes > k_record_bound) {
+                    throw std::runtime_error("interaction_record_capacity_exhausted");
+                }
+                if (interaction || (model && stream.record_bytes <= k_record_bound)) {
                     const auto bytes = read_consumed_record(input,
                         newline_offset - stream.record_bytes, stream.record_bytes,
                         stream.offset, stream.record_digest.finish());
                     addon::Json_parse_limits limits;
-                    limits.max_bytes = k_record_bound;
+                    limits.max_bytes        = k_record_bound;
                     limits.max_string_bytes = k_record_bound;
                     const auto record = addon::parse_json(bytes, limits, nullptr);
-                    if (!record || !record->is_object()) {
-                        throw std::runtime_error("invalid_interaction_wire_record");
+                    if (interaction) {
+                        if (!record || !record->is_object()) {
+                            throw std::runtime_error("invalid_interaction_wire_record");
+                        }
+                        m_state->accept(*record, wire.agent_id, observations);
                     }
-                    m_state->accept(*record, wire.agent_id, observations);
+                    else
+                    if (record && record->is_object()) {
+                        m_state->accept_main_model(*record, source_nonce, newline_offset + 1);
+                    }
                 }
             }
             stream.envelope.reset();
