@@ -192,8 +192,10 @@ std::optional<addon::Launcher_candidate> discover_launcher(const addon::Discover
 
 std::optional<std::string> verified_program(const addon::Launcher_request& launcher,
     const std::vector<std::string>& supplied, const Environment& environment, std::string_view working_directory,
-    bool resume, addon::Invocation_context& context)
+    Native_entrypoint entrypoint, addon::Invocation_context& context)
 {
+    const bool resume = entrypoint == Native_entrypoint::RESUME;
+    const bool authoring = entrypoint == Native_entrypoint::AUTHORING;
     const auto args = addon::literal_argv(launcher.script_body);
     if (args.empty() || !is_kimi_program(args.front())) return std::nullopt;
     if (launcher.runner_key == "direct") {
@@ -225,7 +227,7 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
 #ifdef _WIN32
         return std::nullopt;
 #else
-        if (resume) return std::nullopt;
+        if (resume || authoring) return std::nullopt;
         std::ifstream file(*program, std::ios::binary);
         std::array<char, 257> bytes{};
         file.read(bytes.data(), bytes.size());
@@ -259,7 +261,8 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
         return result;
     };
     const auto before = fingerprint();
-    auto cache_context = json_util::object({{"identity", Json(before)}, {"working_directory", Json(working_directory)}, {"resume", Json(resume)}});
+    auto cache_context = json_util::object({{"identity", Json(before)}, {"working_directory", Json(working_directory)},
+        {"entrypoint", Json(static_cast<int>(entrypoint))}});
     auto cache_environment = Json::object();
     for (const auto& [name, value] : environment) cache_environment.set(name, Json(value));
     cache_context.set("environment", std::move(cache_environment));
@@ -274,9 +277,18 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
     }
     const auto deadline = std::min<std::int64_t>(context.request().deadline_ms,
         resume ? addon::limits::k_resume_prepare_deadline_ms : addon::limits::k_delegated_prepare_deadline_ms);
-    const auto output = probe({path_string(*program), resume ? "--help" : "--version"},
+    const auto output = probe({path_string(*program), resume || authoring ? "--help" : "--version"},
         environment, working_directory, static_cast<int>(deadline), context);
     if (!output || before.empty() || before != fingerprint()) return std::nullopt;
+    if (authoring) {
+        const auto& help = output->output;
+        if (help.find("--agent-file <") == std::string::npos || help.find("--skills-dir <") == std::string::npos ||
+            help.find("--output-format <") == std::string::npos || help.find("stream-json") == std::string::npos)
+        {
+            return std::nullopt;
+        }
+    }
+    else
     if (resume) {
         static const std::regex selector(R"((^|\n)[^\n]*--session[ \t]+\[id\]([ \t\r\n]|$))");
         if (!std::regex_search(output->output, selector)) return std::nullopt;

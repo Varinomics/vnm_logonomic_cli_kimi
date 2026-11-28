@@ -1,4 +1,5 @@
 #include "kimi_accounts.h"
+#include "kimi_authoring.h"
 #include "kimi_execution_context.h"
 #include "kimi_guidance.h"
 #include "kimi_interactions.h"
@@ -43,8 +44,11 @@ bool asks_changed_files(const Json& body)
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc >= 2 && std::string_view(argv[1]) == "--authoring-print") {
+        return kimi::run_authoring_print(argc, argv);
+    }
     addon::Contract_failure failure;
     const auto environment = addon::read_helper_environment(&failure);
     // Installed hook blocks also run when Kimi is launched outside Logonomic.

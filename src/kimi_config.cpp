@@ -1,4 +1,5 @@
 #include "kimi_config.h"
+#include "kimi_json.h"
 
 #include <logonomic_cli_addon/package_source.h>
 #include <toml++/toml.hpp>
@@ -242,6 +243,38 @@ bool has_start_hook(const std::string& home)
 {
     const auto config = read_config(addon::path_from_utf8(home) / "config.toml");
     return updated_hooks(config, true) == config;
+}
+
+bool authoring_profile_admitted(const fs::path& home, const fs::path& workspace)
+{
+    // These three sources feed Kimi's hook runner and native MCP registry.
+    // Authentication stays in Kimi's own profile. Configuration bytes never
+    // leave the adapter or enter diagnostics.
+    if (!home.is_absolute() || !workspace.is_absolute()) return false;
+    const auto config = toml::parse(read_config(home / "config.toml"));
+    if (const auto hooks = config.get("hooks"); hooks && (!hooks->is_array() || !hooks->as_array()->empty())) {
+        return false;
+    }
+    const fs::path installed = home / "plugins" / "installed.json";
+    if (fs::exists(installed)) {
+        const auto data = addon::json::parse(read_config(installed));
+        if (!data || !addon::json::member(*data, "plugins").is_array()) return false;
+        for (const auto& plugin : addon::json::member(*data, "plugins").as_array()) {
+            if (addon::json::member(plugin, "enabled") != Json(false)) return false;
+        }
+    }
+    const auto admits_mcp = [](const fs::path& path) {
+        if (!fs::exists(path)) return true;
+        const auto data = addon::json::parse(read_config(path));
+        if (!data || !data->is_object()) return false;
+        const auto servers = data->find("mcpServers");
+        return !servers || (servers->is_object() && servers->as_object().empty());
+    };
+    auto root = workspace;
+    while (!fs::exists(root / ".git") && root.has_relative_path()) root = root.parent_path();
+    if (!fs::exists(root / ".git")) root = workspace;
+    return admits_mcp(home / "mcp.json") && admits_mcp(root / ".mcp.json") &&
+        admits_mcp(workspace / ".kimi-code" / "mcp.json");
 }
 
 } // namespace kimi

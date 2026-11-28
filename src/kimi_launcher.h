@@ -33,8 +33,9 @@ bool is_kimi_invocation(const std::vector<std::string>& argv);
 bool recognize_launcher(std::string_view script, std::string_view runner);
 std::optional<logonomic::cli_addon::Launcher_candidate> discover_launcher(
     const logonomic::cli_addon::Discover_request& request);
+enum class Native_entrypoint { ACP, RESUME, AUTHORING };
 std::optional<std::string> verified_program(const logonomic::cli_addon::Launcher_request& launcher,
     const std::vector<std::string>& argv, const Environment& environment, std::string_view working_directory,
-    bool resume, logonomic::cli_addon::Invocation_context& context);
+    Native_entrypoint entrypoint, logonomic::cli_addon::Invocation_context& context);
 
 } // namespace kimi

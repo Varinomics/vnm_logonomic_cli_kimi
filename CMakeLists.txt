@@ -74,7 +74,7 @@ endfunction()
 
 set(kimi_provider_sources
     src/kimi_accounts.cpp src/kimi_usage.cpp src/kimi_usage_correction.cpp
-    src/kimi_acp.cpp src/kimi_config.cpp src/kimi_execution_context.cpp src/kimi_guidance.cpp
+    src/kimi_acp.cpp src/kimi_authoring.cpp src/kimi_config.cpp src/kimi_execution_context.cpp src/kimi_guidance.cpp
     src/kimi_interactions.cpp src/kimi_launcher.cpp src/kimi_observer.cpp src/kimi_preparation.cpp
     src/kimi_quota.cpp src/kimi_quota_direct.cpp src/kimi_resume.cpp
     src/kimi_wire.cpp src/kimi_wire_record.cpp)
@@ -92,8 +92,8 @@ add_executable(kimi_adapter src/adapter.cpp)
 target_compile_definitions(kimi_adapter PRIVATE LOGONOMIC_CLI_ADDON_ADAPTER_VERSION="${PROJECT_VERSION}")
 target_link_libraries(kimi_adapter PRIVATE kimi_provider)
 kimi_target(kimi_adapter)
-add_executable(kimi_helper src/kimi_helper.cpp)
-target_link_libraries(kimi_helper PRIVATE kimi_provider)
+add_executable(kimi_helper src/kimi_helper.cpp src/kimi_authoring_print.cpp)
+target_link_libraries(kimi_helper PRIVATE kimi_provider Qt6::Core)
 kimi_target(kimi_helper)
 logonomic_cli_addon_add_launch_bridge(kimi_launch_bridge)
 kimi_target(kimi_launch_bridge)

@@ -103,7 +103,7 @@ void prepare_delegated(addon::Invocation_context& context)
     auto environment = environment_pairs(request->context.launch_environment->effective_environment);
     (void)bound_home(*request->context.launch_environment, request->context.working_directory, request->context.account_context);
     const auto program = verified_program(request->context.launcher, request->context.launcher_argv,
-        environment, request->context.working_directory, false, context);
+        environment, request->context.working_directory, Native_entrypoint::ACP, context);
     if (!program) { unavailable(context); return; }
     addon::Delegated_prepare_result result;
     result.profile_storage = request->context.profile_storage;
@@ -162,7 +162,7 @@ void prepare_resume(addon::Invocation_context& context)
         // recovery of an unreadable or newer store; inspection never deletes it.
     }
     const auto program = verified_program(request->context.launcher, request->context.launcher_argv,
-        environment, request->context.working_directory, true, context);
+        environment, request->context.working_directory, Native_entrypoint::RESUME, context);
     if (!program) { unavailable(context); return; }
     if (!has_start_hook(home)) {
         context.fail(addon::Result_status::UNAVAILABLE, "session_start_hook_unavailable");

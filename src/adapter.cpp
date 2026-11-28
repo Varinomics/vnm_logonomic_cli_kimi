@@ -1,5 +1,6 @@
 #include "kimi_acp.h"
 #include "kimi_accounts.h"
+#include "kimi_authoring.h"
 #include "kimi_config.h"
 #include "kimi_json.h"
 #include "kimi_launcher.h"
@@ -91,6 +92,10 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         else
         if (capability == "quota") kimi::handle_quota(context);
         else
+        if (capability == addon::k_authoring_session_capability_id) {
+            kimi::handle_authoring(context);
+        }
+        else
         if (capability == "structured-session" && request.operation == "inspect") {
             addon::Contract_failure failure;
             const auto inspection = addon::decode_structured_inspect_request(request.payload, &failure);
@@ -178,6 +183,7 @@ int main()
         {"presentation", 1}, {"launcher-discovery", 1}, {"profile-storage", 1},
         {"lifecycle-correlation-lifetime", 1}, {"execution-context", 1},
         {"launch-preparation", 3}, {"structured-session", 3}, {"delegated-session", 3},
+        {addon::k_authoring_session_capability_id, addon::k_authoring_session_version},
         {addon::k_delegated_model_selection_capability_id, addon::k_delegated_model_selection_version},
         {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
         {"quota", 2}, {"quota-failure", 1}, {"lifecycle-events", 2},

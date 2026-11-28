@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "payload": {
+    "environment_names": [
+      "KIMI_CODE_HOME",
+      "KIMI_CODE_OAUTH_HOST",
+      "KIMI_CODE_BASE_URL",
+      "KIMI_DISABLE_TELEMETRY",
+      "KIMI_MODEL_NAME",
+      "KIMI_MODEL_PROVIDER",
+      "KIMI_MODEL_BASE_URL",
+      "KIMI_MODEL_API_KEY",
+      "SystemRoot",
+      "WINDIR",
+      "TEMP",
+      "TMP"
+    ]
+  },
+  "capability_id": "authoring-session"
+}
