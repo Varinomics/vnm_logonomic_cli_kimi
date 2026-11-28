@@ -45,8 +45,7 @@ addon::Account_record account(const fs::path& profile)
 
 } // namespace
 
-fs::path profile_for_environment(const addon::Launch_environment& launch,
-    std::string_view normalization_directory, std::string_view default_home_fallback)
+fs::path profile_selector(const addon::Launch_environment& launch, std::string_view default_home_fallback)
 {
     const bool windows = launch.platform_id.starts_with("windows-");
     const auto value = [&](std::string_view name) -> const addon::Json_value* {
@@ -65,7 +64,13 @@ fs::path profile_for_environment(const addon::Launch_environment& launch,
         const auto* home = value(windows ? "USERPROFILE" : "HOME");
         profile = path_string(addon::path_from_utf8(home ? home->as_string() : default_home_fallback) / ".kimi-code");
     }
-    const auto path = addon::path_from_utf8(profile);
+    return addon::path_from_utf8(profile);
+}
+
+fs::path profile_for_environment(const addon::Launch_environment& launch,
+    std::string_view normalization_directory, std::string_view default_home_fallback)
+{
+    const auto path = profile_selector(launch, default_home_fallback);
     const auto resolved = path.is_absolute() ? path : addon::path_from_utf8(normalization_directory) / path;
     if (!resolved.is_absolute()) throw std::runtime_error("profile_normalization_unavailable");
     return normalize(resolved);

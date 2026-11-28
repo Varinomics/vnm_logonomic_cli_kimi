@@ -10,6 +10,7 @@
 #include "kimi_usage.h"
 
 #include <logonomic_cli_addon/adapter_runtime.h>
+#include <logonomic_cli_addon/authoring_availability.h>
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/profile_storage.h>
 #include <logonomic_cli_addon/provider_event_diagnostic.h>
@@ -94,6 +95,10 @@ void invoke(addon::Invocation_context& context, kimi::Lifecycle_observer& observ
         else
         if (capability == addon::k_authoring_session_capability_id) {
             kimi::handle_authoring(context);
+        }
+        else
+        if (capability == addon::k_authoring_availability_capability_id) {
+            kimi::check_authoring_availability(context);
         }
         else
         if (capability == "structured-session" && request.operation == "inspect") {
@@ -184,6 +189,7 @@ int main()
         {"lifecycle-correlation-lifetime", 1}, {"execution-context", 1},
         {"launch-preparation", 3}, {"structured-session", 3}, {"delegated-session", 3},
         {addon::k_authoring_session_capability_id, addon::k_authoring_session_version},
+        {addon::k_authoring_availability_capability_id, addon::k_authoring_availability_version},
         {addon::k_delegated_model_selection_capability_id, addon::k_delegated_model_selection_version},
         {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
         {"quota", 2}, {"quota-failure", 1}, {"lifecycle-events", 2},

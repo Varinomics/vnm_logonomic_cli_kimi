@@ -245,36 +245,63 @@ bool has_start_hook(const std::string& home)
     return updated_hooks(config, true) == config;
 }
 
-bool authoring_profile_admitted(const fs::path& home, const fs::path& workspace)
+std::optional<Authoring_restriction> authoring_profile_restriction(const fs::path& home,
+    const std::optional<fs::path>& workspace)
 {
-    // These three sources feed Kimi's hook runner and native MCP registry.
-    // Authentication stays in Kimi's own profile. Configuration bytes never
-    // leave the adapter or enter diagnostics.
-    if (!home.is_absolute() || !workspace.is_absolute()) return false;
-    const auto config = toml::parse(read_config(home / "config.toml"));
-    if (const auto hooks = config.get("hooks"); hooks && (!hooks->is_array() || !hooks->as_array()->empty())) {
-        return false;
-    }
-    const fs::path installed = home / "plugins" / "installed.json";
-    if (fs::exists(installed)) {
-        const auto data = addon::json::parse(read_config(installed));
-        if (!data || !addon::json::member(*data, "plugins").is_array()) return false;
-        for (const auto& plugin : addon::json::member(*data, "plugins").as_array()) {
-            if (addon::json::member(plugin, "enabled") != Json(false)) return false;
+    constexpr Authoring_restriction unreadable{"authoring_settings_unavailable",
+        "Kimi could not read or verify the hook, plugin or MCP settings for text-only authoring."};
+    try {
+        if (!home.is_absolute() || (workspace && !workspace->is_absolute())) return unreadable;
+        const auto config = toml::parse(read_config(home / "config.toml"));
+        if (const auto hooks = config.get("hooks")) {
+            if (!hooks->is_array()) return unreadable;
+            if (!hooks->as_array()->empty()) {
+                const auto* hook = (*hooks->as_array())[0].as_table();
+                if (!hook) return unreadable;
+                const auto* event = (*hook)["event"].as_string();
+                const auto* command = (*hook)["command"].as_string();
+                if (!event || event->get().empty() || !command || command->get().empty()) return unreadable;
+                return Authoring_restriction{"authoring_callbacks_configured",
+                    "Text-only authoring is unavailable because this Kimi profile has hooks that can run commands."};
+            }
         }
+        const auto installed = home / "plugins" / "installed.json";
+        if (fs::exists(installed)) {
+            const auto data = addon::json::parse(read_config(installed));
+            if (!data || !addon::json::member(*data, "plugins").is_array()) return unreadable;
+            for (const auto& plugin : addon::json::member(*data, "plugins").as_array()) {
+                const auto& enabled = addon::json::member(plugin, "enabled");
+                if (!enabled.is_boolean()) return unreadable;
+                if (enabled.as_boolean()) {
+                    return Authoring_restriction{"authoring_callbacks_configured",
+                        "Text-only authoring is unavailable because this Kimi profile has an enabled plugin."};
+                }
+            }
+        }
+        const auto mcp_restriction = [&](const fs::path& path) -> std::optional<Authoring_restriction> {
+            if (!fs::exists(path)) return std::nullopt;
+            const auto data = addon::json::parse(read_config(path));
+            if (!data || !data->is_object()) return unreadable;
+            const auto servers = data->find("mcpServers");
+            if (servers && !servers->is_object()) return unreadable;
+            if (servers && !servers->as_object().empty()) {
+                return Authoring_restriction{"authoring_callbacks_configured",
+                    "Text-only authoring is unavailable because Kimi has an MCP server configured."};
+            }
+            return std::nullopt;
+        };
+        const auto profile_mcp = mcp_restriction(home / "mcp.json");
+        if (profile_mcp || !workspace) return profile_mcp;
+        auto root = *workspace;
+        while (!fs::exists(root / ".git") && root.has_relative_path()) root = root.parent_path();
+        if (!fs::exists(root / ".git")) root = *workspace;
+        if (const auto project_mcp = mcp_restriction(root / ".mcp.json")) return project_mcp;
+        return mcp_restriction(*workspace / ".kimi-code" / "mcp.json");
     }
-    const auto admits_mcp = [](const fs::path& path) {
-        if (!fs::exists(path)) return true;
-        const auto data = addon::json::parse(read_config(path));
-        if (!data || !data->is_object()) return false;
-        const auto servers = data->find("mcpServers");
-        return !servers || (servers->is_object() && servers->as_object().empty());
-    };
-    auto root = workspace;
-    while (!fs::exists(root / ".git") && root.has_relative_path()) root = root.parent_path();
-    if (!fs::exists(root / ".git")) root = workspace;
-    return admits_mcp(home / "mcp.json") && admits_mcp(root / ".mcp.json") &&
-        admits_mcp(workspace / ".kimi-code" / "mcp.json");
+    catch (const std::exception&) {
+        // Parser diagnostics and file contents can contain private settings.
+        return unreadable;
+    }
 }
 
 } // namespace kimi

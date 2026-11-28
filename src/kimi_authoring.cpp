@@ -4,6 +4,7 @@
 #include "kimi_json.h"
 #include "kimi_launcher.h"
 
+#include <logonomic_cli_addon/authoring_availability.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
@@ -13,6 +14,13 @@ namespace {
 
 namespace addon = logonomic::cli_addon;
 namespace json  = logonomic::cli_addon::json;
+
+constexpr Authoring_restriction launcher_restriction{"authoring_launcher_unavailable",
+    "Text-only authoring requires a direct Kimi command with only an optional model argument."};
+constexpr Authoring_restriction account_restriction{"account_profile_mismatch",
+    "The selected Kimi account does not match this launcher's profile."};
+constexpr Authoring_restriction relative_profile{"authoring_profile_relative",
+    "Set KIMI_CODE_HOME to an absolute profile path so text-only authoring can use it from its temporary directory."};
 
 void prepare_authoring(addon::Invocation_context& invocation)
 {
@@ -24,19 +32,23 @@ void prepare_authoring(addon::Invocation_context& invocation)
     }
     const auto& context = request->context;
     const auto words = addon::literal_argv(context.launcher.script_body);
-    if (!context.launch_environment || request->prompt.empty() || !addon::is_valid_utf8(request->prompt) ||
-        (words.size() != 1 && (words.size() != 3 || (words[1] != "-m" && words[1] != "--model"))))
-    {
-        invocation.fail(addon::Result_status::UNAVAILABLE, "authoring_launcher_unavailable");
+    if (!context.launch_environment || request->prompt.empty() || !addon::is_valid_utf8(request->prompt)) {
+        invocation.fail(addon::Result_status::UNAVAILABLE, "authoring_request_unavailable",
+            "Kimi needs a launch environment and a valid text prompt for authoring.");
+        return;
+    }
+    if (!authoring_launcher_supported(context.launcher, words)) {
+        invocation.fail(addon::Result_status::UNAVAILABLE, launcher_restriction.code, launcher_restriction.detail);
         return;
     }
     const auto home = profile_for_environment(*context.launch_environment, context.working_directory);
     if (context.account_context && !account_matches_profile(*context.account_context, home)) {
-        invocation.fail(addon::Result_status::FAILED, "account_profile_mismatch");
+        const auto& reason = profile_selector(*context.launch_environment).is_absolute() ? account_restriction : relative_profile;
+        invocation.fail(addon::Result_status::FAILED, reason.code, reason.detail);
         return;
     }
-    if (!authoring_profile_admitted(home, addon::path_from_utf8(context.working_directory))) {
-        invocation.fail(addon::Result_status::UNAVAILABLE, "authoring_callbacks_configured");
+    if (const auto restriction = authoring_profile_restriction(home, addon::path_from_utf8(context.working_directory))) {
+        invocation.fail(addon::Result_status::UNAVAILABLE, restriction->code, restriction->detail);
         return;
     }
     auto environment = environment_pairs(context.launch_environment->effective_environment);
@@ -44,7 +56,8 @@ void prepare_authoring(addon::Invocation_context& invocation)
     const auto program = verified_program(context.launcher, context.launcher_argv, environment,
         context.working_directory, Native_entrypoint::AUTHORING, invocation);
     if (!program) {
-        invocation.fail(addon::Result_status::UNAVAILABLE, "authoring_launcher_unavailable");
+        invocation.fail(addon::Result_status::UNAVAILABLE, "authoring_launcher_unavailable",
+            "Kimi could not verify this launcher's native text-only authoring mode.");
         return;
     }
     addon::Structured_prepare_result result;
@@ -116,6 +129,47 @@ void inspect_authoring(addon::Invocation_context& invocation)
 }
 
 } // namespace
+
+void check_authoring_availability(addon::Invocation_context& invocation)
+{
+    if (invocation.request().operation != addon::k_authoring_availability_check_operation) {
+        invocation.reject_unknown_operation();
+        return;
+    }
+    addon::Contract_failure failure;
+    const auto request = addon::decode_authoring_availability_request(invocation.request().payload, &failure);
+    if (!request) {
+        invocation.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
+        return;
+    }
+    const auto& selection = request->launcher;
+    std::optional<Authoring_restriction> restriction;
+    if (!authoring_launcher_supported(selection.launcher, addon::literal_argv(selection.launcher.script_body))) {
+        restriction = launcher_restriction;
+    }
+    else {
+        try {
+            // Discovery knows the launcher's original directory. It cannot
+            // carry that base into the native turn's fresh working directory.
+            const auto home = profile_selector(selection.launch_environment).lexically_normal();
+            if (!home.is_absolute()) {
+                restriction = relative_profile;
+            }
+            else if (request->account_context && !account_matches_profile(*request->account_context, home)) {
+                restriction = account_restriction;
+            }
+            else {
+                restriction = authoring_profile_restriction(home);
+            }
+        }
+        catch (const std::exception&) {
+            restriction = Authoring_restriction{"authoring_profile_unavailable",
+                "Kimi could not locate the selected profile for text-only authoring."};
+        }
+    }
+    invocation.succeed(addon::encode_authoring_availability_result(
+        {!restriction, restriction ? restriction->detail : "", request->account_context}));
+}
 
 void handle_authoring(addon::Invocation_context& invocation)
 {

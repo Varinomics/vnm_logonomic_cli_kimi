@@ -1,0 +1,7 @@
+{
+  "capability_id": "authoring-availability",
+  "version": 1,
+  "payload": {
+    "environment_names": ["KIMI_CODE_HOME"]
+  }
+}

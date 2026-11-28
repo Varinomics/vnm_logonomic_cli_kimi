@@ -31,6 +31,8 @@ std::string path_string(const std::filesystem::path& path);
 bool is_kimi_program(std::string_view value);
 bool is_kimi_invocation(const std::vector<std::string>& argv);
 bool recognize_launcher(std::string_view script, std::string_view runner);
+bool authoring_launcher_supported(const logonomic::cli_addon::Launcher_request& launcher,
+    const std::vector<std::string>& words);
 std::optional<logonomic::cli_addon::Launcher_candidate> discover_launcher(
     const logonomic::cli_addon::Discover_request& request);
 enum class Native_entrypoint { ACP, RESUME, AUTHORING };

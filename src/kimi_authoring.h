@@ -5,6 +5,7 @@
 namespace kimi {
 
 void handle_authoring(logonomic::cli_addon::Invocation_context& context);
+void check_authoring_availability(logonomic::cli_addon::Invocation_context& context);
 int run_authoring_print(int argc, char** argv);
 
 } // namespace kimi

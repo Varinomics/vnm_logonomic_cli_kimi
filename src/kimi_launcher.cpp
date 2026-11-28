@@ -166,11 +166,24 @@ std::optional<Launcher_command> recognize(std::string_view script, std::string_v
     return std::nullopt;
 }
 
+bool literal_powershell(const addon::Launcher_request& launcher)
+{
+    return launcher.runner_key == "powershell" && launcher.script_body.find_first_not_of(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t-_. /\\:=") == std::string::npos;
+}
+
 } // namespace
 
 bool recognize_launcher(std::string_view script, std::string_view runner)
 {
     return recognize(script, runner, 8).has_value();
+}
+
+bool authoring_launcher_supported(const addon::Launcher_request& launcher, const std::vector<std::string>& words)
+{
+    return (launcher.runner_key == "direct" || literal_powershell(launcher)) && !words.empty() &&
+        is_kimi_program(words.front()) && (words.size() == 1 || (words.size() == 3 &&
+        (words[1] == "-m" || words[1] == "--model") && !words[2].empty() && !words[2].starts_with('-')));
 }
 
 std::optional<addon::Launcher_candidate> discover_launcher(const addon::Discover_request& request)
@@ -202,8 +215,7 @@ std::optional<std::string> verified_program(const addon::Launcher_request& launc
         if (args != supplied) return std::nullopt;
     }
     else {
-        if (launcher.runner_key != "powershell" || launcher.script_body.find_first_not_of(
-                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \t-_. /\\:=") != std::string::npos) return std::nullopt;
+        if (!literal_powershell(launcher)) return std::nullopt;
         if (supplied != std::vector<std::string>{"powershell.exe", "-NoLogo", "-Command", launcher.script_body}) return std::nullopt;
     }
     for (std::size_t index = 1; index < args.size(); ++index) {

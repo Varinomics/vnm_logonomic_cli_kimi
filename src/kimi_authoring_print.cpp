@@ -48,7 +48,7 @@ int run_authoring_print(int argc, char** argv)
     }
     if (bytes.isEmpty()) return 2;
     try {
-        if (!authoring_profile_admitted(addon::path_from_utf8(qEnvironmentVariable("KIMI_CODE_HOME").toStdString()),
+        if (authoring_profile_restriction(addon::path_from_utf8(qEnvironmentVariable("KIMI_CODE_HOME").toStdString()),
                 addon::path_from_utf8(scratch.path().toStdString()))) return 2;
     }
     catch (const std::exception&) {
